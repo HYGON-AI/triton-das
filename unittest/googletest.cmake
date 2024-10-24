@@ -8,7 +8,9 @@ endif()
 
 FetchContent_Declare(
   googletest
-  GIT_REPOSITORY https://github.com/google/googletest.git
+  # Use repo hosted on gitee instead for a better network connection.
+  # GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
   GIT_TAG release-1.12.1
   )
 
