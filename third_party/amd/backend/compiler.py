@@ -184,6 +184,22 @@ class HIPBackend(BaseBackend):
         raise Exception("ROCm linker /opt/rocm/llvm/bin/ld.lld not found. Set 'TRITON_HIP_LLD_PATH' to its path.")
 
     @staticmethod
+    def path_to_rocm_clang():
+        # Check env path for clang
+        clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH")
+        if clang_env_path is not None:
+            clang = Path(clang_env_path)
+            if clang.is_file():
+                return clang
+        clang = Path("/opt/rocm/llvm/bin/clang")
+        if clang.is_file():
+            return clang
+        clang = Path("/usr/bin/clang")
+        if clang.is_file():
+            return clang
+        raise Exception("ROCm compiler /opt/rocm/llvm/bin/clang not found. Set 'TRITON_HIP_CLANG_PATH' to its path.")
+
+    @staticmethod
     def make_ttir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
