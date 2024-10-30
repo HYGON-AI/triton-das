@@ -107,12 +107,15 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,
               BLOCK_M: tl.constexpr,
               BLOCK_N: tl.constexpr,
               pre_load_v: tl.constexpr,
+              GRID_AXIS_HZ: tl.constexpr,
               ):
     #print("---------------------------11111")
-    #x方向的线程块id，
-    start_m = tl.program_id(0)
-    #y方向的线程块id
-    off_hz = tl.program_id(1)
+    if GRID_AXIS_HZ == 0:
+        start_m = tl.program_id(1)
+        off_hz = tl.program_id(0)
+    else:
+        start_m = tl.program_id(0)
+        off_hz = tl.program_id(1)
     off_kh = off_hz // q_num_per_group
     #print("---------------------------11111-------",start_m,off_hz)
     #x方向的线程块能处理的所有数据大小，既N_CTX*BLOCK_DMODEL,(4096,128),
@@ -600,11 +603,20 @@ class _attention(torch.autograd.Function):
         #casual=false stage=1
         stage = 3 if causal else 1
         #分配线程块
-        grid = lambda META: (
-            triton.cdiv(q.shape[2], META['BLOCK_M']),
-            q.shape[0] * q.shape[1],
-            1
-        )
+        if k_head < q_head:
+            grid = lambda META: (
+                q.shape[0] * q.shape[1],
+                triton.cdiv(q.shape[2], META['BLOCK_M']),
+                1
+            )
+            grid_axis_hz = 0
+        else:
+            grid = lambda META: (
+                triton.cdiv(q.shape[2], META['BLOCK_M']),
+                q.shape[0] * q.shape[1],
+                1
+            )
+            grid_axis_hz = 1
         #M用于保留每行的最大值。所以M的维度就是[BATCH*N_HEAD,N_CTX]
         M = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         _attn_fwd[grid](
@@ -617,6 +629,7 @@ class _attention(torch.autograd.Function):
             N_CTX=q.shape[2],
             BLOCK_DMODEL=Lk,
             STAGE=stage,
+            GRID_AXIS_HZ=grid_axis_hz,
         )
 
         ## restore the grid for bwd kernel
