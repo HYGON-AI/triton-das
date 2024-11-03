@@ -5,7 +5,7 @@ namespace mlir::triton::AMD {
 
 ISAFamily deduceISAFamily(llvm::StringRef arch) {
   // Hygon ISAs
-  if (arch == "gfx928"/* ZD */ || arch == "gfx936"/* BMZ */)
+  if (arch == "gfx926"/* KM */ || arch == "gfx928"/* ZD */ || arch == "gfx936"/* BMZ */)
     return ISAFamily::CDNA3;
 
   llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::parseArchAMDGCN(arch);

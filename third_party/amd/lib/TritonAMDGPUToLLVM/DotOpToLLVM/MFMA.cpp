@@ -63,10 +63,16 @@ struct DotOpMFMAConversionHelper {
   Value generateMFMAOp(StringRef mfmaInsnName, Value valA, Value valB,
                        Value valC) const {
     auto resType = valC.getType();
-    Value zeroFlag = i32_val(0);
+    // Value zeroFlag = i32_val(0);
     OperationState loweredOp(loc, mfmaInsnName);
     loweredOp.addTypes(resType);
-    loweredOp.addOperands({valA, valB, valC, zeroFlag, zeroFlag, zeroFlag});
+    // loweredOp.addOperands({valA, valB, valC, zeroFlag, zeroFlag, zeroFlag});
+    if (mfmaInsnName == "rocdl.mmac.16x16x4.f32") {
+      loweredOp.addOperands({valA, valB, valC, i32_val(0)});
+    } else {
+      loweredOp.addOperands({valA, valB, valC});
+    }
+
     return rewriter.create(loweredOp)->getResult(0);
   }
 
@@ -326,9 +332,20 @@ struct DotOpMFMAConversionHelper {
 
           Value convertedElems;
           if (type.isF32()) {
-            for (int k = 0; k < kpack; ++k)
-              dotOpVals[k][{b, i, j}] =
-                  extract_element(type, rawElems, i32_val(k));
+            // for (int k = 0; k < kpack; ++k)
+            //   dotOpVals[k][{b, i, j}] =
+            //       extract_element(type, rawElems, i32_val(k));
+            /* Hygon support: add mmac_f32_m16n16k8_f32 support */
+            if (kWidth == 1) {
+              for (int k = 0; k < kpack; ++k)
+                dotOpVals[k][{b, i, j}] = extract_element(type, rawElems, i32_val(k));
+            } else {
+              // mmac_f32_m16n16k8_f32 support
+              SmallVector<Value> vals = extractOperands(rawElems, kWidth, kBase, f32_ty);
+              for (int k = 0; k < kpack; ++k) {
+                dotOpVals[k][{b, i, j}] = vals[k];
+              }
+            }
           } else {
             SmallVector<Value> vals;
             if (type.getIntOrFloatBitWidth() == 8) {

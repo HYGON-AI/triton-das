@@ -762,10 +762,52 @@ emitOffsetForMmaLayoutV3(const NvidiaMmaEncodingAttr &mmaLayout,
   return ret;
 }
 
+SmallVector<Value>
+inline emitBaseIndexForMfmaLayoutMmacV1(Location loc, RewriterBase &rewriter,
+                                        const AMDMfmaEncodingAttr &mfmaLayout,
+                                        RankedTensorType type) {
+  auto shape = type.getShape();
+  auto _warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+  assert(_warpsPerCTA.size() == 2);
+  SmallVector<Value> warpsPerCTA = {i32_val(_warpsPerCTA[0]),
+                                    i32_val(_warpsPerCTA[1])};
+  unsigned mDim = mfmaLayout.getMDim();
+  unsigned nDim = mfmaLayout.getNDim();
+  assert(mDim == nDim && mDim == 16);
+
+  Value threadId = getThreadId(rewriter, loc);
+  Value warpSize = i32_val(triton::gpu::getWarpSize(mfmaLayout));
+  Value effectiveWarpSize = warpSize;
+
+  Value laneId = urem(threadId, effectiveWarpSize);
+
+  Value warpId = udiv(threadId, warpSize);
+  Value limitWarpId0 =
+      i32_val(std::max(static_cast<int64_t>(1), shape[0] / mDim));
+  Value warpId0 = urem(urem(warpId, warpsPerCTA[0]), limitWarpId0);
+  Value limitWarpId1 =
+      i32_val(std::max(static_cast<int64_t>(1), shape[1] / nDim));
+  Value warpId1 =
+      urem(urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]), limitWarpId1);
+
+  Value offWarp0 = mul(warpId0, i32_val(mDim));
+  Value offWarp1 = mul(warpId1, i32_val(nDim));
+
+  SmallVector<Value> multiDimBase(2);
+  multiDimBase[1] =
+      add(mul(i32_val(1), udiv(laneId, i32_val(mDim))), offWarp1);
+  multiDimBase[0] = add(urem(laneId, i32_val(mDim)), offWarp0);
+
+  return multiDimBase;
+}
+
 inline SmallVector<Value>
 emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
                            const AMDMfmaEncodingAttr &mfmaLayout,
                            RankedTensorType type) {
+  if (mfmaLayout.isMmacV1())
+    return emitBaseIndexForMfmaLayoutMmacV1(loc, rewriter, mfmaLayout, type);
+
   auto shape = type.getShape();
   auto rank = shape.size();
   assert(rank == 2 || rank == 3);
@@ -824,10 +866,36 @@ emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
   return multiDimBase;
 }
 
+inline void emitMfmaOffsetForCTAMmacV1(const AMDMfmaEncodingAttr &mfmaLayout,
+                          SmallVector<SmallVector<unsigned>> &offsets,
+                          unsigned bOff, unsigned ctaOffsetX, unsigned ctaOffsetY) {
+  auto mDim = mfmaLayout.getMDim();
+  auto nDim = mfmaLayout.getNDim();
+  assert(mDim == nDim && mDim == 16);
+
+  const unsigned elemsPerThreadPerGroup = 4;
+  const unsigned rowOrColOffset = 0;
+  auto warpSize = getWarpSize(mfmaLayout);
+  assert(warpSize == 64);
+  auto shapePerCta = getShapePerCTATile(mfmaLayout);
+  auto rank = shapePerCta.size();
+  assert(rank == 2 || rank == 3);
+  SmallVector<unsigned> elemOff(rank, bOff);
+  for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
+    elemOff[rank - 2] = ctaOffsetX * shapePerCta[rank - 2];
+    elemOff[rank - 1] =
+      ctaOffsetY * shapePerCta[rank - 1] + elem * (warpSize / mDim) + rowOrColOffset;
+    offsets.push_back(elemOff);
+  }
+}
+
 inline void emitMfmaOffsetForCTA(const AMDMfmaEncodingAttr &mfmaLayout,
                                  SmallVector<SmallVector<unsigned>> &offsets,
                                  unsigned bOff, unsigned ctaOffsetX,
                                  unsigned ctaOffsetY) {
+  if (mfmaLayout.isMmacV1())
+    return emitMfmaOffsetForCTAMmacV1(mfmaLayout, offsets, bOff, ctaOffsetX, ctaOffsetY);
+
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();
   assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||

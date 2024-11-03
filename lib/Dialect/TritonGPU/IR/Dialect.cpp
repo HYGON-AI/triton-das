@@ -796,7 +796,14 @@ AMDMfmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
   auto elemsPerThreadPerTile = (nonKDim == 16 ? 4 : 16);
   if (rank == 3)
     elemsPerThread[0] = ceil<unsigned>(shape[0], getWarpsPerCTA()[0]);
-  if (getIsTransposed()) {
+  if (isMmacV1()) {
+    assert((nonKDim == 16) && (elemsPerThreadPerTile == 4));
+    unsigned elemsCol = ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]) *
+                        elemsPerThreadPerTile;
+    unsigned elemsRow = ceil<unsigned>(shape[rank - 2], nonKDim * getWarpsPerCTA()[rank - 2]);
+    elemsPerThread[rank - 2] = elemsRow;
+    elemsPerThread[rank - 1] = elemsCol;
+  } else if (getIsTransposed()) {
     unsigned elemsCol =
         ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]) *
         elemsPerThreadPerTile;
@@ -1557,6 +1564,11 @@ void SharedEncodingAttr::print(AsmPrinter &printer) const {
 //===----------------------------------------------------------------------===//
 // TODO: there is a lot of common code with MmaEncoding here
 
+/* Hygon support: mmac has special C/D layout */
+bool AMDMfmaEncodingAttr::isMmacV1() const {
+  return getVersionMajor() == 3 && getVersionMinor() == 10;
+}
+
 SmallVector<unsigned>
 AMDMfmaEncodingAttr::getShapePerCTATile(ArrayRef<int64_t> tensorShape) const {
   auto warpsPerCTA = getWarpsPerCTA();
@@ -1584,6 +1596,11 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getWarpOrder() const {
 }
 SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadOrder() const {
   auto order = ::getOrder(*this);
+
+  // Hygon mmac layout always distributes threads to tensor values in column-major order.
+  if (isMmacV1())
+    return {0, 1};
+
   if (getIsTransposed())
     std::swap(order[0], order[1]);
   return order;
@@ -1592,6 +1609,16 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadsPerWarp() const {
   unsigned rows, cols;
   auto rank = ::getOrder(*this).size();
   SmallVector<unsigned> res(rank, 1);
+
+  if (isMmacV1()) {
+    // Hygon matrix core only supports 16x16xk matrix-multiplications which follow [16, 4] tile
+    // layout.
+    assert(getMDim() == 16 && getNDim() == 16);
+    res[rank - 2] = 16;
+    res[rank - 1] = 4;
+    return res;
+  }
+
   if (getMDim() == 32) {
     cols = 2;
     rows = 32;
@@ -1614,6 +1641,17 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getSizePerThread() const {
   unsigned rows, cols;
   auto rank = ::getOrder(*this).size();
   SmallVector<unsigned> res(rank, 1);
+
+  if (isMmacV1()) {
+    // The core of the mmac layout(C/D matrix core layout) is the 16x16 col-major tile of values,
+    // so each thread in a 64-threads warp operates on [batch, 1, 4] elements(whether consecutive
+    // or not).
+    assert(getMDim() == 16 && getNDim() == 16);
+    res[rank - 2] = 1;
+    res[rank - 1] = 4;
+    return res;
+  }
+
   if (getMDim() == 32) {
     rows = 16;
     cols = 1;

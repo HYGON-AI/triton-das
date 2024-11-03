@@ -14,6 +14,24 @@ namespace ttg = mlir::triton::gpu;
 namespace {
 using triton::AMD::ISAFamily;
 
+/* Hygon support: mmac has special C/D layout */
+enum class MfmaMmacVersion {
+  MFMA_MMAC_NONE = 0,
+  MFMA_MMAC_V1   = 10,
+};
+
+bool isMfmaMmacV1(int mfmaMmacVersion) {
+  return mfmaMmacVersion == (int)MfmaMmacVersion::MFMA_MMAC_V1;
+}
+
+int getMfmaMmacVersion(StringRef archGen) {
+  if (archGen.contains("gfx926") ||
+      archGen.contains("gfx928") ||
+      archGen.contains("gfx936"))
+      return (int)(MfmaMmacVersion::MFMA_MMAC_V1);
+  return (int)MfmaMmacVersion::MFMA_MMAC_NONE;
+}
+
 int getMfmaVersion(ISAFamily isaFamily) {
   switch (isaFamily) {
   case ISAFamily::CDNA1:
@@ -263,11 +281,13 @@ class BlockedToMFMA : public RewritePattern {
   int mfmaVersion;
   int enforcedNonKDim;
   int kPack;
+  int mfmaMmacVersion;  // Hygon support: mmac has special C/D layout
 
 public:
-  BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack)
+  BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack, int mfmaMmacVersion)
       : RewritePattern(tt::DotOp::getOperationName(), 2, context),
-        mfmaVersion(mfmaVersion), enforcedNonKDim(nonKDim), kPack(kPack) {}
+        mfmaVersion(mfmaVersion), enforcedNonKDim(nonKDim), kPack(kPack),
+        mfmaMmacVersion(mfmaMmacVersion) {}
 
   bool isSecondDot(tt::DotOp &dotOp) const {
     auto filter = [&dotOp](Operation *op) {
@@ -309,11 +329,16 @@ public:
       nDim = enforcedNonKDim;
     } else {
       int minSize = std::min(M, N);
-      if (minSize >= 32) {
-        mDim = 32;
-        nDim = 32;
-      }
-      if (minSize >= 16 && minSize < 32) {
+      // if (minSize >= 32) {
+      //   mDim = 32;
+      //   nDim = 32;
+      // }
+      // if (minSize >= 16 && minSize < 32) {
+      //   mDim = 16;
+      //   nDim = 16;
+      // }
+      // Hygon DCUs only feature 16x16xk matrix core instructions for now.
+      if (minSize >= 16) {
         mDim = 16;
         nDim = 16;
       }
@@ -383,12 +408,20 @@ public:
     auto warpsPerTile =
         warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
+    #if 0
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
         /*instrShape*/ mDim, nDim, /*isTransposed*/ true, CTALayout);
+    #endif
+    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on Hygon DCUs,
+    // always disuse it to disable related optimization code.
+    mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
+        oldRetType.getContext(),
+        /*versionMajor*/ mfmaVersion, /*versionMinor*/ mfmaMmacVersion, warpsPerTile,
+        /*instrShape*/ mDim, nDim, /*isTransposed*/ false, CTALayout);
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -684,7 +717,8 @@ public:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
       patterns.add<::BlockedToMFMA>(context, getMfmaVersion(isaFamily),
-                                    matrixInstructionSize, kPack);
+                                    matrixInstructionSize, kPack,
+                                    getMfmaMmacVersion(archGenerationName));
       break;
     case ISAFamily::RDNA3:
       patterns.add<::BlockedToWMMA>(context,
