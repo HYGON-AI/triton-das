@@ -16,10 +16,13 @@ import torch
 
 import triton
 import triton.language as tl
+from triton.compiler.utils import InterleaveManager
 
 name_to_torch_types = {
     'fp16': torch.float16,
 }
+
+ORIGIN_INTERLEAVE_ENABLED = InterleaveManager.is_enabled()
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,
@@ -56,7 +59,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
             v = tl.load(V_block_ptr)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         if STAGE == 2:
-            mask = offs_m[:, None] >= (start_n + offs_n[None, :])
+            mask = offs_m[:, None] >= (start_n + offs_n)
             qk = tl.where(mask, qk, float("-inf"))
         qk += tl.dot(q, k)
         #找出当前块以及之前的所有块中最大的值。
@@ -108,8 +111,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,
               BLOCK_N: tl.constexpr,
               pre_load_v: tl.constexpr,
               GRID_AXIS_HZ: tl.constexpr,
+              INTERLEAVE: tl.constexpr
               ):
-    #print("---------------------------11111")
     if GRID_AXIS_HZ == 0:
         start_m = tl.program_id(1)
         off_hz = tl.program_id(0)
@@ -117,7 +120,6 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,
         start_m = tl.program_id(0)
         off_hz = tl.program_id(1)
     off_kh = off_hz // q_num_per_group
-    #print("---------------------------11111-------",start_m,off_hz)
     #x方向的线程块能处理的所有数据大小，既N_CTX*BLOCK_DMODEL,(4096,128),
     q_offset = off_hz * stride_qh
     kv_offset = off_kh * stride_kh
@@ -191,6 +193,14 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,
     #当casual=True时，stage=3,这时STAGE&1和STAGW&2都成立，然后分两步进行计算
     #第一步（STAGE&1)计算不用考虑mask的数据块，第二步(STAGE&2)计算mask有影响的数据块。
     ###############################################################
+
+    offs_n_expand = offs_n[None, :]
+    offs_n_broad = tl.broadcast_to(offs_n_expand, (BLOCK_M, BLOCK_N))
+    if INTERLEAVE:
+        offs_n = (offs_n_broad % 4) * 4 + (offs_n_broad % 16) // 4 + (offs_n_broad // 16) * 16
+    else:
+        offs_n = offs_n_broad
+
     if STAGE & 1:
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,
                                         start_m,
@@ -580,7 +590,7 @@ def _attn_bwd(Q, K, V, sm_scale,
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
+    def forward(ctx, q, k, v, causal, sm_scale, interleave):
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         q_head = q.shape[1]
@@ -630,6 +640,7 @@ class _attention(torch.autograd.Function):
             BLOCK_DMODEL=Lk,
             STAGE=stage,
             GRID_AXIS_HZ=grid_axis_hz,
+            INTERLEAVE=interleave
         )
 
         ## restore the grid for bwd kernel
@@ -699,7 +710,7 @@ class _attention(torch.autograd.Function):
             re_dv = dv.reshape(BATCH,K_HEAD,N_HEAD//K_HEAD,N_CTX,ctx.BLOCK_DMODEL)
             dv = re_dv.sum(dim=2,keepdim=False)
 
-        return dq, dk, dv, None, None
+        return dq, dk, dv, None, None, None
 
 attention = _attention.apply
 
@@ -716,6 +727,7 @@ attention = _attention.apply
 @pytest.mark.parametrize('dtype', ['fp16'])
 @pytest.mark.parametrize('causal', [False, True])
 def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
+    InterleaveManager.enable()
     torch.manual_seed(20)
     q = torch.empty((Z, Q_H, N_CTX, D_HEAD), dtype=torch.float16, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     k = torch.empty((Z, K_H, N_CTX, D_HEAD), dtype=torch.float16, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
@@ -746,12 +758,17 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
     p = torch.softmax(p.float(), dim=-1).half()
     ref_out = torch.matmul(p, vv)
     # triton implementation
-    tri_out = attention(q, k, v, causal, sm_scale)
+    tk = torch.empty_like(k)
+    for i in range(N_CTX):
+        j = (i % 4) * 4 + int((i % 16) / 4) + int(i / 16) * 16
+        tk.transpose(2, 3)[:, :, :, j] = k.transpose(2, 3)[:, :, :, i]
+    tri_out = attention(q, tk, v, causal, sm_scale, True)
     # compare
     atol = 1.4e-1 if dtype == 'fp8' else 1e-2
     rtol = 1e-2 if dtype == 'fp8' else 0
     #pytest识别的是代码是否执行结束，如果是跳转或者中断就表示执行失败。
     torch.testing.assert_close(ref_out, tri_out, atol=atol, rtol=rtol)
+    InterleaveManager.reset(ORIGIN_INTERLEAVE_ENABLED)
 
 
 @pytest.mark.parametrize('Z, Q_H, K_H, N_CTX, D_HEAD',
@@ -765,6 +782,7 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
                           (1, 52,  4, 8192, 128),
                           ])
 def test_op_bwd(Z, Q_H, K_H, N_CTX, D_HEAD, dtype=torch.float16):
+    InterleaveManager.disable()
     torch.manual_seed(20)
     causal = True
     q = (torch.empty((Z, Q_H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
@@ -798,7 +816,7 @@ def test_op_bwd(Z, Q_H, K_H, N_CTX, D_HEAD, dtype=torch.float16):
     ref_dk, k.grad = k.grad.clone(), None
     ref_dq, q.grad = q.grad.clone(), None
     # # triton implementation
-    tri_out = attention(q, k, v, causal, sm_scale)
+    tri_out = attention(q, k, v, causal, sm_scale, False)
     tri_out.backward(dout)
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -813,6 +831,7 @@ def test_op_bwd(Z, Q_H, K_H, N_CTX, D_HEAD, dtype=torch.float16):
         torch.testing.assert_close(ref_dv, tri_dv, atol=5e-2, rtol=0)
     torch.testing.assert_close(ref_dk, tri_dk, atol=5e-2, rtol=1e-2)
     torch.testing.assert_close(ref_dq, tri_dq, atol=5e-2, rtol=1e-2)
+    InterleaveManager.reset(ORIGIN_INTERLEAVE_ENABLED)
 
 HAS_FLASH = False
 
@@ -856,17 +875,28 @@ def bench_flash_attention(BATCH, H, K_H, N_CTX, D_HEAD, causal, mode, provider, 
     # Bwd pass only supports causal=True right now
     if mode == 'bwd':
         causal = True
+        InterleaveManager.disable()
+    else:
+        InterleaveManager.enable()
     if provider == "triton":
         q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k = torch.randn((BATCH, K_H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         v = torch.randn((BATCH, K_H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         sm_scale = D_HEAD ** -0.5
-        fn = lambda: attention(q, k, v, causal, sm_scale)
+        if InterleaveManager.is_enabled():
+            tk = torch.empty_like(k)
+            for i in range(N_CTX):
+                j = (i % 4) * 4 + int((i % 16) / 4) + int(i / 16) * 16
+                tk.transpose(2, 3)[:, :, :, j] = k.transpose(2, 3)[:, :, :, i]
+            fn = lambda: attention(q, tk, v, causal, sm_scale, True)
+        else:
+            fn = lambda: attention(q, k, v, causal, sm_scale, False)
         if mode == 'bwd':
             o = fn()
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        InterleaveManager.reset(ORIGIN_INTERLEAVE_ENABLED)
     if provider == "flash":
         qkv = torch.randn((BATCH, N_CTX, 3, H, D_HEAD), dtype=dtype, device=device, requires_grad=True)
         fn = lambda: flash_attn_func(qkv, causal=causal)
