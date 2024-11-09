@@ -1382,9 +1382,9 @@ AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
   if (!(versionMajor >= 0 && versionMajor <= 3)) {
     return emitError() << "major version must be in the [0, 3] range";
   }
-  if (versionMinor != 0) {
-    return emitError() << "minor version must be 0";
-  }
+  // if (versionMinor != 0) {
+  //   return emitError() << "minor version must be 0";
+  // }
   if (!((mDim == 32 && nDim == 32) || (mDim == 16 && nDim == 16))) {
     return emitError()
            << "(M, N) cases other than (32, 32) or (16, 16) unimplemented";

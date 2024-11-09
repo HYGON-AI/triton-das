@@ -178,11 +178,11 @@ function clean_cache() {
 function build_llvm() {
   pushd ${SRC_HOME}
   repo="ssh://git@192.168.140.75:8022/buhui/llvm-project.git"
-  branch="hygon/staging"
+  branch="hygon/triton"
   package_server="172.18.19.8"
   package_path="/builds/ai_compiler/llvm4triton"
   package_user="sw-builder"
-  hash=`grep -m 1 -v '^$' llvm-hash.txt`
+  hash=`grep -m 1 -v '^$' cmake/llvm-hash.txt`
   hash=${hash:0:8}
   platform=$(cat /etc/*release | grep '^ID=' | awk -F '=' '{print $2}' | tr -d '"')
   package_name=llvm-${hash}-${platform}-x64
@@ -214,6 +214,7 @@ function build_llvm() {
       -DLLVM_ENABLE_ASSERTIONS=ON  \
       -DLLVM_INSTALL_UTILS=ON  \
       -DLLVM_ENABLE_PROJECTS="mlir;llvm"  \
+      -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"  \
       -DCMAKE_INSTALL_PREFIX=../${package_name}  \
       ../llvm
     ninja -j${MAX_JOBS}
