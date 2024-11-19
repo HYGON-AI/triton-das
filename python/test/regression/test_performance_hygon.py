@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 import triton.ops
-from triton.common.backend import get_backend
+from triton.runtime.driver import driver
 import math
 # from triton.testing import get_dram_gbps, get_max_tensorcore_tflops, nvsmi
 
@@ -17,13 +17,7 @@ abort_if_check_failed = True
 # Utilities
 #######################
 
-def get_arch_info():
-    _device_backend = get_backend('hip')
-    assert _device_backend
-    target = _device_backend.get_architecture_descriptor()
-    return target
-
-ARCH_NAME = get_arch_info()["gfx_arch"]
+ARCH_NAME = driver.active.get_current_target().arch
 
 def check_perf(cur_ms, cur_perf, ref_perf, atol=None, args='', err_msg=''):
     if abort_if_check_failed and cur_perf < ref_perf - atol:

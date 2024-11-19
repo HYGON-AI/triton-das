@@ -517,6 +517,7 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
           {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
+    assert(isMmacV1());
     // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
     //
     // For the register (i.e., element) dimension, these 4 elements are along
@@ -526,8 +527,8 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     // matrix C's N dimension, with 16 consecutive threads covering a whole
     // row and the next 16 threads start after a gap spanning 4 rows.
     tileLayout = LinearLayout(
-        {{kRegister, {{0, 1}, {0, 2}}},
-         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 4}, {0, 8}}}},
+        {{kRegister, {{4, 0}, {8, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {1, 0}, {2, 0}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
     // For mfma.transposed layout, the element ownership among threads are
     // "transposed" within each warp.

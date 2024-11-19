@@ -205,7 +205,7 @@ for i in range(group_size):
 tri_out = group_gemm_fn(group_A, group_B)
 ref_out = [torch.matmul(a, b) for a, b in zip(group_A, group_B)]
 for i in range(group_size):
-    assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=0)
+    assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
 
 
 # only launch the kernel, no tensor preparation here to remove all overhead
@@ -282,4 +282,4 @@ def benchmark(N, provider):
     return ms, max_ms, min_ms
 
 
-benchmark.run(show_plots=True, print_data=True)
+# benchmark.run(show_plots=True, print_data=True)

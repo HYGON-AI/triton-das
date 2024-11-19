@@ -399,8 +399,8 @@ enum hip_api_id_t {
   HIP_API_ID_hipExtGetLastError = 379,
   HIP_API_ID_LAST = 379,
 
-  HIP_API_ID_hipChooseDevice = HIP_API_ID_CONCAT(HIP_API_ID_,hipChooseDevice),
-  HIP_API_ID_hipGetDeviceProperties = HIP_API_ID_CONCAT(HIP_API_ID_,hipGetDeviceProperties),
+  // HIP_API_ID_hipChooseDevice = HIP_API_ID_CONCAT(HIP_API_ID_,hipChooseDeviceR),
+  // HIP_API_ID_hipGetDeviceProperties = HIP_API_ID_CONCAT(HIP_API_ID_,hipGetDeviceProperties),
 
   HIP_API_ID_hipBindTexture = HIP_API_ID_NONE,
   HIP_API_ID_hipBindTexture2D = HIP_API_ID_NONE,
@@ -1265,12 +1265,12 @@ typedef struct hip_api_data_s {
       const hipDeviceProp_tR0000* prop;
       hipDeviceProp_tR0000 prop__val;
     } hipChooseDeviceR0000;
-    struct {
-      int* device;
-      int device__val;
-      const hipDeviceProp_tR0600* prop;
-      hipDeviceProp_tR0600 prop__val;
-    } hipChooseDeviceR0600;
+    // struct {
+    //   int* device;
+    //   int device__val;
+    //   const hipDeviceProp_tR0600* prop;
+    //   hipDeviceProp_tR0600 prop__val;
+    // } hipChooseDeviceR0600;
     struct {
       dim3 gridDim;
       dim3 blockDim;
@@ -1725,11 +1725,11 @@ typedef struct hip_api_data_s {
       hipDeviceProp_tR0000 prop__val;
       int device;
     } hipGetDevicePropertiesR0000;
-    struct {
-      hipDeviceProp_tR0600* prop;
-      hipDeviceProp_tR0600 prop__val;
-      int deviceId;
-    } hipGetDevicePropertiesR0600;
+    // struct {
+    //   hipDeviceProp_tR0600* prop;
+    //   hipDeviceProp_tR0600 prop__val;
+    //   int deviceId;
+    // } hipGetDevicePropertiesR0600;
     struct {
       hipArray_t* levelArray;
       hipArray_t levelArray__val;

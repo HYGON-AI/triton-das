@@ -8,27 +8,16 @@ source ${CUR_PATH}/launch.sh
 build_llvm
 
 function usage() {
-  echo "--version <version index> - To Specify the version for Triton"
-  echo "    Default Value is 2.1.0"
-  echo "--llvm_build_dir <path> - To Specify the llvm-project build path"
-  echo "    If not specify, will use default llvm package"
   echo "--release - To Specify release the triton wheel package"
 }
 
-COMMIT_ID=$(git rev-parse --short HEAD)
 BRANCH_TAG=$(git rev-parse --abbrev-ref HEAD | sed 's/\//./g')
 ROCM_TAG="rocm5.7x"
-export VERSION="2.1.0"
+export TRITON_WHEEL_VERSION_SUFFIX=".${BRANCH_TAG}.${ROCM_TAG}"
 
 while [ $# -gt 0 ]; do
-  if [ "$1" == "--version" ]; then
-    export VERSION=$2
-    shift 2
-  elif [ "$1" == "--llvm_build_dir" ]; then
-    export LLVM_BUILD_DIR=$2
-    shift 2
-  elif [ "$1" == "--release" ]; then
-    export RELEASE="true"
+  if [ "$1" == "--release" ]; then
+    RELEASE="true"
     shift 1
   else
     echo -e "\nArgument Error!!!\n"
@@ -37,12 +26,6 @@ while [ $# -gt 0 ]; do
     return
   fi
 done
-
-VERSION_TAG="${VERSION}+${BRANCH_TAG}.${COMMIT_ID}.${ROCM_TAG}"
-
-cp setup.py setup.py.bk
-
-sed -i -r "s/version\=\"(2.*)\"/version=\"${VERSION_TAG}\"/g" setup.py.bk
 
 if [[ ${RELEASE} == "true" ]]; then
   PYTHON_LIST=(
@@ -63,12 +46,12 @@ for python_app in ${PYTHON_LIST[@]}; do
     exit -1
   else
     if [ -z ${LLVM_BUILD_DIR} ]; then
-      ${python_app} setup.py.bk bdist_wheel
+      ${python_app} setup.py bdist_wheel
     else
       LLVM_INCLUDE_DIRS=$LLVM_BUILD_DIR/include \
       LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib \
       LLVM_SYSPATH=$LLVM_BUILD_DIR \
-      ${python_app} setup.py.bk bdist_wheel
+      ${python_app} setup.py bdist_wheel
     fi
   fi
 done
@@ -76,7 +59,5 @@ done
 WHL_FILE=$(ls -t dist/*.whl | head -n 1)
 echo -e "\nThe wheel path is:"
 echo -e "$(realpath $(dirname "${WHL_FILE}"))\n"
-
-rm -rf setup.py.bk
 
 cd - > /dev/null 2>&1

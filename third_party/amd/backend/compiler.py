@@ -55,14 +55,14 @@ class HIPOptions:
     instruction_sched_variant: str = 'default'
 
     def __post_init__(self):
-        default_libdir = Path(__file__).parent / 'lib'
+        default_libdir = os.path.join(HIPBackend.path_to_rocm(), 'amdgcn/bitcode/')
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         # Ignore user-defined warp size for gfx9
         warp_size = 32 if 'gfx10' in self.arch or 'gfx11' in self.arch or 'gfx12' in self.arch else 64
         object.__setattr__(self, 'warp_size', warp_size)
-        libs = ["ocml", "ockl"]
+        libs = ["ocml", "ockl", "hip", "opencl"]
         for lib in libs:
-            extern_libs[lib] = str(default_libdir / f'{lib}.bc')
+            extern_libs[lib] = str(os.path.join(default_libdir, f'{lib}.bc'))
         object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
                "num_warps must be a power of 2"
@@ -164,7 +164,13 @@ class HIPBackend(BaseBackend):
         return HIPAttrsDescriptor.get_property_key(arg, align)
 
     @staticmethod
+    def path_to_rocm():
+        rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
+        return rocm_path
+
+    @staticmethod
     def path_to_rocm_lld():
+        rocm_path = HIPBackend.path_to_rocm()
         # Check env path for ld.lld
         lld_env_path = os.getenv("TRITON_HIP_LLD_PATH")
         if lld_env_path is not None:
@@ -175,29 +181,30 @@ class HIPBackend(BaseBackend):
         lld = Path(__file__).parent / "llvm/bin/ld.lld"
         if lld.is_file():
             return lld
-        lld = Path("/opt/rocm/llvm/bin/ld.lld")
+        lld = Path(f"{rocm_path}/llvm/bin/ld.lld")
         if lld.is_file():
             return lld
         lld = Path("/usr/bin/ld.lld")
         if lld.is_file():
             return lld
-        raise Exception("ROCm linker /opt/rocm/llvm/bin/ld.lld not found. Set 'TRITON_HIP_LLD_PATH' to its path.")
+        raise Exception(f"ROCm linker {rocm_path}/llvm/bin/ld.lld not found. Set 'TRITON_HIP_LLD_PATH' to its path.")
 
     @staticmethod
     def path_to_rocm_clang():
+        rocm_path = HIPBackend.path_to_rocm()
         # Check env path for clang
         clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH")
         if clang_env_path is not None:
             clang = Path(clang_env_path)
             if clang.is_file():
                 return clang
-        clang = Path("/opt/rocm/llvm/bin/clang")
+        clang = Path(f"{rocm_path}/llvm/bin/clang")
         if clang.is_file():
             return clang
         clang = Path("/usr/bin/clang")
         if clang.is_file():
             return clang
-        raise Exception("ROCm compiler /opt/rocm/llvm/bin/clang not found. Set 'TRITON_HIP_CLANG_PATH' to its path.")
+        raise Exception(f"ROCm compiler {rocm_path}/llvm/bin/clang not found. Set 'TRITON_HIP_CLANG_PATH' to its path.")
 
     @staticmethod
     def make_ttir(mod, metadata, options):
@@ -312,6 +319,7 @@ class HIPBackend(BaseBackend):
         amd.set_bool_control_constant(llvm_mod, "__oclc_finite_only_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_correctly_rounded_sqrt32", True)
         amd.set_bool_control_constant(llvm_mod, "__oclc_unsafe_math_opt", False)
+        amd.set_bool_control_constant(llvm_mod, "__oclc_daz_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_wavefrontsize64", options.warp_size == 64)
 
         # Set kernel attributes first given this may affect later optimizations.
@@ -341,204 +349,98 @@ class HIPBackend(BaseBackend):
         return str(llvm_mod)
 
     @staticmethod
-    def make_amdgcn_gfx928(src, metadata, options):
+    def make_amdgcn(src, metadata, options):
         # Find kernel names (there should only be one)
         # We get the name at the last possible step to accomodate `triton.compile`
         # on user-provided LLVM
         names = re.findall(r"define amdgpu_kernel void @([a-zA-Z_][a-zA-Z0-9_]*)", src)
         assert len(names) == 1
         metadata["name"] = names[0]
-        if os.environ.get("DEBUG_DUMP", "0") == "1":
-            with open(f"./{metadata['name']}_{metadata['hash'][0:8:1]}.ll.ir", "w") as f:
-                f.write(str(src))
-
-        def llvmIRRewriter(src):
-            src = src.replace(f"or disjoint", f"or")
-            src = src.replace(f"zext nneg", f"zext")
-            src = src.replace(f"uitofp nneg", f"uitofp")
-            src = src.replace(f"trunc nuw", f"trunc")
-            src = src.replace(f"trunc nsw", f"trunc")
-            src = src.replace(f"llvm.amdgcn.exp2.f32", f"llvm.exp2.f32")
-            src = src.replace(f"llvm.ldexp.f32.i32", f"llvm.amdgcn.ldexp.f32.i32")
-            src = src.replace(f"llvm.ldexp.f64.i32", f"llvm.amdgcn.ldexp.f64.i32")
-            src = src.replace(f"llvm.amdgcn.readfirstlane.i32", f"llvm.amdgcn.readfirstlane")
-
-            # mfma -> mmac
-            src = src.replace(f"@llvm.amdgcn.mfma", f"@llvm.amdgcn.mmac")
-            # MxNxKf16 -> MxNxK.f16
-            src = re.sub(r'(@llvm\.amdgcn\.mmac\.(f32|i32)\.(\d+x\d+x\d+))([a-z]*\d+)', r'\1.\4', src)
-            # erase i32 0, i32 0, i32 0
-            src = re.sub(r'(@llvm\.amdgcn\.mmac[^\(]+\([^\)]+),\s*i32\s+0,\s*i32\s+0,\s*i32\s+0(\))', r'\1\2', src)
-            # modify declare erase i32 immarg, i32 immarg, i32 immarg
-            src = re.sub(r',\s*i32 immarg,\s*i32 immarg,\s*i32 immarg', r'', src)
-
-            # rename f32 mmac declare
-            src = src.replace(f"llvm.amdgcn.mmac.f32.16x16x4.f32", f"llvm.amdgcn.mmac.16x16x4.f32")
-            # mmac.16x16x4.f32 add i32 immarg
-            src = re.sub(r'(declare <4 x float> @llvm\.amdgcn\.mmac\.16x16x4\.f32\(float, float, <4 x float>)',
-                         r'\1, i32 immarg', src)
-
-            # mmac.16x16x4.f32 add i32 i32 0
-            src = re.sub(r'(@llvm\.amdgcn\.mmac\.16x16x4\.f32\(float [^,]+, float [^,]+, <4 x float> [^)]+)',
-                         r'\1, i32 0', src)
-
-            # llvm.amdgcn.mmac.f32.16x16x16.bf16.1k -> llvm.amdgcn.mmac.f32.16x16x16.bf16
-            src = src.replace(f"llvm.amdgcn.mmac.f32.16x16x16.bf16.1k", f"llvm.amdgcn.mmac.f32.16x16x16.bf16")
-
-            def rewriteRange(input_ll_ir):
-                lines = input_ll_ir.splitlines()
-                output_lines = []
-                metadata_index = 666666  # magic counter
-                metadata_definitions = {}  # store meta data
-                for line in lines:
-                    match = re.search(r'range\((\w+) (\d+), (\d+)\)', line)
-                    if match:
-                        data_type, start, end = match.groups()
-                        line = re.sub(r'range\(\w+ \d+, \d+\) ', '', line)
-                        metadata_key = metadata_index
-                        line = re.sub(r'!dbg', f'!range !{metadata_key}, !dbg', line)
-                        metadata_definitions[metadata_key] = (data_type, start, end)
-                        metadata_index += 1
-
-                    output_lines.append(line)
-
-                output_ll_ir = '\n'.join(output_lines)
-                for key, (data_type, start, end) in metadata_definitions.items():
-                    output_ll_ir += f'\n!{key} = !{{{data_type} {start}, {data_type} {end}}}'
-
-                return output_ll_ir
-
-            src = rewriteRange(src)
-            return src
-
-        # rewrite llvm ir
-        src = llvmIRRewriter(src)
-        if os.environ.get("DEBUG_DUMP", "0") == "1":
-            with open(f"./{metadata['name']}_{metadata['hash'][0:8:1]}.rewrite.ll.ir", "w") as f:
-                f.write(str(src))
-        if not os.path.exists("/tmp/triton3"):
-            os.makedirs("/tmp/triton3")
 
         # llvm -> hsaco
-        rocm_base_path = "/opt/rocm"
-        bin_path = f"{rocm_base_path}/llvm/bin"
-        bitcode_path = f"{rocm_base_path}/amdgcn/bitcode"
-        llc_path = f"{bin_path}/llc"
-        llvm_as_path = f"{bin_path}/llvm-as"
-        llvm_link_path = f"{bin_path}/llvm-link"
-        llirIn = tempfile.NamedTemporaryFile(prefix="_", suffix=".ll", dir="/tmp/triton3").name
-        llir_BC = tempfile.NamedTemporaryFile(prefix="_", suffix=".bc", dir="/tmp/triton3").name
-        llir_linked_BC = tempfile.NamedTemporaryFile(prefix="_", suffix=".linked.bc", dir="/tmp/triton3").name
-        amdgcnOut = tempfile.NamedTemporaryFile(prefix="_", suffix=".amdgcn", dir="/tmp/triton3").name
-        with open(llirIn, "w") as fd_in:
-            fd_in.write(src)
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix=".ll", delete=False) as f:
+                llir_file = f.name
+                f.write(str(src))
 
-        subprocess.check_call([
-            llvm_as_path,
-            '-o',
-            llir_BC,
-            llirIn,
-        ])
+            asm_file = tempfile.mktemp(suffix=".amdgcn")
 
-        subprocess.check_call([
-            llvm_link_path,
-            '--only-needed',
-            '-o',
-            llir_linked_BC,
-            llir_BC,
-            f"{bitcode_path}/hip.bc",
-            f"{bitcode_path}/ocml.bc",
-            f"{bitcode_path}/ockl.bc",
-            f"{bitcode_path}/oclc_daz_opt_off.bc",
-            f"{bitcode_path}/oclc_unsafe_math_off.bc",
-            f"{bitcode_path}/oclc_finite_only_off.bc",
-            f"{bitcode_path}/oclc_correctly_rounded_sqrt_on.bc",
-            f"{bitcode_path}/oclc_wavefrontsize64_on.bc",
-            f"{bitcode_path}/oclc_isa_version_928.bc",
-            f"{bitcode_path}/oclc_abi_version_500.bc",
-        ])
+            clang_path = HIPBackend.path_to_rocm_clang()
+            common_args = [
+                clang_path,
+                "-target", amd.TARGET_TRIPLE,
+                f"-mcpu={options.arch}:xnack-",
+                "-mllvm=-support-512-vgprs=true" if options.arch == "gfx928" else ("-mllvm=-support-768-vgprs=true" if options.arch == "gfx936" else ""),
+                "-mllvm=-check-valu-data-forward-hazards=0",
+                # "-mllvm=-disable-strict-mmop-constraints=true",
+                "-O3",
+                llir_file
+            ]
 
-        subprocess.check_call([
-            llc_path,
-            '-filetype=asm',
-            '-march=amdgcn',
-            '-mcpu=gfx928',
-            '-o',
-            amdgcnOut,
-            llir_linked_BC,
-        ])
-        with open(amdgcnOut, "r") as fd_out:
-            amdgcn = fd_out.read()
+            # Compile to ASM
+            asm_command = common_args + ["-S", "-o", asm_file]
+            subprocess.run(asm_command, check=True, capture_output=True, text=True)
 
-        if os.environ.get("DEBUG_DUMP", "0") == "1":
-            with open(f"./{metadata['name']}_{metadata['hash'][0:8:1]}.amdgcn", "w") as f:
-                f.write(str(amdgcn))
+            with open(asm_file, "r") as fd_out:
+                amdgcn = fd_out.read()
+
+        except subprocess.CalledProcessError as e:
+            print(f"Compilation failed: {e.stderr}")
+            raise
+        except IOError as e:
+            print(f"File operation failed: {str(e)}")
+            raise
+        finally:
+            # Clean up temporary files
+            for file in [llir_file, asm_file]:
+                if os.path.exists(file):
+                    os.remove(file)
+
         return amdgcn
 
     @staticmethod
-    def make_hsaco_gfx928(src, metadata, options):
-        base = f"/opt/rocm"
-        clang_path = f"{base}/llvm/bin/clang"
-        lld_path = f"{base}/llvm/bin/lld"
-        bundler_path = f"{base}/llvm/bin/clang-offload-bundler"
-        amdgcnIn = tempfile.NamedTemporaryFile(prefix="input_", suffix=".amdgcn", dir="/tmp/triton3").name
-        compileOut = tempfile.NamedTemporaryFile(prefix="compiled_", suffix=".hsaco", dir="/tmp/triton3").name
-        lldOut = tempfile.NamedTemporaryFile(prefix="lld_", suffix=".hsaco", dir="/tmp/triton3").name
-        bundleOut = tempfile.NamedTemporaryFile(prefix="bundle_", suffix=".hsaco", dir="/tmp/triton3").name
-        with open(amdgcnIn, "w") as fd_in:
-            fd_in.write(src)
-        subprocess.check_call([
-            clang_path,
-            '-O0',
-            '-x',
-            'assembler',
-            '--target=amdgcn-amd-amdhsa',
-            '-mcpu=gfx928',
-            '-c',
-            '-o',
-            compileOut,
-            amdgcnIn,
-        ])
-        subprocess.check_call([
-            lld_path,
-            '-flavor',
-            'gnu',
-            '-m',
-            'elf64_amdgpu',
-            '--no-undefined',
-            '-shared',
-            '-plugin-opt=-amdgpu-internalize-symbols',
-            '-plugin-opt=mcpu=gfx928',
-            '-plugin-opt=O3',
-            '--lto-CGO3',
-            '-plugin-opt=-amdgpu-early-inline-all=true',
-            '-plugin-opt=-amdgpu-function-calls=false',
-            '--whole-archive',
-            '-o',
-            lldOut,
-            compileOut,
-            '--no-whole-archive',
-        ])
-        subprocess.check_call([
-            bundler_path,
-            '-type=o',
-            '-bundle-align=4096',
-            '-targets=host-x86_64-unknown-linux,hipv4-amdgcn-amd-amdhsa--gfx928',
-            '-input=/dev/null',
-            f'-input={lldOut}',
-            f'-output={bundleOut}',
-        ])
+    def make_hsaco(src, metadata, options):
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix=".s", delete=False) as f:
+                asm_file = f.name
+                f.write(str(src))
 
-        with open(bundleOut, "rb") as fd_out:
-            ret = fd_out.read()
+            hsaco_file = tempfile.mktemp(suffix=".hsaco")
+
+            clang_path = HIPBackend.path_to_rocm_clang()
+            common_args = [
+                clang_path,
+                "-target", amd.TARGET_TRIPLE,
+                f"-mcpu={options.arch}:xnack-",
+                "-mllvm=-support-512-vgprs=true" if options.arch == "gfx928" else ("-mllvm=-support-768-vgprs=true" if options.arch == "gfx936" else ""),
+                "-mllvm=-check-valu-data-forward-hazards=0",
+                # "-mllvm=-disable-strict-mmop-constraints=true",
+                "-O3",
+                asm_file
+            ]
+
+            # Compile to HSACO
+            hsaco_command = common_args + ["-x", "assembler", "-o", hsaco_file]
+            subprocess.run(hsaco_command, check=True, capture_output=True, text=True)
+
+            with open(hsaco_file, "rb") as fd_out:
+                ret = fd_out.read()
+
+        except subprocess.CalledProcessError as e:
+            print(f"Compilation failed: {e.stderr}")
+            raise
+        except IOError as e:
+            print(f"File operation failed: {str(e)}")
+            raise
+
         return ret
 
     def add_stages(self, stages, options):
         stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
         stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        stages["amdgcn"] = lambda src, metadata: self.make_amdgcn_gfx928(src, metadata, options)
-        stages["hsaco"] = lambda src, metadata: self.make_hsaco_gfx928(src, metadata, options)
+        stages["amdgcn"] = lambda src, metadata: self.make_amdgcn(src, metadata, options)
+        stages["hsaco"] = lambda src, metadata: self.make_hsaco(src, metadata, options)
 
     @functools.lru_cache()
     def hash(self):
