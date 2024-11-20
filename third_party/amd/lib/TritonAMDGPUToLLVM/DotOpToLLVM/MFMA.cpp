@@ -63,12 +63,25 @@ struct DotOpMFMAConversionHelper {
   Value generateMFMAOp(StringRef mfmaInsnName, Value valA, Value valB,
                        Value valC) const {
     auto resType = valC.getType();
-    // Value zeroFlag = i32_val(0);
     OperationState loweredOp(loc, mfmaInsnName);
     loweredOp.addTypes(resType);
-    // loweredOp.addOperands({valA, valB, valC, zeroFlag, zeroFlag, zeroFlag});
-    if (mfmaInsnName == "rocdl.mmac.16x16x4.f32") {
-      loweredOp.addOperands({valA, valB, valC, i32_val(0)});
+    Value i32Flag = i32_val(0);
+    Value i1Flag = false_val();
+    OperationState loweredOp(loc, mfmaInsnName);
+    loweredOp.addTypes(resType);
+    if (mfmaInsnName.compare("rocdl.mmac.16x16x4.f32") == 0) {
+      loweredOp.addOperands({valA, valB, valC, i32Flag, i1Flag});
+    } else if (mfmaInsnName.compare("rocdl.mmac.16x16x8.f32") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.f32.16x16x16.f16") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.f32.16x16x16.bf16") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.bf8.bf8") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.bf8.fp8") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.fp8.bf8") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.fp8.fp8") == 0) {
+      loweredOp.addOperands({valA, valB, valC, i1Flag, i1Flag});
+    } else if (mfmaInsnName.compare("rocdl.mmac.i32.16x16x32.i8") == 0 ||
+               mfmaInsnName.compare("rocdl.mmac.i32.16x16x32.u8") == 0) {
+      loweredOp.addOperands({valA, valB, valC, i1Flag, i1Flag, i1Flag});
     } else {
       loweredOp.addOperands({valA, valB, valC});
     }
