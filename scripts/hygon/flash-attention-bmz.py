@@ -13,10 +13,33 @@ Extra Credits:
 
 import pytest
 import torch
+import os
 
 import triton
 import triton.language as tl
-from triton.compiler.utils import InterleaveManager
+
+class InterleaveManager:
+    KEY = "CHAINED_DOT_SHORTCUT"
+    @staticmethod
+    def enable():
+        os.environ[InterleaveManager.KEY] = 'ON'
+
+    @staticmethod
+    def disable():
+        if InterleaveManager.KEY in os.environ:
+            del os.environ[InterleaveManager.KEY]
+
+    @staticmethod
+    def is_enabled():
+        return os.getenv(InterleaveManager.KEY) == 'ON'
+
+    @staticmethod
+    def reset(enable):
+        if enable:
+            InterleaveManager.enable()
+        else:
+            InterleaveManager.disable()
+
 
 name_to_torch_types = {
     'fp16': torch.float16,
@@ -91,17 +114,20 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
 # re-tuning.
 @triton.autotune(
    configs=[
-       triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'waves_per_eu': 1, 'slice_k_tile': 0, 'pre_load_v': False}, num_stages=1, num_warps=2),
+       triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 0, 'pre_load_v': False}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 0, 'pre_load_v': True}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'waves_per_eu': 1, 'pre_load_v': False}, num_stages=1, num_warps=2),
    ],
    key=['Z', 'H', 'N_CTX', 'STAGE', 'BLOCK_DMODEL'],
 )
 
 
 @triton.jit
-def _attn_fwd(Q, K, V, sm_scale, M, Out,
+def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
               stride_qz, stride_qh, stride_qm, stride_qk,
               stride_kz, stride_kh, stride_kn, stride_kk,
               stride_vz, stride_vh, stride_vk, stride_vn,
+              stride_vtz, stride_vth, stride_vtn, stride_vtk,
               stride_oz, stride_oh, stride_om, stride_on,
               Z, H, k_head, q_num_per_group,
               N_CTX,
@@ -137,14 +163,25 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,
     )
     #同理分割数据块V，每个线程块分配的数据块大小为[BLOCK_N,BLOCK_DMODEL]
     #该线程块中的每个线程都能拿到该数据块的首地址。
+    # V_block_ptr = tl.make_block_ptr(
+    #     base=V + kv_offset,
+    #     shape=(N_CTX, BLOCK_DMODEL),
+    #     strides=(stride_vk, stride_vn),
+    #     offsets=(0, 0),
+    #     block_shape=(BLOCK_N, BLOCK_DMODEL),
+    #     order=(1, 0),
+    # )
+
+    # Note: bmz add to increase lds coalesce
     V_block_ptr = tl.make_block_ptr(
-        base=V + kv_offset,
+        base=VT + kv_offset,
         shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_vk, stride_vn),
+        strides=(stride_vtk, stride_vtn),
         offsets=(0, 0),
         block_shape=(BLOCK_N, BLOCK_DMODEL),
-        order=(1, 0),
+        order=(0, 1),
     )
+
     #同理分割数据块K
     #该线程块中的每个线程都能拿到该数据块的首地址。
     K_block_ptr = tl.make_block_ptr(
@@ -245,11 +282,13 @@ def _attn_bwd_preprocess(O, DO,
 # The main inner-loop logic for computing dK and dV.
 @triton.jit
 def _attn_bwd_dkdv(dk, dv,
-                   Q, k, v, sm_scale,
+                   Q, QT, k, v, sm_scale,
                    DO,
                    M, D,
                    # shared by Q/K/V/DO.
                    stride_tok, stride_d,
+                   # shared by QT/KT/VT/DOT.
+                   stride_td, stride_ttok,
                    H, N_CTX, BLOCK_M1: tl.constexpr,
                    BLOCK_N1: tl.constexpr,
                    BLOCK_DMODEL: tl.constexpr,
@@ -260,6 +299,17 @@ def _attn_bwd_dkdv(dk, dv,
     offs_m = start_m + tl.arange(0, BLOCK_M1)
     offs_n = start_n + tl.arange(0, BLOCK_N1)
     offs_k = tl.arange(0, BLOCK_DMODEL)
+
+    # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
+    Q_block_ptr = tl.make_block_ptr(
+        base=QT,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_ttok, stride_td),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M1, BLOCK_DMODEL),
+        order=(0,1)
+    )
+
     QT_block_ptr = tl.make_block_ptr(
         base=Q,
         shape=(BLOCK_DMODEL, N_CTX),
@@ -300,17 +350,23 @@ def _attn_bwd_dkdv(dk, dv,
         dv += tl.dot(ppT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m)
+
+        q = tl.load(Q_block_ptr)
+
         # Compute dP and dS.
         #公式中都是在计算dp和ds，在求dk时用的是dsT所以直接将dp和ds进行转置后就可以直接
         #求dk了。
         dpT = tl.dot(v, tl.trans(do))
         dsT = pT * (dpT - Di[None, :])
         dsT = dsT.to(tl.float16)
-        dk += tl.dot(dsT, tl.trans(qT))
+
+        # dk += tl.dot(dsT, tl.trans(qT))
+        dk += tl.dot(dsT, q)
         # Increment pointers.
         curr_m += step_m
         QT_block_ptr = tl.advance(QT_block_ptr, (0, step_m))
         DO_block_ptr = tl.advance(DO_block_ptr, (step_m, 0))
+        Q_block_ptr = tl.advance(Q_block_ptr, (step_m, 0))
     return dk, dv
 
 
@@ -380,18 +436,22 @@ def _attn_bwd_dq(dq, q, K, V,
    configs=[
        triton.Config({'BLOCK_M1': 32, 'BLOCK_N1': 64, 'BLOCK_M2': 64, 'BLOCK_N2': 32, 'BLK_SLICE_FACTOR': 1},
                       num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_M1': 32, 'BLOCK_N1': 64, 'BLOCK_M2': 64, 'BLOCK_N2': 32, 'BLK_SLICE_FACTOR': 2},
+                      num_stages=1, num_warps=4),
    ],
    key=['H', 'N_CTX', 'BLOCK_DMODEL'],
 )
 
 @triton.jit
-def _attn_bwd(Q, K, V, sm_scale,
+def _attn_bwd(Q, QT, K, V, sm_scale,
               DO,
               DQ, DK, DV,
               M, D,
               # shared by Q/K/V/DO.
               stride_z, stride_h, stride_tok, stride_d,
-              stride_kz, 
+              stride_kz,
+              # shared by QT/KT/VT/DOT.
+              stride_td, stride_ttok,
               # H = 16, N_CTX = 1024
               H, N_CTX, K_HEAD, q_num_per_group,
               BLOCK_DMODEL: tl.constexpr,
@@ -415,6 +475,7 @@ def _attn_bwd(Q, K, V, sm_scale,
     #所有数据指针都移动到当前N_CTX*BLOCK_DMODEL页
 
     Q += adj
+    QT+= adj
     K += k_adj
     V += k_adj
     DO += adj
@@ -466,10 +527,11 @@ def _attn_bwd(Q, K, V, sm_scale,
     num_steps = BLOCK_N1 // MASK_BLOCK_M1
 
     dk, dv = _attn_bwd_dkdv(dk, dv,
-                            Q, k, v, sm_scale,
+                            Q, QT, k, v, sm_scale,
                             DO,
                             M, D,
                             stride_tok, stride_d,
+                            stride_td, stride_ttok,
                             H, N_CTX,
                             MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL,
                             start_n, start_m, num_steps,
@@ -483,10 +545,11 @@ def _attn_bwd(Q, K, V, sm_scale,
     # Compute dK and dV for non-masked blocks.
     dk, dv = _attn_bwd_dkdv(
         dk, dv,
-        Q, k, v, sm_scale,
+        Q, QT, k, v, sm_scale,
         DO,
         M, D,
         stride_tok, stride_d,
+        stride_td, stride_ttok,
         H, N_CTX,
         BLOCK_M1, BLOCK_N1, BLOCK_DMODEL,
         start_n, start_m, num_steps,
@@ -599,6 +662,10 @@ class _attention(torch.autograd.Function):
         assert q_head % k_head == 0
         assert Lq == Lk and Lk == Lv
         assert Lk in {16, 32, 64, 128}
+
+        # Note: bmz add to increase lds coalesce
+        vt = v.transpose(-1, -2).contiguous()
+
         o = torch.empty_like(q, dtype=v.dtype)
         if torch.version.hip is None:
             BLOCK_M = 128
@@ -630,10 +697,11 @@ class _attention(torch.autograd.Function):
         #M用于保留每行的最大值。所以M的维度就是[BATCH*N_HEAD,N_CTX]
         M = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         _attn_fwd[grid](
-            q, k, v, sm_scale, M, o,
+            q, k, v, vt, sm_scale, M, o,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            vt.stride(0), vt.stride(1), vt.stride(2), vt.stride(3),
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),
             q.shape[0], q.shape[1], k_head, q_num_per_group,
             N_CTX=q.shape[2],
@@ -644,7 +712,7 @@ class _attention(torch.autograd.Function):
         )
 
         ## restore the grid for bwd kernel
-        best_config = _attn_fwd.get_best_config()
+        best_config = _attn_fwd.best_config
         block_m = int(best_config.__str__().split(",")[0].split("BLOCK_M:")[1])
         grid = (triton.cdiv(q.shape[2], block_m), q.shape[0] * q.shape[1], 1)
 
@@ -667,6 +735,10 @@ class _attention(torch.autograd.Function):
         dq = torch.empty_like(q)
         dk = torch.empty_like(q)
         dv = torch.empty_like(q)
+
+        # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
+        qt = q.transpose(-1, -2).contiguous()
+
         BATCH, N_HEAD, N_CTX = q.shape[:3]
         K_HEAD = k.shape[1]
         q_num_per_group = N_HEAD // K_HEAD
@@ -697,9 +769,10 @@ class _attention(torch.autograd.Function):
             BATCH * N_HEAD
         )
         _attn_bwd[grid](
-            q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,
+            q, qt, arg_k, v, ctx.sm_scale, do, dq, dk, dv,
             M, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),k.stride(0),
+            qt.stride(2), qt.stride(3),
             N_HEAD, N_CTX, K_HEAD, q_num_per_group,
             BLOCK_DMODEL=ctx.BLOCK_DMODEL
         )

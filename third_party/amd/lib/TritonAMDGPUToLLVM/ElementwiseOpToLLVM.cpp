@@ -1270,7 +1270,9 @@ struct Exp2OpConversion
     // which flushes input and output denorms. `llvm.amdgcn.exp2.f32` provides
     // direct access to v_exp_f32. For `llvm.exp2.f32`, the LLVM backend inserts
     // instructions to handle denorms iff `allow_flush_denorm` is False.
-    StringRef funcName = ftz ? "llvm.amdgcn.exp2.f32" : "llvm.exp2.f32";
+    // StringRef funcName = ftz ? "llvm.amdgcn.exp2.f32" : "llvm.exp2.f32";
+    // Only support llvm.exp2.f32 now, ftz is controled by __HIP_FTZ in compiler.py
+    StringRef funcName = "llvm.exp2.f32";
     Type funcType = getFunctionType(elemTy, operands[0]);
     LLVM::LLVMFuncOp funcOp =
         appendOrGetExternFuncOp(rewriter, op, funcName, funcType);
