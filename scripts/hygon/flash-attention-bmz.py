@@ -145,6 +145,11 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     else:
         start_m = tl.program_id(0)
         off_hz = tl.program_id(1)
+
+    # Reverse the ordering of blocks, issue heavy-load blocks first, issue light-load blocks last
+    # So that to reduce the idle state of simd wave slots
+    start_m = tl.cdiv(N_CTX, BLOCK_M) - 1 - start_m
+
     off_kh = off_hz // q_num_per_group
     #x方向的线程块能处理的所有数据大小，既N_CTX*BLOCK_DMODEL,(4096,128),
     q_offset = off_hz * stride_qh
@@ -680,7 +685,10 @@ class _attention(torch.autograd.Function):
         #casual=false stage=1
         stage = 3 if causal else 1
         #分配线程块
-        if k_head < q_head:
+
+
+        #if k_head < q_head:
+        if True:
             grid = lambda META: (
                 q.shape[0] * q.shape[1],
                 triton.cdiv(q.shape[2], META['BLOCK_M']),
@@ -688,12 +696,17 @@ class _attention(torch.autograd.Function):
             )
             grid_axis_hz = 0
         else:
+            # for MHA cases, reverse the ordering of the blocks would deteriotate performance,
+            # switch to the grid layout of GQA would solve this issue.
+            # TODO: why? Need to look into it
             grid = lambda META: (
                 triton.cdiv(q.shape[2], META['BLOCK_M']),
                 q.shape[0] * q.shape[1],
                 1
             )
             grid_axis_hz = 1
+
+
         #M用于保留每行的最大值。所以M的维度就是[BATCH*N_HEAD,N_CTX]
         M = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         _attn_fwd[grid](
