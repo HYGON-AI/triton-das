@@ -242,15 +242,13 @@ def get_thirdparty_packages(packages: list):
         package_dir = os.path.join(package_root_dir, p.name)
         if os.environ.get(p.syspath_var_name):
             package_dir = os.environ[p.syspath_var_name]
-        version_file_path = os.path.join(package_dir, "version.txt")
 
         input_defined = p.syspath_var_name in os.environ
-        input_exists = os.path.exists(version_file_path)
-        input_compatible = input_exists and Path(version_file_path).read_text() == p.url
+        input_exists = os.path.exists(package_dir)
 
         if is_offline_build() and not input_defined:
             raise RuntimeError(f"Requested an offline build but {p.syspath_var_name} is not set")
-        if not is_offline_build() and not input_defined and not input_compatible:
+        if not is_offline_build() and not input_defined and not input_exists:
             with contextlib.suppress(Exception):
                 shutil.rmtree(package_root_dir)
             os.makedirs(package_root_dir, exist_ok=True)
@@ -263,9 +261,6 @@ def get_thirdparty_packages(packages: list):
                 else:
                     with tarfile.open(fileobj=response, mode="r|*") as file:
                         file.extractall(path=package_root_dir)
-            # write version url to package_dir
-            with open(os.path.join(package_dir, "version.txt"), "w") as f:
-                f.write(p.url)
         if p.include_flag:
             thirdparty_cmake_args.append(f"-D{p.include_flag}={package_dir}/include")
         if p.lib_flag:

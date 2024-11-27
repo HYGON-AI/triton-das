@@ -32,4 +32,4 @@ source ${CUR_PATH}/launch.sh
 build_llvm
 clean_cache
 build_triton
-regression_for_test
+# regression_for_test

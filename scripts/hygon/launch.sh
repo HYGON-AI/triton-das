@@ -182,6 +182,7 @@ function build_llvm() {
   package_server="172.18.19.8"
   package_path="/builds/ai_compiler/llvm4triton"
   package_user="sw-builder"
+  password="swadmin"
   hash=`grep -m 1 -v '^$' cmake/llvm-hash.txt`
   hash=${hash:0:8}
   platform=$(cat /etc/*release | grep '^ID=' | awk -F '=' '{print $2}' | tr -d '"')
@@ -221,7 +222,25 @@ function build_llvm() {
     ninja install -j${MAX_JOBS}
     cd ..
     tar -zcf ${package_name}.tar.gz ${package_name}
-    scp -o StrictHostKeyChecking=no ${package_name}.tar.gz ${package_user}@${package_server}:${package_path}/
+    expect -c """
+      set timeout 14400
+      spawn rsync -avP ${package_name}.tar.gz ${package_user}@${package_server}:${package_path}/
+      expect {
+        \"*yes/no*\" {
+          send \"yes\n\"
+            expect \"*assword:\" {
+            send \"${password}\n\"
+            expect eof
+          }
+        }
+        \"*assword:\" {
+          send \"${password}\n\"
+          expect eof
+        }
+        eof
+      }
+      wait
+    """
   fi
   popd
 }
