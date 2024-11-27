@@ -377,10 +377,12 @@ def _attn_bwd_dkdv(dk, dv,
 
 # the main inner-loop logic for computing dQ
 @triton.jit
-def _attn_bwd_dq(dq, q, K, V,
+def _attn_bwd_dq(dq, q, K, KT, V,
                  do, m, D,
                  # shared by Q/K/V/DO.
                  stride_tok, stride_d,
+                 # shared by QT/KT/VT/DOT
+                 stride_td, stride_ttok,
                  H, N_CTX,
                  BLOCK_M2: tl.constexpr,
                  BLOCK_N2: tl.constexpr,
@@ -399,6 +401,17 @@ def _attn_bwd_dq(dq, q, K, V,
         block_shape=(BLOCK_DMODEL, BLOCK_N2),
         order=(0, 1)
     )
+
+    # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
+    K_block_ptr = tl.make_block_ptr(
+        base=KT,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_ttok, stride_td),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_N2, BLOCK_DMODEL),
+        order=(0,1)
+    )
+
     VT_block_ptr = tl.make_block_ptr(
         base=V,
         shape=(BLOCK_DMODEL, N_CTX),
@@ -424,16 +437,21 @@ def _attn_bwd_dq(dq, q, K, V,
             p = tl.where(mask, p, 0.0)
         # Compute dP and dS.
         vT = tl.load(VT_block_ptr)
+        k = tl.load(K_block_ptr)
         dp = tl.dot(do, vT).to(tl.float32)
+
         ds = p * (dp - Di[:, None])
         ds = ds.to(tl.float16)
         # Compute dQ.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
-        dq += tl.dot(ds, tl.trans(kT))
+        # dq += tl.dot(ds, tl.trans(kT))
+        dq += tl.dot(ds, k)
+
         # Increment pointers.
         curr_n += step_n
         KT_block_ptr = tl.advance(KT_block_ptr, (0, step_n))
         VT_block_ptr = tl.advance(VT_block_ptr, (0, step_n))
+        K_block_ptr = tl.advance(K_block_ptr, (step_n, 0))
     return dq
 
 
@@ -448,7 +466,7 @@ def _attn_bwd_dq(dq, q, K, V,
 )
 
 @triton.jit
-def _attn_bwd(Q, QT, K, V, sm_scale,
+def _attn_bwd(Q, QT, K, KT, V, sm_scale,
               DO,
               DQ, DK, DV,
               M, D,
@@ -482,6 +500,7 @@ def _attn_bwd(Q, QT, K, V, sm_scale,
     Q += adj
     QT+= adj
     K += k_adj
+    KT+= k_adj
     V += k_adj
     DO += adj
     DQ += adj
@@ -490,6 +509,82 @@ def _attn_bwd(Q, QT, K, V, sm_scale,
     M += off_chz
     D += off_chz
 
+    # THIS BLOCK DOES DQ:
+    start_m = pid * BLOCK_M2
+    end_n = start_m + BLOCK_M2
+
+    MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
+
+    Q_block_ptr = tl.make_block_ptr(
+        base=Q,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_tok, stride_d),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M2, BLOCK_DMODEL),
+        order=(1, 0)
+    )
+
+    DO_block_ptr = tl.make_block_ptr(
+        base=DO,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_tok, stride_d),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M2, BLOCK_DMODEL),
+        order=(1, 0)
+    )
+    q = tl.load(Q_block_ptr)
+    do = tl.load(DO_block_ptr)
+    dq = tl.zeros([BLOCK_M2, BLOCK_DMODEL], dtype=tl.float32)
+
+    m = tl.load(M + offs_m)
+    m = m[:, None]
+
+    # Compute dQ for masked (diagonal) blocks.
+    # NOTE: This code scans each row of QK^T backward (from right to left,
+    # but inside each call to _attn_bwd_dq, from left to right), but that's
+    # not due to anything important.  I just wanted to reuse the loop
+    # structure for dK & dV above as much as possible.
+    num_steps = BLOCK_M2 // MASK_BLOCK_N2
+    dq = _attn_bwd_dq(dq, q, K, KT, V,
+                      do, m, D,
+                      stride_tok, stride_d,
+                      stride_td, stride_ttok,
+                      H, N_CTX,
+                      BLOCK_M2, MASK_BLOCK_N2, BLOCK_DMODEL,
+                      start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,
+                      MASK=True
+                      )
+    end_n -= num_steps * MASK_BLOCK_N2
+    # stage 2
+    #与求dk,dv是类似的，只不过dk,dv是按照i方向从上到下，dq是按照j方向，从左到右。
+    #都是累加下三角的数据，只不过dk，dv是下三角对列上的值进行累加，dq是对行上的所有值进行累加。
+
+    num_steps = end_n // BLOCK_N2
+    dq = _attn_bwd_dq(dq, q, K, KT, V,
+                      do, m, D,
+                      stride_tok, stride_d,
+                      stride_td, stride_ttok,
+                      H, N_CTX,
+                      BLOCK_M2, BLOCK_N2, BLOCK_DMODEL,
+                      start_m, end_n - num_steps * BLOCK_N2, num_steps,
+                      MASK=False
+                      )
+    # Write back dQ.
+    DQ_block_ptr = tl.make_block_ptr(
+        base=DQ,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_tok, stride_d),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M2, BLOCK_DMODEL),
+        order=(1, 0)
+    )
+    dq *= LN2
+    tl.store(DQ_block_ptr, dq.to(tl.float16))
+
+
+
+    # THIS BLOCK DOES DK & DV:
     offs_k = tl.arange(0, BLOCK_DMODEL)
     #每个线程块要处理K,V的位置
     start_n = pid * BLOCK_N1
@@ -583,76 +678,7 @@ def _attn_bwd(Q, QT, K, V, sm_scale,
     )
     tl.store(DK_block_ptrs, dk.to(tl.float16))
 
-    # THIS BLOCK DOES DQ:
-    start_m = pid * BLOCK_M2
-    end_n = start_m + BLOCK_M2
 
-    MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
-    offs_m = start_m + tl.arange(0, BLOCK_M2)
-
-    Q_block_ptr = tl.make_block_ptr(
-        base=Q,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M2, BLOCK_DMODEL),
-        order=(1, 0)
-    )
-
-    DO_block_ptr = tl.make_block_ptr(
-        base=DO,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M2, BLOCK_DMODEL),
-        order=(1, 0)
-    )
-    q = tl.load(Q_block_ptr)
-    do = tl.load(DO_block_ptr)
-    dq = tl.zeros([BLOCK_M2, BLOCK_DMODEL], dtype=tl.float32)
-
-    m = tl.load(M + offs_m)
-    m = m[:, None]
-
-    # Compute dQ for masked (diagonal) blocks.
-    # NOTE: This code scans each row of QK^T backward (from right to left,
-    # but inside each call to _attn_bwd_dq, from left to right), but that's
-    # not due to anything important.  I just wanted to reuse the loop
-    # structure for dK & dV above as much as possible.
-    num_steps = BLOCK_M2 // MASK_BLOCK_N2
-    dq = _attn_bwd_dq(dq, q, K, V,
-                      do, m, D,
-                      stride_tok, stride_d,
-                      H, N_CTX,
-                      BLOCK_M2, MASK_BLOCK_N2, BLOCK_DMODEL,
-                      start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,
-                      MASK=True
-                      )
-    end_n -= num_steps * MASK_BLOCK_N2
-    # stage 2
-    #与求dk,dv是类似的，只不过dk,dv是按照i方向从上到下，dq是按照j方向，从左到右。
-    #都是累加下三角的数据，只不过dk，dv是下三角对列上的值进行累加，dq是对行上的所有值进行累加。
-
-    num_steps = end_n // BLOCK_N2
-    dq = _attn_bwd_dq(dq, q, K, V,
-                      do, m, D,
-                      stride_tok, stride_d,
-                      H, N_CTX,
-                      BLOCK_M2, BLOCK_N2, BLOCK_DMODEL,
-                      start_m, end_n - num_steps * BLOCK_N2, num_steps,
-                      MASK=False
-                      )
-    # Write back dQ.
-    DQ_block_ptr = tl.make_block_ptr(
-        base=DQ,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M2, BLOCK_DMODEL),
-        order=(1, 0)
-    )
-    dq *= LN2
-    tl.store(DQ_block_ptr, dq.to(tl.float16))
 
 
 class _attention(torch.autograd.Function):
@@ -751,6 +777,7 @@ class _attention(torch.autograd.Function):
 
         # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
         qt = q.transpose(-1, -2).contiguous()
+        kt = k.transpose(-1, -2).contiguous()
 
         BATCH, N_HEAD, N_CTX = q.shape[:3]
         K_HEAD = k.shape[1]
@@ -762,6 +789,10 @@ class _attention(torch.autograd.Function):
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
         arg_k = k
         arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
+
+        arg_kt = kt
+        arg_kt = arg_kt * (ctx.sm_scale * RCP_LN2)
+
         assert N_CTX % PRE_BLOCK == 0
         pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
         delta = torch.empty_like(M)
@@ -782,7 +813,7 @@ class _attention(torch.autograd.Function):
             BATCH * N_HEAD
         )
         _attn_bwd[grid](
-            q, qt, arg_k, v, ctx.sm_scale, do, dq, dk, dv,
+            q, qt, arg_k, arg_kt, v, ctx.sm_scale, do, dq, dk, dv,
             M, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),k.stride(0),
             qt.stride(2), qt.stride(3),
