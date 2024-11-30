@@ -34,6 +34,42 @@ int getMfmaMmacVersion(StringRef archGen) {
   return (int)MfmaMmacVersion::MFMA_MMAC_NONE;
 }
 
+/* Hygon support: mmac v1 dont have chaindot or has special accel mode */
+bool hasReduceInChainDots(Operation *dotOp) {
+  if (!dotOp->hasTrait<OpTrait::DotLike>())
+    return false;
+
+  auto filter = [dotOp](Operation *op) {
+    return op->getParentRegion() == dotOp->getParentRegion();
+  };
+
+  // step 1. collect chain dots
+  SmallVector<Operation *, 4> chainDots{dotOp};
+
+  ForwardSliceOptions fwdOpt;
+  fwdOpt.filter = filter;
+  BackwardSliceOptions bwdOpt;
+  bwdOpt.omitBlockArguments = true;
+  bwdOpt.filter = filter;
+  auto slices = getSlice(dotOp, bwdOpt, fwdOpt);
+  for (Operation *op : slices) {
+    if ((op->hasTrait<OpTrait::DotLike>() && (op != dotOp)))
+      chainDots.push_back(op);
+  }
+
+  // step 2. check reduce exist in chain dots.
+  for(auto dot : chainDots) {
+    SetVector<mlir::Operation*> fwdSlices;
+    getForwardSlice(dot, &fwdSlices);
+    for (Operation *op : fwdSlices) {
+      if (isa<tt::ReduceOp>(op))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 int getMfmaVersion(ISAFamily isaFamily) {
   switch (isaFamily) {
   case ISAFamily::CDNA1:
@@ -58,7 +94,7 @@ int getWmmaVersion(StringRef archGen) {
 
 SmallVector<unsigned, 3>
 warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
-             std::pair<int64_t, int64_t> shapePerWarp) {
+             std::pair<int64_t, int64_t> shapePerWarp, int mfmaMmacVersion = 0) {
   auto rank = shape.size();
   // Early exit for batched matmul
   if (rank == 3)
@@ -73,9 +109,15 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
   bwdOpt.omitBlockArguments = true;
   bwdOpt.filter = filter;
   auto slices = getSlice(dotOp, bwdOpt, fwdOpt);
+
+  /* Hygon support: mmac v1 don't have chaindot or has special accel mode */
+  bool mmacV1 = isMfmaMmacV1(mfmaMmacVersion);
+  bool reduceInChainDots = hasReduceInChainDots(dotOp);
+
   for (Operation *op : slices)
-    if (op->hasTrait<OpTrait::DotLike>() && (op != dotOp))
-      return {(unsigned)numWarps, 1};
+    if ((op->hasTrait<OpTrait::DotLike>() && (op != dotOp)))
+      if (!mmacV1 || reduceInChainDots)
+        return {(unsigned)numWarps, 1};
 
   SmallVector<int64_t, 2> tensorShape = {shape[0], shape[1]};
   SmallVector<unsigned, 3> ret = {1, 1};
@@ -102,8 +144,8 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
 
 SmallVector<unsigned, 3>
 warpsPerTileMFMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
-                 std::pair<int64_t, int64_t> shapePerWarp) {
-  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp);
+                 std::pair<int64_t, int64_t> shapePerWarp, int mfmaMmacVersion = 0) {
+  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp, mfmaMmacVersion);
 }
 
 SmallVector<unsigned, 3>
@@ -410,8 +452,7 @@ public:
     auto kDim = mfmaInstr.value().getKDim();
     auto kBase = mfmaInstr.value().getKBase();
 
-    auto warpsPerTile =
-        warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
+    auto warpsPerTile = warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim}, mfmaMmacVersion);
 
     #if 0
     // Always use transposed mfma layout. This enables larger vectorization
@@ -421,12 +462,11 @@ public:
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
         /*instrShape*/ mDim, nDim, /*isTransposed*/ true, CTALayout);
     #endif
-    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on Hygon DCUs,
-    // always disuse it to disable related optimization code.
+    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ mfmaMmacVersion, warpsPerTile,
-        /*instrShape*/ mDim, nDim, /*isTransposed*/ false, CTALayout);
+        /*instrShape*/ mDim, nDim, /*isTransposed*/ !isMfmaMmacV1(mfmaMmacVersion), CTALayout);
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
