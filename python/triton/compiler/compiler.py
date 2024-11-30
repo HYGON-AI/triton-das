@@ -382,6 +382,7 @@ class CompiledKernel:
         # (e.g., checking amount of shared memory on current device)
         self.module = None
         self.function = None
+        self.perf_ir_path = os.path.dirname(str(asm_files[0]))
 
     def _init_handles(self):
         if self.module is not None:

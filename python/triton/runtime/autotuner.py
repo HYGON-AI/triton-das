@@ -28,6 +28,8 @@ class Autotuner(KernelInterface):
         rep=None,
         use_cuda_graph=False,
         do_bench=None,
+        perf_debug=False,
+        perf_profiling=False,
     ):
         """
         :param prune_configs_by: a dict of functions that are used to prune configs, fields:
@@ -97,6 +99,9 @@ class Autotuner(KernelInterface):
         self.num_warmups = warmup
         self.num_reps = rep
         self.use_cuda_graph = use_cuda_graph
+        self.perf_debug = perf_debug
+        self.perf_dict  = {}
+        self.perf_profiling = perf_debug and perf_profiling
 
         # If we got explicitly called via the old interface, raise a warning
         # and proceed with the old behavior.
@@ -120,6 +125,7 @@ class Autotuner(KernelInterface):
                 warmup=warmup if warmup is not None else 25,
                 rep=rep if rep is not None else 100,
                 quantiles=quantiles,
+                perf_profiling=perf_profiling if self.perf_profiling else False
             )
             return
 
@@ -150,7 +156,7 @@ class Autotuner(KernelInterface):
                 config.pre_hook(full_nargs)
             self.pre_hook(full_nargs)
             try:
-                self.fn.run(
+                compiled_kernel = self.fn.run(
                     *args,
                     **current,
                 )
@@ -163,6 +169,8 @@ class Autotuner(KernelInterface):
 
             self.post_hook(full_nargs, exception=None)
 
+            if (self.perf_debug and config not in self.perf_dict):
+                self.perf_dict[config]=compiled_kernel
         try:
             return self.do_bench(kernel_call, quantiles=(0.5, 0.2, 0.8))
         except (OutOfResources, CompileTimeAssertionFailure, PTXASError) as e:
@@ -193,6 +201,23 @@ class Autotuner(KernelInterface):
                 full_nargs = {**self.nargs, **kwargs, **self.cache[key].all_kwargs()}
                 self.pre_hook(full_nargs, reset_only=True)
                 self.configs_timings = timings
+
+                if self.perf_debug:
+                   print(f"\n{self.base_fn.__name__}:\n" + str(key) + " Configs:\n")
+                   for index, (key_config, compiled_kernel) in enumerate(self.perf_dict.items(), 0):
+                       perf_time = timings[key_config][0]
+                       perf_best = "*" if key_config == self.cache[key] else " "
+                       num_warmup=self.warmup if self.warmup is not None else 25
+                       num_reps=self.num_reps if self.num_reps is not None else 100
+                       profiling_cnt = 1 if self.perf_profiling == True else max(1, int(num_reps / perf_time))
+                       n_spill_bytes = compiled_kernel.n_spills * 4
+                       print(f"{perf_best}{index:2d}  : " + str(key_config) + f", waves_per_eu: {compiled_kernel.metadata.waves_per_eu} " +
+                             "\n\t : " + f"times({profiling_cnt} statics, rep:{num_reps} ms): {perf_time} ms" +
+                             "\n\t : " + f"share_mem: {compiled_kernel.metadata.shared}, n_regs: {compiled_kernel.n_regs}, n_spill_bytes: {n_spill_bytes} +-4" +
+                             "\n\t : " + f"cache_ir_path: {compiled_kernel.perf_ir_path}\n")
+
+                   self.perf_dict = {}
+
             config = self.cache[key]
         else:
             config = self.configs[0]
@@ -298,7 +323,7 @@ class Config:
 
 
 def autotune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_value=None, pre_hook=None, post_hook=None,
-             warmup=None, rep=None, use_cuda_graph=False, do_bench=None):
+             warmup=None, rep=None, use_cuda_graph=False, do_bench=None, perf_debug=False, perf_profiling=False):
     """
     Decorator for auto-tuning a :code:`triton.jit`'d function.
 
@@ -357,7 +382,7 @@ def autotune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_va
     def decorator(fn):
         return Autotuner(fn, fn.arg_names, configs, key, reset_to_zero, restore_value, pre_hook=pre_hook,
                          post_hook=post_hook, prune_configs_by=prune_configs_by, warmup=warmup, rep=rep,
-                         use_cuda_graph=use_cuda_graph)
+                         use_cuda_graph=use_cuda_graph, perf_debug=perf_debug, perf_profiling=perf_profiling)
 
     return decorator
 
