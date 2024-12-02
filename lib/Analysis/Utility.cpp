@@ -606,6 +606,8 @@ bool isBlockedToDotShortcut(RankedTensorType &srcTy, RankedTensorType &dstTy) {
 }
 
 bool isMfmaToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
+  if (!triton::tools::getBoolEnv("CHAINED_DOT_SHORTCUT"))
+    return false;
   auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(srcTy.getEncoding());
   auto dotOperandLayout = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
   if (mfmaLayout == nullptr || dotOperandLayout == nullptr)
@@ -614,8 +616,9 @@ bool isMfmaToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
   // improved. In addition, we can enable this shortcut for regular MFMA
   // layout when opIdx == 1.
   return mfmaLayout.getWarpsPerCTA()[1] == 1 &&
-         dotOperandLayout.getOpIdx() == 0 && mfmaLayout.getIsTransposed() &&
-         dotOperandLayout.getKWidth() == getContigPerThread(mfmaLayout)[1] &&
+         dotOperandLayout.getOpIdx() == 0 &&
+         //mfmaLayout.getIsTransposed() &&
+         //dotOperandLayout.getKWidth() == getContigPerThread(mfmaLayout)[1] &&
          dotOperandLayout.getParent() == mfmaLayout &&
          (mfmaLayout.getMDim() == 32 || mfmaLayout.getMDim() == 16) &&
          (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());

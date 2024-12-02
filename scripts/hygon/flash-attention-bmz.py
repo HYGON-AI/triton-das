@@ -49,7 +49,7 @@ name_to_torch_types = {
 ORIGIN_INTERLEAVE_ENABLED = InterleaveManager.is_enabled()
 
 # Turn it on in need. ONLY work for fwd. Manually disabled in bwd.
-ENABLE_FWD_INTERLEAVE = False
+ENABLE_FWD_INTERLEAVE = True
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,
