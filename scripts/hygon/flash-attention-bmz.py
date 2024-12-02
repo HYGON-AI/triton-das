@@ -20,25 +20,26 @@ import triton.language as tl
 
 class InterleaveManager:
     KEY = "CHAINED_DOT_SHORTCUT"
-    @staticmethod
-    def enable():
-        os.environ[InterleaveManager.KEY] = 'ON'
 
-    @staticmethod
-    def disable():
-        if InterleaveManager.KEY in os.environ:
-            del os.environ[InterleaveManager.KEY]
+    @classmethod
+    def enable(cls):
+        os.environ[cls.KEY] = 'ON'
 
-    @staticmethod
-    def is_enabled():
-        return os.getenv(InterleaveManager.KEY) == 'ON'
+    @classmethod
+    def disable(cls):
+        if cls.KEY in os.environ:
+            del os.environ[cls.KEY]
 
-    @staticmethod
-    def reset(enable):
+    @classmethod
+    def is_enabled(cls):
+        return os.getenv(cls.KEY) == 'ON'
+
+    @classmethod
+    def reset(cls, enable):
         if enable:
-            InterleaveManager.enable()
+            cls.enable()
         else:
-            InterleaveManager.disable()
+            cls.disable()
 
 
 name_to_torch_types = {
@@ -46,6 +47,9 @@ name_to_torch_types = {
 }
 
 ORIGIN_INTERLEAVE_ENABLED = InterleaveManager.is_enabled()
+
+# Turn it on in need. ONLY work for fwd. Manually disabled in bwd.
+ENABLE_FWD_INTERLEAVE = False
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,
@@ -844,7 +848,7 @@ attention = _attention.apply
 @pytest.mark.parametrize('dtype', ['fp16'])
 @pytest.mark.parametrize('causal', [False, True])
 def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
-    InterleaveManager.enable()
+    InterleaveManager.reset(ENABLE_FWD_INTERLEAVE)
     torch.manual_seed(20)
     q = torch.empty((Z, Q_H, N_CTX, D_HEAD), dtype=torch.float16, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     k = torch.empty((Z, K_H, N_CTX, D_HEAD), dtype=torch.float16, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
@@ -879,7 +883,8 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
     for i in range(N_CTX):
         j = (i % 4) * 4 + int((i % 16) / 4) + int(i / 16) * 16
         tk.transpose(2, 3)[:, :, :, j] = k.transpose(2, 3)[:, :, :, i]
-    tri_out = attention(q, tk, v, causal, sm_scale, True)
+    k = tk if InterleaveManager.is_enabled() else k
+    tri_out = attention(q, k, v, causal, sm_scale, InterleaveManager.is_enabled())
     # compare
     atol = 1.4e-1 if dtype == 'fp8' else 1e-2
     rtol = 1e-2 if dtype == 'fp8' else 0
@@ -994,7 +999,7 @@ def bench_flash_attention(BATCH, H, K_H, N_CTX, D_HEAD, causal, mode, provider, 
         causal = True
         InterleaveManager.disable()
     else:
-        InterleaveManager.enable()
+        InterleaveManager.reset(ENABLE_FWD_INTERLEAVE)
     if provider == "triton":
         q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k = torch.randn((BATCH, K_H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
