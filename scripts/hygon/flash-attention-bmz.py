@@ -717,8 +717,7 @@ class _attention(torch.autograd.Function):
         #分配线程块
 
 
-        #if k_head < q_head:
-        if True:
+        if k_head < q_head:
             grid = lambda META: (
                 q.shape[0] * q.shape[1],
                 triton.cdiv(q.shape[2], META['BLOCK_M']),
@@ -835,16 +834,40 @@ class _attention(torch.autograd.Function):
 
 attention = _attention.apply
 
+attention_perf_model_cases_list = [
+    # 'Z, Q_H, K_H, N_CTX, D_HEAD'
+    # Ali case
+    (1, 16, 16, 8192, 128),
+    (1, 32, 32, 8192, 128),
+    (1, 32,  4, 8192, 128),
+    (1, 52,  4, 8192, 128),
+    (1, 16,  2, 8192, 128),
+    (1, 26,  2, 8192, 128),
+    (1,  8,  1, 8192, 128),
+    (1, 13,  1, 8192, 128),
+    # llama2-7b
+    (1, 32, 32, 4096, 128),
+    (1, 16, 16, 4096, 128),
+    (1, 8,  8,  4096, 128),
+    (1, 4,  4,  4096, 128),
+    # llama2-13b
+    (1, 40, 40, 4096, 128),
+    (1, 20, 20, 4096, 128),
+    (1, 10, 10, 4096, 128),
+    (1, 5,  5,  4096, 128),
+    # llama3-8b
+    (1, 32, 8,  8192, 128),
+    (1, 16, 4,  8192, 128),
+    (1, 8,  2,  8192, 128),
+    (1, 4,  1,  8192, 128),
+    # qwen2-7b
+    (1, 28, 4,  4096, 128),
+    (1, 14, 2,  4096, 128),
+    (1, 7,  1,  4096, 128),
+]
+
 @pytest.mark.parametrize('Z, Q_H, K_H, N_CTX, D_HEAD',
-                         [(1, 16, 16, 8192, 128),
-                          (1, 32, 32, 8192, 128),
-                          (1,  8,  1, 8192, 128),
-                          (1, 13,  1, 8192, 128),
-                          (1, 16,  2, 8192, 128),
-                          (1, 26,  2, 8192, 128),
-                          (1, 32,  4, 8192, 128),
-                          (1, 52,  4, 8192, 128),
-                          ])
+                         attention_perf_model_cases_list)
 @pytest.mark.parametrize('dtype', ['fp16'])
 @pytest.mark.parametrize('causal', [False, True])
 def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
@@ -894,15 +917,7 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
 
 
 @pytest.mark.parametrize('Z, Q_H, K_H, N_CTX, D_HEAD',
-                         [(1, 16, 16, 8192, 128),
-                          (1, 32, 32, 8192, 128),
-                          (1,  8,  1, 8192, 128),
-                          (1, 13,  1, 8192, 128),
-                          (1, 16,  2, 8192, 128),
-                          (1, 26,  2, 8192, 128),
-                          (1, 32,  4, 8192, 128),
-                          (1, 52,  4, 8192, 128),
-                          ])
+                         attention_perf_model_cases_list)
 def test_op_bwd(Z, Q_H, K_H, N_CTX, D_HEAD, dtype=torch.float16):
     InterleaveManager.disable()
     torch.manual_seed(20)
@@ -959,35 +974,25 @@ HAS_FLASH = False
 
 configs = []
 for mode in ['fwd', 'bwd']:
-    for D_HEAD in [128]:
-        for causal in [True]:
-            if mode == 'bwd' and causal == False:
-                continue
-            configs.append(triton.testing.Benchmark(
-                x_names=['BATCH', 'H', 'K_H', 'N_CTX'],
-                    x_vals=[(1, 16, 16, 8192),
-                            (1, 32, 32, 8192),
-                            (1,  8,  1, 8192),
-                            (1, 13,  1, 8192),
-                            (1, 16,  2, 8192),
-                            (1, 26,  2, 8192),
-                            (1, 32,  4, 8192),
-                            (1, 52,  4, 8192),
-                          ],
-                line_arg='provider',
-                line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
-                line_names=['Triton'] + ([f'Flash'] if HAS_FLASH else []),
-                styles=[('red', '-'), ('blue', '-')],
-                ylabel='ms',
-                xlabel='hhh',
-                plot_name=f'fused-attention-{mode}-d{D_HEAD}-causal={causal}',
-                args={
-                    'D_HEAD': D_HEAD,
-                    'dtype': torch.float16,
-                    'mode': mode,
-                    'causal': causal,
-                },
-            ))
+    for causal in [True]:
+        if mode == 'bwd' and causal == False:
+            continue
+        configs.append(triton.testing.Benchmark(
+            x_names=['BATCH', 'H', 'K_H', 'N_CTX', 'D_HEAD'],
+            x_vals= attention_perf_model_cases_list,
+            line_arg='provider',
+            line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
+            line_names=['Triton'] + ([f'Flash'] if HAS_FLASH else []),
+            styles=[('red', '-'), ('blue', '-')],
+            ylabel='ms',
+            xlabel='hhh',
+            plot_name=f'fused-attention-{mode}-causal={causal}',
+            args={
+                'dtype': torch.float16,
+                'mode': mode,
+                'causal': causal,
+            },
+        ))
 
 @triton.testing.perf_report(configs)
 def bench_flash_attention(BATCH, H, K_H, N_CTX, D_HEAD, causal, mode, provider, dtype=torch.float16, device="cuda"):
