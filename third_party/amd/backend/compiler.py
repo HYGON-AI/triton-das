@@ -248,7 +248,8 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_optimize_thread_locality(pm)
         amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        amd.passes.ttgpuir.add_optimize_epilogue(pm)
+        if os.environ.get("OPTIMIZE_EPILOGUE", "") == "1":
+            amd.passes.ttgpuir.add_optimize_epilogue(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
 
         stream_prefetch = os.getenv("TRITON_HIP_STREAM_PREFETCH", "0") == "1"
