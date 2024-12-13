@@ -13,7 +13,7 @@ function usage() {
 
 BRANCH_TAG=$(git rev-parse --abbrev-ref HEAD | sed 's/\//./g')
 ROCM_TAG="rocm5.7x"
-export TRITON_WHEEL_VERSION_SUFFIX=".${BRANCH_TAG}.${ROCM_TAG}"
+# export TRITON_WHEEL_VERSION_SUFFIX=".${BRANCH_TAG}.${ROCM_TAG}"
 
 while [ $# -gt 0 ]; do
   if [ "$1" == "--release" ]; then
