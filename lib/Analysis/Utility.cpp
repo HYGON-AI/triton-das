@@ -543,6 +543,23 @@ bool supportMMA(Value value, int version) {
          (elemTy.isInteger(8) && version >= 2);
 }
 
+bool isMmacV1ToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
+  if (!triton::tools::getBoolEnv("CHAINED_DOT_SHORTCUT"))
+    return false;
+  auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(srcTy.getEncoding());
+  auto dotOperandLayout = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+  if (mfmaLayout == nullptr || dotOperandLayout == nullptr)
+    return false;
+  // TODO: Remove the restriction on the warpsPerCTA once chain dot testing is
+  // improved. In addition, we can enable this shortcut for regular MFMA
+  // layout when opIdx == 1.
+  return mfmaLayout.getWarpsPerCTA()[1] == 1 &&
+         dotOperandLayout.getOpIdx() == 0 &&
+         dotOperandLayout.getParent() == mfmaLayout &&
+         (mfmaLayout.getMDim() == 32 || mfmaLayout.getMDim() == 16) &&
+         (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());
+}
+
 bool isBlockedToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
   auto blockedLayout = dyn_cast<BlockedEncodingAttr>(srcTy.getEncoding());
   auto dotOperandLayout = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
@@ -727,7 +744,13 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy) {
   // checks.
   // TODO(Keren): We didn't check `cvtNeedsWarpShuffle` here because it's not
   // supported yet in Triton's backend.
+
+  // TODO(xukang): For isMmacV1ToDotShortcut, since the interleave action is
+  // taken on the kernel algorithm side, we are not aware of the REAL cvt
+  // needed here. So we are depenedent on the environment variable to know if
+  // shortcut is enabled.
   return !cvtReordersRegisters(srcTy, dstTy) &&
+         !isMmacV1ToDotShortcut(srcTy, dstTy) &&
          !isBlockedToDotShortcut(srcTy, dstTy) &&
          !matchMmaV3AndDotOperandLayout(srcTy, dstTy);
 }
