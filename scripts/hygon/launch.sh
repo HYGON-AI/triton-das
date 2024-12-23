@@ -178,7 +178,6 @@ function clean_cache() {
 function build_llvm() {
   pushd ${SRC_HOME}
   repo="ssh://git@192.168.140.75:8022/buhui/llvm-project.git"
-  branch="hygon/triton"
   package_server="172.18.19.8"
   package_path="/builds/ai_compiler/llvm4triton"
   package_user="sw-builder"
@@ -196,16 +195,15 @@ function build_llvm() {
     # git repo already exist
     if [ -d "llvm-project" ] && [ -d "llvm-project/.git" ]; then
       cd llvm-project
-      git reset origin/${branch} --hard
-      git pull origin ${branch}
+      git fetch
     # git repo not exist, reclone
     else
       rm -rf llvm-project
       git clone ${repo}
       cd llvm-project
     fi
-    # git checkout -b local_staging origin/${branch}
-    git checkout ${hash}
+    git reset ${hash} --hard
+    git clean -fd
     mkdir -p build
     mkdir -p ${package_name}
     rm -rf ${package_name} ${package_name}.tar.gz
