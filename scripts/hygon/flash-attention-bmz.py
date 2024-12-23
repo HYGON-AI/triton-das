@@ -275,7 +275,7 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 @triton.jit
-def _attn_bwd_preprocess(O, DO,
+def _attn_bwd_preprocess(O, DO, Q, QT,
                          Delta,
                          Z, H, N_CTX,
                          BLOCK_M: tl.constexpr, D_HEAD: tl.constexpr
@@ -287,6 +287,8 @@ def _attn_bwd_preprocess(O, DO,
     do = tl.load(DO + off_hz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
     delta = tl.sum(o * do, axis=1)
     tl.store(Delta + off_hz * N_CTX + off_m, delta)
+    q = tl.load(Q + off_hz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :])
+    tl.store(QT + off_hz * D_HEAD * N_CTX + off_n[:, None] * N_CTX + off_m[None, :], tl.trans(q))
 
 
 # The main inner-loop logic for computing dK and dV.
@@ -795,7 +797,8 @@ class _attention(torch.autograd.Function):
 
         # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
         gqa_flag = N_HEAD != K_HEAD
-        qt = q.transpose(-1, -2).contiguous()
+        #qt = q.transpose(-1, -2).contiguous()
+        qt = torch.empty((q.shape[0], q.shape[1], q.shape[3], q.shape[2]), dtype=q.dtype, device="cuda")
         kt = k.transpose(-1, -2).contiguous() if gqa_flag else k
 
         PRE_BLOCK = 128
@@ -817,7 +820,7 @@ class _attention(torch.autograd.Function):
         #块的大小为[128,128],既[PRE_BLOCK,BLOCK_DMODEL],这与计算dv，dk,dq的kernel不同。
         #################################
         _attn_bwd_preprocess[pre_grid](
-            o, do,
+            o, do, q, qt,
             delta,
             BATCH, N_HEAD, N_CTX,
             BLOCK_M=PRE_BLOCK, D_HEAD=ctx.BLOCK_DMODEL
