@@ -797,20 +797,16 @@ class _attention(torch.autograd.Function):
 
         # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
         gqa_flag = N_HEAD != K_HEAD
-        #qt = q.transpose(-1, -2).contiguous()
-        qt = torch.empty((q.shape[0], q.shape[1], q.shape[3], q.shape[2]), dtype=q.dtype, device="cuda")
-        kt = k.transpose(-1, -2).contiguous() if gqa_flag else k
+        qt = torch.empty((q.shape[0], q.shape[1], q.shape[3], q.shape[2]), dtype=q.dtype,
+                         device="cuda")
 
         PRE_BLOCK = 128
         NUM_WARPS, NUM_STAGES = 4, 1
         BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
         BLK_SLICE_FACTOR = 2
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-        arg_k = k
-        arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
-
-        arg_kt = kt
-        arg_kt = arg_kt * (ctx.sm_scale * RCP_LN2)
+        arg_k = k * (ctx.sm_scale * RCP_LN2)
+        arg_kt = arg_k.transpose(-1, -2).contiguous() if gqa_flag else arg_k
 
         assert N_CTX % PRE_BLOCK == 0
         pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
