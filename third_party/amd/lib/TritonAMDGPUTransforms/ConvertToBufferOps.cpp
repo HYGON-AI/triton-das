@@ -16,6 +16,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/TypeSwitch.h"
 #include <deque>
 #include <optional>
@@ -59,8 +60,11 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
 
   // Recurse if the operation is defined
   Operation *op = expr.getDefiningOp();
-  if (!op)
+  if (!op) {
+    if (isa<BlockArgument>(expr) && triton::tools::getBoolEnv("KERNEL_ARG_NON_NEGATIVE"))
+      return true;
     return false;
+  }
 
   bool nonNegative =
       llvm::TypeSwitch<Operation *, bool>(expr.getDefiningOp())

@@ -11,6 +11,7 @@ Extra Credits:
 
 """
 
+from abc import ABC
 import pytest
 import torch
 import os
@@ -18,21 +19,23 @@ import os
 import triton
 import triton.language as tl
 
-class InterleaveManager:
-    KEY = "CHAINED_DOT_SHORTCUT"
+class EnvVarManager(ABC):
+    KEYS = []
 
     @classmethod
     def enable(cls):
-        os.environ[cls.KEY] = 'ON'
+        for k in cls.KEYS:
+            os.environ[k] = '1'
 
     @classmethod
     def disable(cls):
-        if cls.KEY in os.environ:
-            del os.environ[cls.KEY]
+        for k in cls.KEYS:
+            if k in os.environ:
+                del os.environ[k]
 
     @classmethod
     def is_enabled(cls):
-        return os.getenv(cls.KEY) == 'ON'
+        return all([os.getenv(k) == "1" for k in cls.KEYS])
 
     @classmethod
     def reset(cls, enable):
@@ -41,16 +44,25 @@ class InterleaveManager:
         else:
             cls.disable()
 
+class InterleaveManager(EnvVarManager):
+    KEYS = ["CHAINED_DOT_SHORTCUT"]
+
+class BufferOpManager(EnvVarManager):
+    # TODO(xukang): For now, we use 'KERNEL_ARG_NON_NEGATIVE'
+    # to make the hint, which is needed by buffer ops. Consider 
+    # using block argument attrs.
+    KEYS = ["AMDGCN_USE_BUFFER_OPS", "KERNEL_ARG_NON_NEGATIVE"]
 
 name_to_torch_types = {
     'fp16': torch.float16,
 }
 
 ORIGIN_INTERLEAVE_ENABLED = InterleaveManager.is_enabled()
+ORIGIN_BUFFER_OP_ENABLED = BufferOpManager.is_enabled()
 
 # Turn it on in need. ONLY work for fwd. Manually disabled in bwd.
-# FIXME: Interleave is NOT supported for now.
 ENABLE_FWD_INTERLEAVE = True
+ENABLE_BUFFER_OP = True
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,
@@ -885,6 +897,7 @@ attention_perf_model_cases_list = [
 @pytest.mark.parametrize('causal', [False, True])
 def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
     InterleaveManager.reset(ENABLE_FWD_INTERLEAVE)
+    BufferOpManager.reset(ENABLE_BUFFER_OP)
     torch.manual_seed(20)
     q = torch.empty((Z, Q_H, N_CTX, D_HEAD), dtype=torch.float16, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     k = torch.empty((Z, K_H, N_CTX, D_HEAD), dtype=torch.float16, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
@@ -927,12 +940,13 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, dtype):
     #pytest识别的是代码是否执行结束，如果是跳转或者中断就表示执行失败。
     torch.testing.assert_close(ref_out, tri_out, atol=atol, rtol=rtol)
     InterleaveManager.reset(ORIGIN_INTERLEAVE_ENABLED)
-
+    BufferOpManager.reset(ORIGIN_BUFFER_OP_ENABLED)
 
 @pytest.mark.parametrize('Z, Q_H, K_H, N_CTX, D_HEAD',
                          attention_perf_model_cases_list)
 def test_op_bwd(Z, Q_H, K_H, N_CTX, D_HEAD, dtype=torch.float16):
     InterleaveManager.disable()
+    BufferOpManager.reset(ENABLE_BUFFER_OP)
     torch.manual_seed(20)
     causal = True
     q = (torch.empty((Z, Q_H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
@@ -982,6 +996,7 @@ def test_op_bwd(Z, Q_H, K_H, N_CTX, D_HEAD, dtype=torch.float16):
     torch.testing.assert_close(ref_dk, tri_dk, atol=5e-2, rtol=1e-2)
     torch.testing.assert_close(ref_dq, tri_dq, atol=5e-2, rtol=1e-2)
     InterleaveManager.reset(ORIGIN_INTERLEAVE_ENABLED)
+    BufferOpManager.reset(ORIGIN_BUFFER_OP_ENABLED)
 
 HAS_FLASH = False
 
@@ -1018,6 +1033,7 @@ def bench_flash_attention(BATCH, H, K_H, N_CTX, D_HEAD, causal, mode, provider, 
         InterleaveManager.disable()
     else:
         InterleaveManager.reset(ENABLE_FWD_INTERLEAVE)
+    BufferOpManager.reset(ENABLE_BUFFER_OP)
     if provider == "triton":
         q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k = torch.randn((BATCH, K_H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
@@ -1037,6 +1053,7 @@ def bench_flash_attention(BATCH, H, K_H, N_CTX, D_HEAD, causal, mode, provider, 
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         InterleaveManager.reset(ORIGIN_INTERLEAVE_ENABLED)
+        BufferOpManager.reset(ORIGIN_BUFFER_OP_ENABLED)
     if provider == "flash":
         qkv = torch.randn((BATCH, N_CTX, 3, H, D_HEAD), dtype=dtype, device=device, requires_grad=True)
         fn = lambda: flash_attn_func(qkv, causal=causal)
