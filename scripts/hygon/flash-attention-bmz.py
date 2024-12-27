@@ -286,21 +286,50 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     tl.store(m_ptrs, m_i + tl.math.log2(l_i))
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
+@triton.autotune(
+   configs=[
+       triton.Config({'BLOCK_M': 32}),
+       triton.Config({'BLOCK_M': 64}),
+       triton.Config({'BLOCK_M': 128}),
+       triton.Config({'BLOCK_M': 256}),
+   ],
+   key=['H', 'N_CTX'],
+   rep=3, # though has warning, but it's ok, just for fast tuning
+)
 @triton.jit
-def _attn_bwd_preprocess(O, DO, Q, QT,
+def _attn_bwd_preprocess(O, DO, Q, QT, K,
+                         ARG_K, ARG_KT,
                          Delta,
-                         Z, H, N_CTX,
-                         BLOCK_M: tl.constexpr, D_HEAD: tl.constexpr
+                         Z, H,
+                         N_CTX: tl.constexpr,
+                         D_HEAD: tl.constexpr,
+                         GQA_FLAG: tl.constexpr,
+                         Q_NUM_PER_GROUP : tl.constexpr,
+                         ARG_K_SCALE: tl.constexpr,
+                         BLOCK_M: tl.constexpr
                          ):
+    tl.static_assert(N_CTX % BLOCK_M == 0)
+
+    hid = tl.program_id(1)
+    zid = tl.program_id(2)
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_hz = tl.program_id(1)
+    off_hz = zid * H + hid
     off_n = tl.arange(0, D_HEAD)
+
     o = tl.load(O + off_hz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :])
     do = tl.load(DO + off_hz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
     delta = tl.sum(o * do, axis=1)
     tl.store(Delta + off_hz * N_CTX + off_m, delta)
+
     q = tl.load(Q + off_hz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :])
     tl.store(QT + off_hz * D_HEAD * N_CTX + off_n[:, None] * N_CTX + off_m[None, :], tl.trans(q))
+
+    if (off_hz % Q_NUM_PER_GROUP) == 0:
+        off_khz = off_hz // Q_NUM_PER_GROUP
+        k = tl.load(K + off_khz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :])
+        tl.store(ARG_K + off_khz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :], k * ARG_K_SCALE)
+        if GQA_FLAG:
+            tl.store(ARG_KT + off_khz * D_HEAD * N_CTX + off_n[:, None] * N_CTX + off_m[None, :], tl.trans(k * ARG_K_SCALE))
 
 
 # The main inner-loop logic for computing dK and dV.
@@ -709,6 +738,46 @@ def _attn_bwd(Q, QT, K, KT, V, sm_scale,
 
 
 
+@triton.autotune(
+   configs=[
+       triton.Config({'BLOCK_M': 32}),
+       triton.Config({'BLOCK_M': 64}),
+       triton.Config({'BLOCK_M': 128}),
+       triton.Config({'BLOCK_M': 256}),
+   ],
+   key=['H', 'N_CTX'],
+   rep=3, # though has warning, but it's ok, just for fast tuning
+)
+@triton.jit
+def _attn_bwd_postprocess(
+            DK, DV,
+            DK_GQA, DV_GQA,
+            H,
+            N_CTX: tl.constexpr,
+            D_HEAD: tl.constexpr,
+            K_HEAD: tl.constexpr,
+            Q_NUM_PER_GROUP: tl.constexpr,
+            BLOCK_M: tl.constexpr):
+    tl.static_assert(N_CTX % BLOCK_M == 0)
+
+    khid = tl.program_id(1)
+    zid  = tl.program_id(2)
+    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_hz = zid * H + khid * Q_NUM_PER_GROUP
+    off_n = tl.arange(0, D_HEAD)
+
+    acc_dk = tl.zeros([BLOCK_M, D_HEAD], dtype=tl.float16)
+    acc_dv = tl.zeros([BLOCK_M, D_HEAD], dtype=tl.float16)
+    for h in range(Q_NUM_PER_GROUP):
+        dk = tl.load(DK + (off_hz + h) * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :])
+        dv = tl.load(DV + (off_hz + h) * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :])
+        acc_dk += dk
+        acc_dv += dv
+
+    off_khz = zid * K_HEAD + khid
+    tl.store(DK_GQA + off_khz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :], acc_dk)
+    tl.store(DV_GQA + off_khz * D_HEAD * N_CTX + off_m[:, None] * D_HEAD + off_n[None, :], acc_dv)
+
 
 class _attention(torch.autograd.Function):
 
@@ -811,27 +880,37 @@ class _attention(torch.autograd.Function):
         gqa_flag = N_HEAD != K_HEAD
         qt = torch.empty((q.shape[0], q.shape[1], q.shape[3], q.shape[2]), dtype=q.dtype,
                          device="cuda")
-
+        arg_k  = torch.empty_like(k)
+        arg_kt = torch.empty((k.shape[0], k.shape[1], k.shape[3], k.shape[2]), dtype=k.dtype,
+                         device="cuda") if gqa_flag else arg_k
         PRE_BLOCK = 128
         NUM_WARPS, NUM_STAGES = 4, 1
         BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
         BLK_SLICE_FACTOR = 2
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-        arg_k = k * (ctx.sm_scale * RCP_LN2)
-        arg_kt = arg_k.transpose(-1, -2).contiguous() if gqa_flag else arg_k
 
-        assert N_CTX % PRE_BLOCK == 0
-        pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
         delta = torch.empty_like(M)
+
+        pre_grid = lambda META: (
+            triton.cdiv(N_CTX, META['BLOCK_M']),
+            N_HEAD,
+            BATCH
+        )
         ##################################
         #提前计算rowsum(doi o oi),见公式，与公式对应。公式中求dsi的时候用到了这个。提前求出来。
         #块的大小为[128,128],既[PRE_BLOCK,BLOCK_DMODEL],这与计算dv，dk,dq的kernel不同。
         #################################
+        # arg_k = k * (ctx.sm_scale * RCP_LN2)
+        # arg_kt = arg_k.transpose(-1, -2).contiguous() if gqa_flag else arg_k
         _attn_bwd_preprocess[pre_grid](
-            o, do, q, qt,
+            o, do, q, qt, k, arg_k, arg_kt,
             delta,
-            BATCH, N_HEAD, N_CTX,
-            BLOCK_M=PRE_BLOCK, D_HEAD=ctx.BLOCK_DMODEL
+            BATCH, N_HEAD,
+            N_CTX=N_CTX,
+            D_HEAD=ctx.BLOCK_DMODEL,
+            GQA_FLAG=gqa_flag,
+            Q_NUM_PER_GROUP=q_num_per_group,
+            ARG_K_SCALE=ctx.sm_scale * RCP_LN2,
         )
         #K,V作为外部循环，每个线程块负责一块，Q作为内部循环，每个线程块都要循环遍历一遍。
         grid = lambda META: (
@@ -849,13 +928,33 @@ class _attention(torch.autograd.Function):
             BLOCK_DMODEL=ctx.BLOCK_DMODEL
         )
 
-        if N_HEAD != K_HEAD:
-            re_dk = dk.reshape(BATCH,K_HEAD,N_HEAD//K_HEAD,N_CTX,ctx.BLOCK_DMODEL)
-            dk = re_dk.sum(dim=2,keepdim=False)
-            re_dv = dv.reshape(BATCH,K_HEAD,N_HEAD//K_HEAD,N_CTX,ctx.BLOCK_DMODEL)
-            dv = re_dv.sum(dim=2,keepdim=False)
+        # if N_HEAD != K_HEAD:
+        #     re_dk = dk.reshape(BATCH,K_HEAD,N_HEAD//K_HEAD,N_CTX,ctx.BLOCK_DMODEL)
+        #     dk = re_dk.sum(dim=2,keepdim=False)
+        #     re_dv = dv.reshape(BATCH,K_HEAD,N_HEAD//K_HEAD,N_CTX,ctx.BLOCK_DMODEL)
+        #     dv = re_dv.sum(dim=2,keepdim=False)
+        if gqa_flag:
+            dk_gqa = torch.empty_like(k)
+            dv_gqa = torch.empty_like(v)
 
-        return dq, dk, dv, None, None, None
+            post_grid = lambda META: (
+                triton.cdiv(N_CTX, META['BLOCK_M']),
+                K_HEAD,
+                BATCH
+            )
+            _attn_bwd_postprocess[post_grid](
+                dk, dv,
+                dk_gqa, dv_gqa,
+                N_HEAD,
+                N_CTX=N_CTX,
+                D_HEAD=ctx.BLOCK_DMODEL,
+                K_HEAD=K_HEAD,
+                Q_NUM_PER_GROUP=q_num_per_group,
+            )
+            return dq, dk_gqa, dv_gqa, None, None, None
+        else:
+            return dq, dk, dv, None, None, None
+
 
 attention = _attention.apply
 
