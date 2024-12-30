@@ -48,10 +48,7 @@ class InterleaveManager(EnvVarManager):
     KEYS = ["CHAINED_DOT_SHORTCUT"]
 
 class BufferOpManager(EnvVarManager):
-    # TODO(xukang): For now, we use 'KERNEL_ARG_NON_NEGATIVE'
-    # to make the hint, which is needed by buffer ops. Consider 
-    # using block argument attrs.
-    KEYS = ["AMDGCN_USE_BUFFER_OPS", "KERNEL_ARG_NON_NEGATIVE"]
+    KEYS = ["AMDGCN_USE_BUFFER_OPS"]
 
 name_to_torch_types = {
     'fp16': torch.float16,
@@ -156,6 +153,28 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
               GRID_AXIS_HZ: tl.constexpr,
               INTERLEAVE: tl.constexpr
               ):
+
+    tl.assume(stride_qz >= 0)
+    tl.assume(stride_qh >= 0)
+    tl.assume(stride_qm >= 0)
+    tl.assume(stride_qk >= 0)
+    tl.assume(stride_kz >= 0)
+    tl.assume(stride_kh >= 0)
+    tl.assume(stride_kn >= 0)
+    tl.assume(stride_kk >= 0)
+    tl.assume(stride_vz >= 0)
+    tl.assume(stride_vh >= 0)
+    tl.assume(stride_vk >= 0)
+    tl.assume(stride_vn >= 0)
+    tl.assume(stride_vtz >= 0)
+    tl.assume(stride_vth >= 0)
+    tl.assume(stride_vtn >= 0)
+    tl.assume(stride_vtk >= 0)
+    tl.assume(stride_oz >= 0)
+    tl.assume(stride_oh >= 0)
+    tl.assume(stride_om >= 0)
+    tl.assume(stride_on >= 0)
+
     if GRID_AXIS_HZ == 0:
         start_m = tl.program_id(1)
         off_hz = tl.program_id(0)
@@ -538,6 +557,15 @@ def _attn_bwd(Q, QT, K, KT, V, sm_scale,
               BLOCK_M2: tl.constexpr,
               BLOCK_N2: tl.constexpr,
               BLK_SLICE_FACTOR: tl.constexpr):
+
+    tl.assume(stride_z >= 0)
+    tl.assume(stride_h >= 0)
+    tl.assume(stride_tok >= 0)
+    tl.assume(stride_d >= 0)
+    tl.assume(stride_kz >= 0)
+    tl.assume(stride_td >= 0)
+    tl.assume(stride_ttok >= 0)
+
     LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
 
     #N_CTX*H*BATCH的偏移，其实就是head的在行上的偏移
@@ -639,8 +667,6 @@ def _attn_bwd(Q, QT, K, KT, V, sm_scale,
     )
     dq *= LN2
     tl.store(DQ_block_ptr, dq.to(tl.float16))
-
-
 
     # THIS BLOCK DOES DK & DV:
     offs_k = tl.arange(0, BLOCK_DMODEL)
