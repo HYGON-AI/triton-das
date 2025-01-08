@@ -143,13 +143,27 @@ llvm::SmallVector<Value> computeOffsetsAType(
 
   if (!isSwizzlePatternFitsIntoBlock(srcLayout, 0, reps, elemsPerInstr,
                                      warpsPerBlock)) {
+    /* Hygon modify: adjust the offset add location to easy match ds_read2st_xxx inst
+     * which OFFSET1 require OFFSET1 * 4|8 * 64 and can decrease register pressuer.
+    **/
+    // for (int block = 0; block < numBlocks; ++block) {
+    //   int blockNonKOffset = block * nonKDim * warpsPerBlock;
+    //   for (int i = 0; i < blockSize; ++i) {
+    //     Value row = add(mapping[i][0], i32_val(blockNonKOffset));
+    //     Value col = mapping[i][1];
+    //     aOffsets[block * blockSize + i] =
+    //         computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+    //   }
+    // }
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
-      for (int i = 0; i < blockSize; ++i) {
-        Value row = add(mapping[i][0], i32_val(blockNonKOffset));
+      Value offAdjust = mul(i32_val(blockNonKOffset), strides[rank - 2]);
+      for (int i = 0; i < mapping.size(); ++i) {
+        Value row = mapping[i][0];
         Value col = mapping[i][1];
         aOffsets[block * blockSize + i] =
-            computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+            add(offAdjust,
+                computeOffset(rewriter, loc, row, col, smemObj, srcLayout));
       }
     }
   } else {
@@ -214,15 +228,31 @@ llvm::SmallVector<Value> computeOffsetsBType(
 
   if (!isSwizzlePatternFitsIntoBlock(srcLayout, 0, reps, elemsPerInstr,
                                      warpsPerBlock)) {
+    /* Hygon modify: adjust the offset add location to easy match ds_read2st_xxx inst
+     * which OFFSET1 require OFFSET1 * 4|8 * 64 and can decrease register pressuer.
+    **/
+    // for (int block = 0; block < numBlocks; ++block) {
+    //   int blockNonKOffset = block * nonKDim * warpsPerBlock;
+    //   for (int i = 0; i < mapping.size(); ++i) {
+    //     // swap row and col, because operand B layout is
+    //     // a transposed operand A layout
+    //     Value row = mapping[i][1];
+    //     Value col = add(mapping[i][0], i32_val(blockNonKOffset));
+    //     bOffsets[block * blockSize + i] =
+    //         computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+    //   }
+    // }
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
+      Value offAdjust = mul(i32_val(blockNonKOffset), tStrides[rank - 2]);
       for (int i = 0; i < mapping.size(); ++i) {
         // swap row and col, because operand B layout is
         // a transposed operand A layout
         Value row = mapping[i][1];
-        Value col = add(mapping[i][0], i32_val(blockNonKOffset));
+        Value col = mapping[i][0];
         bOffsets[block * blockSize + i] =
-            computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+            add(offAdjust,
+                computeOffset(rewriter, loc, row, col, smemObj, srcLayout));
       }
     }
   } else {
