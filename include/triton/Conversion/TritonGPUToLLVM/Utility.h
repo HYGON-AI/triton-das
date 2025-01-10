@@ -714,52 +714,10 @@ emitOffsetForMmaLayoutV3(const NvidiaMmaEncodingAttr &mmaLayout,
   return ret;
 }
 
-SmallVector<Value>
-inline emitBaseIndexForMfmaLayoutMmacV1(Location loc, RewriterBase &rewriter,
-                                        const AMDMfmaEncodingAttr &mfmaLayout,
-                                        RankedTensorType type) {
-  auto shape = type.getShape();
-  auto _warpsPerCTA = mfmaLayout.getWarpsPerCTA();
-  assert(_warpsPerCTA.size() == 2);
-  SmallVector<Value> warpsPerCTA = {i32_val(_warpsPerCTA[0]),
-                                    i32_val(_warpsPerCTA[1])};
-  unsigned mDim = mfmaLayout.getMDim();
-  unsigned nDim = mfmaLayout.getNDim();
-  assert(mDim == nDim && mDim == 16);
-
-  Value threadId = getThreadId(rewriter, loc);
-  Value warpSize = i32_val(triton::gpu::getWarpSize(mfmaLayout));
-  Value effectiveWarpSize = warpSize;
-
-  Value laneId = urem(threadId, effectiveWarpSize);
-
-  Value warpId = udiv(threadId, warpSize);
-  Value limitWarpId0 =
-      i32_val(std::max(static_cast<int64_t>(1), shape[0] / mDim));
-  Value warpId0 = urem(urem(warpId, warpsPerCTA[0]), limitWarpId0);
-  Value limitWarpId1 =
-      i32_val(std::max(static_cast<int64_t>(1), shape[1] / nDim));
-  Value warpId1 =
-      urem(urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]), limitWarpId1);
-
-  Value offWarp0 = mul(warpId0, i32_val(mDim));
-  Value offWarp1 = mul(warpId1, i32_val(nDim));
-
-  SmallVector<Value> multiDimBase(2);
-  multiDimBase[1] =
-      add(mul(i32_val(1), udiv(laneId, i32_val(mDim))), offWarp1);
-  multiDimBase[0] = add(urem(laneId, i32_val(mDim)), offWarp0);
-
-  return multiDimBase;
-}
-
 inline SmallVector<Value>
 emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
                            const AMDMfmaEncodingAttr &mfmaLayout,
                            RankedTensorType type) {
-  if (mfmaLayout.isMmacV1())
-    return emitBaseIndexForMfmaLayoutMmacV1(loc, rewriter, mfmaLayout, type);
-
   auto shape = type.getShape();
   auto rank = shape.size();
   assert(rank == 2 || rank == 3);
@@ -800,7 +758,10 @@ emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
   Value offWarp1 = mul(multiDimWarpId[rank - 1], i32_val(nDim));
 
   SmallVector<Value> multiDimBase(rank);
-  if (mfmaLayout.getIsTransposed()) {
+  if (mfmaLayout.isMmacV1()) {
+    multiDimBase[rank - 2] = add(urem(laneId, i32_val(mDim)), offWarp0);
+    multiDimBase[rank - 1] = add(mul(i32_val(1), udiv(laneId, i32_val(mDim))), offWarp1);
+  } else if (mfmaLayout.getIsTransposed()) {
     multiDimBase[rank - 1] =
         add(mul(i32_val(4), udiv(laneId, i32_val(mDim))), offWarp1);
     multiDimBase[rank - 2] = add(urem(laneId, i32_val(mDim)), offWarp0);
