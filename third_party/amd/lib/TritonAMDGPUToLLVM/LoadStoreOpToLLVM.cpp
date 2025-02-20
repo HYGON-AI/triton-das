@@ -715,9 +715,13 @@ struct AtomicCASOpConversion
 };
 
 bool supportsGlobalAtomicF16PackedAndDpp(triton::AMD::ISAFamily isaFamily) {
-  return isaFamily == triton::AMD::ISAFamily::CDNA1 ||
-         isaFamily == triton::AMD::ISAFamily::CDNA2 ||
-         isaFamily == triton::AMD::ISAFamily::CDNA3;
+  // return isaFamily == triton::AMD::ISAFamily::CDNA1 ||
+  //        isaFamily == triton::AMD::ISAFamily::CDNA2 ||
+  //        isaFamily == triton::AMD::ISAFamily::CDNA3;
+  // HYGON TODO: adaptation of vector type for atomicrmw.
+  // use this optimize will introduce vector type for atomicrmw, but atomicrmw
+  // don't support vector type in backend now, so return false directly.
+  return false;
 }
 
 Value generateI32DppMove(PatternRewriter &rewriter, Value val, int dppCtrl) {
