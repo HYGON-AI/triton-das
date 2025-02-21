@@ -116,10 +116,23 @@ def awq_dequantize_kernel(
 
 @triton.autotune(
    configs=[
+       triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=2),
+       triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=8),
        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=2),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=1),
        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=2),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=8),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=2),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=2),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=4),
+       triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=1, num_warps=8),
    ],
    key=["M", "N", "K", "GROUP_SIZE", "SPLIT_K"],
+   perf_debug=True
 )
 @triton.jit
 def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
@@ -644,12 +657,12 @@ def test_gemm(N, K, M, G, splitK):
     device = "cuda"
     input_rows = M
     input_cols = K
-    input_dtype = torch.float32
+    input_dtype = torch.float16
     qweight_rows = input_cols
     qweight_cols = N // 8
     scales_rows = qweight_rows // G
     scales_cols = N
-    scales_dtype = torch.float32
+    scales_dtype = torch.float16
     qzeros_rows = scales_rows
     qzeros_cols = qweight_cols
 
@@ -747,7 +760,7 @@ bench_configs = [
         line_vals=['triton', 'torch'],
         line_names=['Triton', 'Torch'],
         styles=[('red', '-'), ('blue', '--')],
-        ylabel='TOPS',
+        ylabel='ms',
         xlabel='Matrix Dimensions (M×K×N)',
         plot_name='AWQ GEMM Performance',
         args={'device': 'cuda'}
@@ -774,7 +787,7 @@ def bench_awq_gemm(M, K, N, G, splitK, provider, device="cuda"):
     # Generate test data
     input_tensor = torch.rand(
         (M, K),
-        dtype=torch.float32,
+        dtype=torch.float16,
         device=device
     )
     qweight = torch.randint(
@@ -792,7 +805,7 @@ def bench_awq_gemm(M, K, N, G, splitK, provider, device="cuda"):
     )
     scales = torch.rand(
         (K // G, N),
-        dtype=torch.float32,
+        dtype=torch.float16,
         device=device
     )
 
@@ -805,21 +818,16 @@ def bench_awq_gemm(M, K, N, G, splitK, provider, device="cuda"):
             splitK
         )
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        return ms
         
-        # Calculate TOPS
-        total_ops = 2 * N * K * M  # Multiply-add operations
-        return total_ops / (ms * 1e9)  # Convert to TOPS
     else:  # provider == "torch"
         fn = lambda: torch.matmul(
             input_tensor, 
             awq_dequantize_torch(qweight, scales, qzeros, G)
         )
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-        
-        # Calculate TOPS
-        total_ops = 2 * N * K * M  # Multiply-add operations
-        return total_ops / (ms * 1e9)  # Convert to TOPS
+        return ms
 
 if __name__ == "__main__":
-    bench_awq_dequantize.run(print_data=True)
+    #bench_awq_dequantize.run(print_data=True)
     bench_awq_gemm.run(print_data=True)
