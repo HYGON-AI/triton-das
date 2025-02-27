@@ -178,7 +178,7 @@ function clean_cache() {
 function build_llvm() {
   pushd ${SRC_HOME}
   repo="ssh://git@192.168.140.75:8022/buhui/llvm-project.git"
-  package_server="192.168.164.55"
+  package_server="192.168.162.66"
   package_path="/builds/ai_compiler/llvm4triton"
   package_user="sw-builder"
   password="swadmin"
