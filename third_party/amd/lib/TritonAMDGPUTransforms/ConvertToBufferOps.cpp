@@ -45,6 +45,13 @@ bool verifyNonNegativeByAssumption(Value expr,
         return cst.isNonNegative();
       }
     }
+    // HGCG: add ConvertToBufferOp with data from memory assumptions support.
+    else if (auto blockArg= mlir::dyn_cast<BlockArgument>(assume)) {
+      if (blockArg.getOwner()->isEntryBlock() && isa<tt::PointerType>(blockArg.getType())) {
+        return true;
+      }
+    }
+
   }
   return false;
 }
@@ -110,6 +117,10 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
                     verifyNonNegativeExpr(binOp->getOperand(1), assumptions);
                 return nnLhs && nnRhs;
               })
+          .Case<triton::LoadOp>([&](auto loadOp) {
+            // HGCG: add ConvertToBufferOp with data from memory assumptions support.
+            return verifyNonNegativeExpr(loadOp->getOperand(0), assumptions);
+          })
           .Default([&](Operation *op) {
             // Conservatively assume that the expression is negative
             return false;
@@ -256,8 +267,41 @@ public:
     // Collect assumptions in the function
     DenseSet<Value> assumptions;
     m.walk([&](LLVM::AssumeOp op) {
-      if (op->getOperand(0).getDefiningOp<arith::CmpIOp>())
+      if (op->getOperand(0).getDefiningOp<arith::CmpIOp>()) {
         assumptions.insert(op->getOperand(0));
+
+        /*  HGCG: add ConvertToBufferOp with data from memory assumptions support.
+         *  This is a trick method to support addPtr with offset from memory load.
+         *        In triton kernel if user write below code, it means that the
+         *  sorted_token_ids_ptr is a pointer to the memory, and all value in the
+         *  memory(like offs_token) is assumed to be non-negative.
+         *        Due to the propagation of assume, the a_ptrs is fit for using
+         *  buffer load ops.
+         *
+         *  Eg:
+         *    tl.assume(sorted_token_ids_ptr.to(tl.int64) >= 0)
+         *    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+         *    .....
+         *    a_ptrs = a_ptr + (offs_token[:, None]
+         *
+         *  The pattern in triton ir is(%arg6 is the sorted_token_ids_ptr):
+         *
+         *    %1 = tt.ptr_to_int %arg6 : !tt.ptr<i32> -> i64
+         *    %2 = arith.cmpi sge, %1, %c0_i64 : i64
+         *    llvm.intr.assume %2 : i1
+         *
+         *  Here we detect the pattern and add the %arg6(sorted_token_ids_ptr) to the assumption.
+        **/
+        auto cmpIOp = op->getOperand(0).getDefiningOp<arith::CmpIOp>();
+        bool isGe = (cmpIOp.getPredicate() == arith::CmpIPredicate::sge);
+        if (isGe && cmpIOp->getOperand(0).getDefiningOp<triton::PtrToIntOp>()) {
+          auto ptrToIntOp = cmpIOp->getOperand(0).getDefiningOp<triton::PtrToIntOp>();
+          if (isa<BlockArgument>(ptrToIntOp->getOperand(0))
+              && ptrToIntOp->getBlock()->isEntryBlock()) {
+              assumptions.insert(ptrToIntOp->getOperand(0));
+          }
+        }
+      }
     });
     LDBG("Number of assumptions found: " << assumptions.size());
 
