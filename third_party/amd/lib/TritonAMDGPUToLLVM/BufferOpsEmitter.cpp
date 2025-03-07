@@ -107,13 +107,18 @@ Type BufferEmitter::getBufferOpType(Type type) {
     elementType = vecType.getElementType();
   }
 
+  // Special handling for 64-bit types (v1i64/v1f64 -> v2i32, v2i64/v2f64 -> v4i32)
+  Type bufferElementType = elementType;
+  if ((elementType.isInteger(64) || elementType.isF64()) && (vecSize <= 2)) {
+    bufferElementType = rewriter.getI32Type();
+    vecSize *= 2;
+  } else if (elementType.isBF16()) {
+    // For bf16, always convert to i16
+    bufferElementType = rewriter.getI16Type();
+  }
+
   const int valueElemNBits = std::max(8u, elementType.getIntOrFloatBitWidth());
   const size_t totalWidthBits = valueElemNBits * vecSize;
-
-  // For bf16, always convert to i16
-  Type bufferElementType = elementType;
-  if (elementType.isBF16())
-    bufferElementType = rewriter.getI16Type();
 
   // If we are dealing with a subword type (e.g., i8 or f16) but we
   // still need multiple words, then pack the subwords into 32bit integers
