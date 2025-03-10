@@ -225,13 +225,16 @@ struct DotOpMFMAConversionHelper {
     auto numRepK = repA[2];
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
-
+    bool isMmacV1 =
+        cast<AMDMfmaEncodingAttr>(aEncoding.getParent())
+            ? cast<AMDMfmaEncodingAttr>(aEncoding.getParent()).isMmacV1()
+            : false;
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
-        aTensorTy.getElementType());
+        aTensorTy.getElementType(), isMmacV1);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
-        aTensorTy.getElementType());
+        aTensorTy.getElementType(), isMmacV1);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -297,7 +300,7 @@ struct DotOpMFMAConversionHelper {
    * kBase elements for each mfma instruction
    */
   SmallVector<Value> extractOperands(Value rawElems, int kWidth, int kBase,
-                                     Type type) const {
+                                     Type type, bool isMmacV1 = false) const {
     int kpack = kWidth / kBase;
     SmallVector<Value> results;
     auto vecTy = vec_ty(type, kBase);
@@ -318,8 +321,25 @@ struct DotOpMFMAConversionHelper {
         if (4 == kBase)
           // This is for int8 on pre- MI300 GPUs
           results.push_back(bitcast(vec, i32_ty));
-        if (8 == kBase)
-          results.push_back(bitcast(vec, i64_ty));
+        if (8 == kBase) {
+          if (isMmacV1) {
+            // Pack 8bit element to I32, e.g. 8xi8 -> 2xi32
+            auto v4x8BitTy = vec_ty(type, 4);
+            auto v2x32BitTy = vec_ty(i32_ty, 2);
+            Value v2x32bit = undef(v2x32BitTy);
+            for (int i = 0; i < 2; ++i) {
+              Value v4x8bit = undef(v4x8BitTy);
+              for (int elemId = 0; elemId < 4; ++elemId) {
+                auto val = extract_element(type, vec, i32_val(elemId + i * 4));
+                v4x8bit = insert_element(v4x8BitTy, v4x8bit, val, i32_val(elemId));
+              }
+              Value toI32 = bitcast(v4x8bit, i32_ty);
+              v2x32bit = insert_element(v2x32BitTy, v2x32bit, toI32, i32_val(i));
+            }
+            results.push_back(v2x32bit);
+          } else
+            results.push_back(bitcast(vec, i64_ty));
+        }
       } else
         results.push_back(vec);
     }
@@ -332,7 +352,8 @@ struct DotOpMFMAConversionHelper {
    */
   SmallVector<ValueTable>
   getValuesFromDotOperandLayoutStruct(Value value, int batch, int n0, int n1,
-                                      int kWidth, int kBase, Type type) const {
+                                      int kWidth, int kBase, Type type,
+                                      bool isMmacV1 = false) const {
     auto elems = unpackLLElements(loc, value, rewriter);
     int kpack = kWidth / kBase;
     SmallVector<ValueTable> dotOpVals(kpack);
@@ -368,7 +389,7 @@ struct DotOpMFMAConversionHelper {
           } else {
             SmallVector<Value> vals;
             if (type.getIntOrFloatBitWidth() == 8) {
-              vals = extractOperands(rawElems, kWidth, kBase, i8_ty);
+              vals = extractOperands(rawElems, kWidth, kBase, i8_ty, isMmacV1);
             } else if (type.isBF16()) {
               vals = extractOperands(rawElems, kWidth, kBase, bf16_ty);
             } else {
