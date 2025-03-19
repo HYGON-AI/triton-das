@@ -182,19 +182,24 @@ template <typename Derived> struct MachineDescrImpl : MachineDescr {
 };
 
 struct CDNA2Kind : public MachineDescrImpl<CDNA2Kind> {
-  static const inline MmaTable mmaTable{{{32, 32, 8}, 64}, {{16, 16, 16}, 32}};
+  static const inline MmaTable mmaTable{{{16, 16, 16}, 32}, {{16, 16, 32}, 32}};
   static const inline uint32_t mmaIssueCycle{4};
   static const inline uint32_t numLdsDataPaths{2};
 };
 
 struct CDNA3Kind : public MachineDescrImpl<CDNA3Kind> {
-  static const inline MmaTable mmaTable{{{32, 32, 8}, 32}, {{16, 16, 16}, 16}};
+  static const inline MmaTable mmaTable{{{16, 16, 16}, 8}, {{16, 16, 32}, 8}};
   static const inline uint32_t mmaIssueCycle{4};
   static const inline uint32_t numLdsDataPaths{2};
 };
 
 std::unique_ptr<MachineDescr> MachineDescr::get(StringRef arch) {
   AMD::ISAFamily family = AMD::deduceISAFamily(arch);
+
+  /* [HYGON] TODO: need refine to put ZD/KM in CDNA2Kind future ? */
+  if (arch == "gfx928" /* ZD */ || arch == "gfx926" /* KM */)
+    family = AMD::ISAFamily::CDNA2;
+
   switch (family) {
   case AMD::ISAFamily::CDNA3: {
     return std::make_unique<MachineDescrImpl<CDNA3Kind>>();
