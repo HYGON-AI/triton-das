@@ -15,11 +15,11 @@ from pathlib import Path
 def min_dot_size(target: GPUTarget):
     arch_str = target.arch
     assert arch_str == "gfx928" or arch_str == "gfx936" or arch_str == "gfx938", f"Unsupported gfx version"
-    
+
     return lambda lhsType, rhsType: (
         #(16, 16, 64) if (lhsType.scalar.is_int4() or rhsType.scalar.is_int4()) else     #only gfx938 support, but triton not support now
-        (16, 16, 32) if (lhsType.scalar.is_int8() or rhsType.scalar.is_int8()) else 
-        (16, 16, 16) if (lhsType.scalar.is_fp16() or rhsType.scalar.is_fp16() or lhsType.scalar.is_bf16() or rhsType.scalar.is_bf16()) else 
+        (16, 16, 32) if (lhsType.scalar.is_int8() or rhsType.scalar.is_int8()) else
+        (16, 16, 16) if (lhsType.scalar.is_fp16() or rhsType.scalar.is_fp16() or lhsType.scalar.is_bf16() or rhsType.scalar.is_bf16()) else
         (16, 16, 8) #fp32
     )
 
@@ -209,7 +209,9 @@ class HIPBackend(BaseBackend):
     def path_to_rocm_clang():
         rocm_path = HIPBackend.path_to_rocm()
         # Check env path for clang
-        clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH")
+        clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH",
+                                    # By default, use clang-18
+                                   f"{rocm_path}/llvm/bin/clang-18")
         if clang_env_path is not None:
             clang = Path(clang_env_path)
             if clang.is_file():
