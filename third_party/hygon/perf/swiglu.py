@@ -4,45 +4,45 @@
 import pytest
 import argparse
 import sys
-import operator
+
+import functools
 
 import torch
 import triton
 import triton.language as tl
 
-from utils import get_glu_block, ensure_contiguous, calculate_settings, compare_version
-
-if compare_version("triton", operator.ge, "3.0.0"):
-    from triton.language.extra.libdevice import tanh
-else:
-    from triton.language.math import tanh
+from utils import get_glu_block, ensure_contiguous, calculate_settings
 
 
 @triton.jit
-def _geglu_forward(a_ptr, b_ptr, c_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr, NEED_MASK: tl.constexpr):
-
+def _swiglu_forward(a_ptr, b_ptr, c_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr, NEED_MASK: tl.constexpr):
+    """
+    Computes the SwigLU activation function.
+    Args:
+        a_ptr: Pointer to the input tensor.
+        b_ptr: Pointer to the weight tensor.
+        c_ptr: Pointer to the output tensor.
+        N: Number of elements in the input tensor.
+        BLOCK_SIZE: Block size for Triton kernel.
+        NEED_MASK: Whether to apply a mask or not.
+    """
     if NEED_MASK:
         offs = tl.arange(0, BLOCK_SIZE)
         mask = offs < N
-        a = tl.load(a_ptr + offs, mask=mask, other=0)
+        a_ = tl.load(a_ptr + offs, mask=mask, other=0)
     else:
         pid = tl.program_id(axis=0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        a = tl.load(a_ptr + offs)
+        a_ = tl.load(a_ptr + offs)
 
-    # tanh approximation form of GELU is computed with:
-    # 0.5 * a * (1 + tanh(sqrt(2 / pi) * (a + 0.044715 * a^3)))
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
-    a_cubed = a * a * a
-    tanh_arg = sqrt_2_over_pi * (a + 0.044715 * a_cubed)
-    tanh_result = tanh(tanh_arg)
-    geglu_a = 0.5 * a * (1 + tanh_result)
+    a = a_.to(tl.float32)  # sigmoid requires type float32
+    sig_a = tl.sigmoid(a)
     if NEED_MASK:
         b = tl.load(b_ptr + offs, mask=mask, other=0)
     else:
         b = tl.load(b_ptr + offs)
 
-    c_out = geglu_a * b
+    c_out = a * sig_a * b
     if NEED_MASK:
         tl.store(c_ptr + offs, c_out, mask=mask)
     else:
@@ -50,31 +50,29 @@ def _geglu_forward(a_ptr, b_ptr, c_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexp
 
 
 @triton.jit
-def _geglu_backward(dc_ptr, a_ptr, b_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr, NEED_MASK: tl.constexpr):
-
+def _swiglu_backward(dc_ptr, a_ptr, b_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr, NEED_MASK: tl.constexpr):
+    """
+    Computes the backward pass of the SwigLU activation function.
+    Args:
+        dc_ptr: Pointer to the gradient of the output tensor.
+        a_ptr: Pointer to the input tensor.
+        b_ptr: Pointer to the weight tensor.
+        N: Number of elements in the input tensor.
+        BLOCK_SIZE: Block size for Triton kernel.
+        NEED_MASK: Whether to apply a mask or not.
+    """
     if NEED_MASK:
         offs = tl.arange(0, BLOCK_SIZE)
         mask = offs < N
-        a = tl.load(a_ptr + offs, mask=mask, other=0)
+        a_ = tl.load(a_ptr + offs, mask=mask, other=0)
     else:
         pid = tl.program_id(axis=0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        a = tl.load(a_ptr + offs)
+        a_ = tl.load(a_ptr + offs)
 
-    # recomputation to save memory
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
-    a_cubed = a * a * a
-    tanh_arg = sqrt_2_over_pi * (a + 0.044715 * a_cubed)
-    tanh_result = tanh(tanh_arg)
-    geglu_a = 0.5 * a * (1 + tanh_result)
-
-    # Gradient w.r.t. a can be computed with:
-    # b * (0.5 * (1 + tanh(z)) + 0.5 * a * (1 - tanh(z)^2) * (sqrt(2/pi) * (1 + 3 * 0.044715 * a^2)))
-    # where z = sqrt(2/pi) * (a + 0.044715 * a^3)
-    term1 = 0.5 * (1 + tanh_result)
-    tanh_sq = tanh_result * tanh_result
-    term2 = 0.5 * a * (1 - tanh_sq) * (sqrt_2_over_pi * (1 + 3 * 0.044715 * a * a))
-
+    a = a_.to(tl.float32)  # sigmoid requires type float32
+    sig_a = tl.sigmoid(a)
+    silu_a = a * sig_a
     if NEED_MASK:
         b = tl.load(b_ptr + offs, mask=mask, other=0)
         dc = tl.load(dc_ptr + offs, mask=mask, other=0)
@@ -82,9 +80,8 @@ def _geglu_backward(dc_ptr, a_ptr, b_ptr, N: tl.constexpr, BLOCK_SIZE: tl.conste
         b = tl.load(b_ptr + offs)
         dc = tl.load(dc_ptr + offs)
 
-    db_out = dc * geglu_a
-    da_out = dc * b * (term1 + term2)
-
+    db_out = dc * silu_a
+    da_out = dc * (silu_a * (1 - sig_a) + sig_a) * b
     if NEED_MASK:
         tl.store(a_ptr + offs, da_out, mask=mask)
         tl.store(b_ptr + offs, db_out, mask=mask)
@@ -94,8 +91,15 @@ def _geglu_backward(dc_ptr, a_ptr, b_ptr, N: tl.constexpr, BLOCK_SIZE: tl.conste
 
 
 @ensure_contiguous
-def geglu_forward(a, b):
-
+def swiglu_forward(a, b):
+    """
+    Applies the SwigLU activation function.
+    Args:
+        a: Input tensor.
+        b: Input tensor.
+    Returns:
+        Output tensor after applying SwigLU.
+    """
     assert a.shape == b.shape, "a and b must have the same shape"
     ori_shape = a.shape
 
@@ -105,7 +109,7 @@ def geglu_forward(a, b):
 
     c = torch.empty_like(a)
 
-    _geglu_forward[(align_m, 1)](
+    _swiglu_forward[(align_m, 1)](
         a,
         b,
         c,
@@ -115,7 +119,7 @@ def geglu_forward(a, b):
     )
 
     if n_elements % BLOCK_SIZE:
-        _geglu_forward[(1, 1)](
+        _swiglu_forward[(1, 1)](
             a.flatten()[align_m * BLOCK_SIZE:],
             b.flatten()[align_m * BLOCK_SIZE:],
             c.flatten()[align_m * BLOCK_SIZE:],
@@ -128,7 +132,16 @@ def geglu_forward(a, b):
 
 
 @ensure_contiguous
-def geglu_backward(a, b, dc):
+def swiglu_backward(a, b, dc):
+    """
+    Computes the gradient of the SwigLU activation function.
+    Args:
+        dc: Gradient of the output tensor.
+        a: Input tensor.
+        b: Input tensor.
+    Returns:
+        Gradient of the input tensor.
+    """
     assert a.shape == b.shape == dc.shape, "a,b and dc must have the same shape"
     ori_shape = a.shape
 
@@ -136,7 +149,7 @@ def geglu_backward(a, b, dc):
     BLOCK_SIZE, _ = get_glu_block(n_elements)
     align_m = n_elements // BLOCK_SIZE
 
-    _geglu_backward[(align_m, 1)](
+    _swiglu_backward[(align_m, 1)](
         dc,
         a,
         b,
@@ -145,7 +158,7 @@ def geglu_backward(a, b, dc):
         NEED_MASK=False,
     )
     if n_elements % BLOCK_SIZE:
-        _geglu_backward[(1, 1)](
+        _swiglu_backward[(1, 1)](
             dc.flatten()[align_m * BLOCK_SIZE:],
             a.flatten()[align_m * BLOCK_SIZE:],
             b.flatten()[align_m * BLOCK_SIZE:],
@@ -157,12 +170,12 @@ def geglu_backward(a, b, dc):
     return a.view(*ori_shape), b.view(*ori_shape)
 
 
-class GELUMulFunction(torch.autograd.Function):
+class SiLUMulFunction(torch.autograd.Function):
 
     @staticmethod
     @ensure_contiguous
     def forward(ctx, a, b):
-        a, b, c = geglu_forward(a, b)
+        a, b, c = swiglu_forward(a, b)
         ctx.save_for_backward(a, b)
         return c
 
@@ -170,75 +183,64 @@ class GELUMulFunction(torch.autograd.Function):
     @ensure_contiguous
     def backward(ctx, dc):
         a, b = ctx.saved_tensors
-        a, b = geglu_backward(a, b, dc)
+        a, b = swiglu_backward(a, b, dc)
         return a, b
 
 
 # test code
-# copy from:https://github.com/linkedin/Liger-Kernel/blob/v0.5.5/src/liger_kernel/ops/geglu.py#L26
+# copy from:https://github.com/linkedin/Liger-Kernel/blob/v0.5.5/src/liger_kernel/ops/swiglu.py#L16
 @triton.jit
-def _geglu_tanh_forward_kernel(a, b, c, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr):
-    program_id = tl.program_id(0).to(tl.int64)
-
-    # locate start index
-    a += program_id * stride
-    b += program_id * stride
-    c += program_id * stride
-
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = col_offsets < n_cols
-    a_row = tl.load(a + col_offsets, mask=mask, other=0).to(tl.float32)
-    b_row = tl.load(b + col_offsets, mask=mask, other=0)
-
-    # tanh approximation form of GELU is computed with:
-    # 0.5 * a * (1 + tanh(sqrt(2 / pi) * (a + 0.044715 * a^3)))
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
-    a_cubed = a_row * a_row * a_row
-    tanh_arg = sqrt_2_over_pi * (a_row + 0.044715 * a_cubed)
-    tanh_result = tanh(tanh_arg)
-    geglu_a = 0.5 * a_row * (1 + tanh_result)
-    c_row = geglu_a * b_row
-    tl.store(c + col_offsets, c_row, mask=mask)
+def silu(x):
+    return x * tl.sigmoid(x)
 
 
 @triton.jit
-def _geglu_tanh_backward_kernel(dc, a, b, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+def _swiglu_forward_kernel(a_ptr, b_ptr, c_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     program_id = tl.program_id(0).to(tl.int64)
 
     # locate start index
-    dc += program_id * stride
-    a += program_id * stride
-    b += program_id * stride
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+    c_ptr += program_id * stride
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
     mask = col_offsets < n_cols
 
-    dc_row = tl.load(dc + col_offsets, mask=mask, other=0)
-    a_row = tl.load(a + col_offsets, mask=mask, other=0).to(tl.float32)
-    b_row = tl.load(b + col_offsets, mask=mask, other=0)
+    # sigmoid requires type float32
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
+    c_row = silu(a_row) * b_row
+    tl.store(c_ptr + col_offsets, c_row, mask=mask)
+
+
+@triton.jit
+def _swiglu_backward_kernel(dc_ptr, a_ptr, b_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    program_id = tl.program_id(0).to(tl.int64)
+
+    # locate start index
+    dc_ptr += program_id * stride
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    dc_row = tl.load(dc_ptr + col_offsets, mask=mask, other=0)
+    # sigmoid requires type float32
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
 
     # recomputation to save memory
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
-    a_cubed = a_row * a_row * a_row
-    tanh_arg = sqrt_2_over_pi * (a_row + 0.044715 * a_cubed)
-    tanh_result = tanh(tanh_arg)
-    geglu_a = 0.5 * a_row * (1 + tanh_result)
+    sig_a = tl.sigmoid(a_row)
+    silu_a = a_row * sig_a
+    db_row = dc_row * silu_a
+    da_row = dc_row * (silu_a * (1 - sig_a) + sig_a) * b_row
 
-    db_row = dc_row * geglu_a
-
-    # Gradient w.r.t. a can be computed with:
-    # b * (0.5 * (1 + tanh(z)) + 0.5 * a * (1 - tanh(z)^2) * (sqrt(2/pi) * (1 + 3 * 0.044715 * a^2)))
-    # where z = sqrt(2/pi) * (a + 0.044715 * a^3)
-    term1 = 0.5 * (1 + tanh_result)
-    tanh_sq = tanh_result * tanh_result
-    term2 = 0.5 * a_row * (1 - tanh_sq) * (sqrt_2_over_pi * (1 + 3 * 0.044715 * a_row * a_row))
-    da_row = dc_row * b_row * (term1 + term2)
-
-    tl.store(a + col_offsets, da_row, mask=mask)
-    tl.store(b + col_offsets, db_row, mask=mask)
+    tl.store(a_ptr + col_offsets, da_row, mask=mask)
+    tl.store(b_ptr + col_offsets, db_row, mask=mask)
 
 
-def geglu_forward_Liger(a, b):
+def swiglu_forward_Liger(a, b):
     ori_shape = a.shape
 
     n_cols = ori_shape[-1]
@@ -249,7 +251,7 @@ def geglu_forward_Liger(a, b):
 
     BLOCK_SIZE, num_warps = calculate_settings(n_cols)
 
-    _geglu_tanh_forward_kernel[(n_rows, )](
+    _swiglu_forward_kernel[(n_rows, )](
         a,
         b,
         c,
@@ -261,7 +263,7 @@ def geglu_forward_Liger(a, b):
     return a, b, c.view(*ori_shape)
 
 
-def geglu_backward_Liger(a, b, dc):
+def swiglu_backward_Liger(a, b, dc):
     ori_shape = dc.shape
     n_cols = ori_shape[-1]
     dc = dc.view(-1, n_cols)
@@ -269,7 +271,7 @@ def geglu_backward_Liger(a, b, dc):
 
     BLOCK_SIZE, num_warps = calculate_settings(n_cols)
 
-    _geglu_tanh_backward_kernel[(n_rows, )](
+    _swiglu_backward_kernel[(n_rows, )](
         dc,
         a,
         b,
@@ -278,24 +280,18 @@ def geglu_backward_Liger(a, b, dc):
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )
-
     return a.view(*ori_shape), b.view(*ori_shape)
 
 
-# copy from: https://github.com/huggingface/transformers/blob/v4.50.3/src/transformers/activations.py#L126
-def geglu_golden_forward(a, b):
-
-    def gelu_accurate(x):
-        return 0.5 * x * (1 + torch.tanh(0.7978845608028654 * (x + 0.044715 * torch.pow(x, 3))))
-
-    return gelu_accurate(a) * b
+def swiglu_golden_forward(a, b):
+    sig_a = torch.sigmoid(a)
+    return a * sig_a * b
 
 
-def geglu_golden_backward(a, b, dc):
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
-    X = torch.tanh(sqrt_2_over_pi * (a + 0.044715 * a * a * a))
-    da = 0.5 * b * ((1 + X) + a * (1 - X * X) * (sqrt_2_over_pi * (1 + 3 * 0.044715 * a * a))) * dc
-    db = 0.5 * a * (1 + X) * dc
+def swiglu_golden_backward(a, b, dc):
+    sig_a = torch.sigmoid(a)
+    da = b * (sig_a + a * sig_a * (1 - sig_a)) * dc
+    db = a * sig_a * dc
     return da, db
 
 
@@ -329,18 +325,18 @@ def test_correctness(m, n, dtype, atol, rtol, device="cuda"):
     b = torch.randn(m, n, device=device, dtype=dtype)
     dc = torch.randn(m, n, device=device, dtype=dtype)
 
-    golden_forward = geglu_golden_forward(a, b)
-    golden_da, golden_db = geglu_golden_backward(a, b, dc)
+    golden_forward = swiglu_golden_forward(a, b)
+    golden_da, golden_db = swiglu_golden_backward(a, b, dc)
 
     a0 = a.clone().requires_grad_(True)
     b0 = b.clone().requires_grad_(True)
-    y1 = GELUMulFunction.apply(a0, b0)
+    y1 = SiLUMulFunction.apply(a0, b0)
     y1.backward(dc)
 
     a1 = a.clone()
     b1 = b.clone()
-    _, _, y2 = geglu_forward_Liger(a1, b1)
-    light_da, light_db = geglu_backward_Liger(a1, b1, dc)
+    _, _, y2 = swiglu_forward_Liger(a1, b1)
+    light_da, light_db = swiglu_backward_Liger(a1, b1, dc)
 
     torch.testing.assert_close(golden_forward, y1, atol=atol, rtol=rtol)
     torch.testing.assert_close(y2, y1, atol=atol, rtol=rtol)
@@ -370,14 +366,14 @@ def run_benchmark(args):
                     x_vals_list.append(val)
                     val += args.M_step
                 mn_args = {'N': args.N_start}
-                plot_name = str("geglu-performance_" + dataType + "_N" + str(args.N_start) + "_M" + str(args.M_start) +
+                plot_name = str("swiglu-performance_" + dataType + "_N" + str(args.N_start) + "_M" + str(args.M_start) +
                                 "-" + str(args.M_end) + "-" + str(args.M_step) + "_mode_" + mode)
                 x_names = ['M']
             else:
                 x_vals_list = [i for i in range(args.N_start, args.N_end, args.N_step)]
                 mn_args = {'M': args.M_start}
                 x_names = ['N']
-                plot_name = str("geglu-performance_" + dataType + "_M" + str(args.M_start) + "_N" + str(args.N_start) +
+                plot_name = str("swiglu-performance_" + dataType + "_M" + str(args.M_start) + "_N" + str(args.N_start) +
                                 "-" + str(args.N_end) + "-" + str(args.N_step) + "_mode_" + mode)
             mn_args['mode'] = mode
             dtype = arg_to_torch_dtype[dataType]
@@ -387,8 +383,8 @@ def run_benchmark(args):
                     x_names=x_names,
                     x_vals=x_vals_list,
                     line_arg='provider',
-                    line_vals=['triton', 'triton_Liger', 'torch_accurate'],
-                    line_names=['Triton', 'Triton_Liger', 'Torch_accurate'],
+                    line_vals=['triton', 'triton_Liger', 'torch'],
+                    line_names=['Triton', 'Triton_Liger', 'Torch'],
                     styles=[('red', '-'), ('blue', '-'), ('green', '-'), ('yellow', '-')],
                     ylabel="ms",
                     xlabel=f'N Size_{dataType}_{mode}',
@@ -406,21 +402,21 @@ def run_benchmark(args):
         torch.cuda.set_stream(stream)
         if provider == 'triton':
             if mode == 'fwd':
-                fn = lambda: geglu_forward(a, b)
+                fn = lambda: swiglu_forward(a, b)
             else:
-                fn = lambda: geglu_backward(a, b, dc)
+                fn = lambda: swiglu_backward(a, b, dc)
 
         if provider == 'triton_Liger':
             if mode == 'fwd':
-                fn = lambda: geglu_forward_Liger(a, b)
+                fn = lambda: swiglu_forward_Liger(a, b)
             else:
-                fn = lambda: geglu_backward_Liger(a, b, dc)
+                fn = lambda: swiglu_backward_Liger(a, b, dc)
 
-        if provider == 'torch_accurate':
+        if provider == 'torch':
             if mode == 'fwd':
-                fn = lambda: geglu_golden_forward(a, b)
+                fn = lambda: swiglu_golden_forward(a, b)
             else:
-                fn = lambda: geglu_golden_backward(a, b, dc)
+                fn = lambda: swiglu_golden_backward(a, b, dc)
 
         ms = triton.testing.do_bench(fn)
         return ms
@@ -431,7 +427,7 @@ def run_benchmark(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        prog="Benchmark GeGLU",
+        prog="Benchmark SwiGLU",
         allow_abbrev=False,
     )
     parser.add_argument('-M', "--M_start", default="600", type=int)
