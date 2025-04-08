@@ -515,7 +515,10 @@ LogicalResult PointerCanonicalizer::rewriteSplatOp(triton::SplatOp splatOp,
   // The shape of the fat pointer is contained within the offset. We don't
   // need to keep the `splat` operation here.
   opToDelete.insert(splatOp);
-  pointers[nextPtr] = fatPtr.copy(splatOp.getSrc(), offset);
+  // HYGON: temporary solution for data mismatch when enable buffer ops, this
+  // will be fixed in oai-triton release/3.3.x
+  // see https://jira.hygon.cn/browse/DCUOPT-439 for more details
+  pointers[nextPtr] = fatPtr.copyWithBase(offset);
   return success();
 }
 
