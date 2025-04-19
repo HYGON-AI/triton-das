@@ -7,6 +7,11 @@
 #include "mlir/Pass/Pass.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#include <algorithm>
+#include "llvm/IR/Instructions.h"
+#include "mlir/IR/Dominance.h"
+#include "mlir/IR/Verifier.h"
+
 namespace mlir::triton {
 #define GEN_PASS_DEF_TRITONAMDGPUINSERTINSTRUCTIONSCHEDHINTS
 #define GEN_PASS_DEF_TRITONAMDGPULOWERINSTRUCTIONSCHEDHINTS
@@ -231,9 +236,10 @@ struct InstructionSchedHintsRewriter
             .Case("llvm-iglp-0", SchedulingType::LLVM_IGLP_0)
             .Case("llvm-iglp-1", SchedulingType::LLVM_IGLP_1)
             .Case("local-prefetch", SchedulingType::LOCAL_PREFETCH)
+            .Case("llvm-iglp-8", SchedulingType::LLVM_IGLP_8)
             .Default(SchedulingType::UNKNOWN);
 
-    if (this->numStages < 2) {
+    if (this->numStages < 2 && schedulingType != SchedulingType::LLVM_IGLP_8) {
       this->schedulingType = SchedulingType::NONE;
       LDBG("ignoring instruction scheduling due to a very low num. "
            "stages value. Must be >= 2");
@@ -245,8 +251,191 @@ struct InstructionSchedHintsRewriter
     LLVM_IGLP_0,
     LLVM_IGLP_1,
     LOCAL_PREFETCH,
+    LLVM_IGLP_HCU_EXT_BEGIN = 8,
+    LLVM_IGLP_8,
     UNKNOWN
   };
+
+  void sortOperandsByDominance(mlir::DominanceInfo &dom,
+                               OperandRange operands,
+                               SmallVector<Value> &operandsSorted) const {
+    for (auto operand : operands) {
+      // Sort only operands for which defining op can be fetched. This will
+      // exclude, for example, block arguments.
+      if (operand.getDefiningOp()) {
+        operandsSorted.push_back(operand);
+      }
+    }
+
+    if (operandsSorted.size() == 1) {
+      return;
+    }
+
+    std::sort(operandsSorted.begin(), operandsSorted.end(),
+              [&](const Value &a, const Value &b) {
+                Operation *operandA = a.getDefiningOp();
+                Operation *operandB = b.getDefiningOp();
+                assert(operandA && operandB);
+                return dom.dominates(operandA, operandB);
+              });
+  }
+
+  void moveImmediatelyAfterOperandsWithBoundaryOp(Operation *op, Operation *boundaryOp,
+                                                  SmallVector<Operation *> &movedOperations) const {
+    assert(boundaryOp != nullptr);
+    auto isSameBlockBefore = [](Operation *ls, Operation *rs) {
+      return ls->getBlock() == rs->getBlock() && ls->isBeforeInBlock(rs);
+    };
+
+    LLVM::LLVMFuncOp func = boundaryOp->getParentOfType<LLVM::LLVMFuncOp>();
+    mlir::DominanceInfo dom(func);
+
+    if (std::find(movedOperations.begin(), movedOperations.end(), op) != movedOperations.end()
+        || op == boundaryOp
+        || op->getBlock() != boundaryOp->getBlock()
+        || (isSameBlockBefore(op, boundaryOp))) {
+      return;
+    }
+
+    auto operands = op->getOperands();
+
+    for (auto operandVal : operands) {
+      Operation *argOp = operandVal.getDefiningOp();
+      if (!argOp) {
+        continue;
+      }
+      moveImmediatelyAfterOperandsWithBoundaryOp(argOp, boundaryOp, movedOperations);
+    }
+
+    SmallVector<Value> operandsSorted;
+    sortOperandsByDominance(dom, operands, operandsSorted);
+
+    bool moved = false;
+    if (!operandsSorted.empty()) {
+      auto dominantOperandOp = operandsSorted[operandsSorted.size() - 1].getDefiningOp();
+      if (dominantOperandOp) {
+        if (isSameBlockBefore(boundaryOp, dominantOperandOp)) {
+          op->moveAfter(dominantOperandOp);
+        } else {
+          op->moveAfter(boundaryOp);
+        }
+        assert(succeeded(mlir::verify(func)));
+        moved = true;
+      }
+    }
+
+    if (!moved) {
+      op->moveAfter(boundaryOp);
+      assert(succeeded(mlir::verify(func)));
+    }
+
+    movedOperations.push_back(op);
+  }
+
+
+  void createInterleaveDsReadsABInsts(PatternRewriter &rewriter, Location loc,
+                                         triton::amdgpu::InstructionSchedHint schedHint) const {
+
+    //					  Current pipeline			    	          Interleave A,B with 1:1, and iglp-8
+    //            (triton interleave + iglp-0)          ((GemmOptAdvanceSchedGroupCnt, default 3) SG DS advance)
+    //                                                  3                      4
+    //                                                               SGID(23)  A0, B0
+    //                                        SGID(22)  A0, B0                 A1, B1
+    //                                        SGID(21)  A1, B1                 A2, B2
+    //                                        SGID(20)  A2, B2                 A3, B3
+    // SGID(19)	  MMAC 											            C0,                    C0,
+    // SGID(18)	  DS 		A0, A1		                      A3, B3,                A4, B4,
+    // SGID(17)	  MMAC 										              C1,                    C1,
+    // SGID(16)	  DS 		A2, A3,				                  A4, B4,                A5, B5,
+    // SGID(15)	  MMAC 				                          C2,                    C2,
+    // SGID(14)	  DS 		A4, A5,				                  A5, B5,                A6, B6,
+    // SGID(13)	  MMAC 					                        C3,                    C3
+    // SGID(12)	  DS 		A..., A...+1                    ...                    ....
+    // SGID(11)	  MMAC
+    // SGID(10)	  DS 		B0, B1               latency C3 = 4 DS + 2 MMAC
+    // SGID(9)		MMAC  C0
+    // SGID(8)		DS    B2, B3                                       latency C3 = 6 DS + 3 MMAC
+    // SGID(7)		MMAC  C1
+    // SGID(6)		DS    B4, B5
+    // SGID(5)		MMAC  C2
+    // SGID(4)		DS    B6, B7
+    // SGID(3)		MMAC  C3
+    // SGID(2)		DS
+    // SGID(1)		MMAC
+    // SGID(0)		DS
+
+    const uint32_t numDsReadInstA = schedHint.getNumDsReadsA().getValue();
+    const uint32_t numDsReadInstB = schedHint.getNumDsReadsB().getValue();
+    const uint32_t shareMemoryAddressSpace = 3;
+
+    SmallVector<Operation *> dsReadInstAs;
+    SmallVector<Operation *> dsReadInstBs;
+
+    bool earlyTermination = false;
+    Operation *currentOp = schedHint;
+    while (currentOp) {
+      Operation *inst = currentOp;
+
+      if (isa<LLVM::LoadOp>(inst)) {
+        auto loadOp = cast<LLVM::LoadOp>(inst);
+        if (auto llvmPtrType = dyn_cast<LLVM::LLVMPointerType>(loadOp.getAddr().getType())) {
+          if (llvmPtrType.getAddressSpace() == shareMemoryAddressSpace) {
+            /* FIXME: use getForwardSlice to double check its user is mmac inst and operands B ?
+              * but this will leader to binder the mmac intrinsic format to closer.
+              * so currently we use the sum of dsReadInstAs and dsReadInstBs to simplify the check logic.
+              **/
+            if (dsReadInstBs.size() < numDsReadInstB)
+              dsReadInstBs.push_back(inst);
+            else
+              dsReadInstAs.push_back(inst);
+          }
+
+          if (dsReadInstBs.size() + dsReadInstAs.size() == numDsReadInstA + numDsReadInstB)
+            break;
+        }
+      } else if (isa<LLVM::StoreOp, ROCDL::BarrierOp, ROCDL::SchedGroupBarrier,
+                      ROCDL::DsSwizzleOp, ROCDL::DsBpermuteOp>(inst)) {
+        if (isa<LLVM::StoreOp>(inst)) {
+          auto storeOp = cast<LLVM::StoreOp>(inst);
+          if (auto llvmPtrType = dyn_cast<LLVM::LLVMPointerType>(storeOp.getAddr().getType())) {
+            if (llvmPtrType.getAddressSpace() == shareMemoryAddressSpace) {
+              earlyTermination = true;
+              break;
+            }
+          }
+        } else if (isa<ROCDL::BarrierOp, ROCDL::SchedGroupBarrier,
+                        ROCDL::DsSwizzleOp, ROCDL::DsBpermuteOp>(inst)) {
+          earlyTermination = true;
+          break;
+        }
+      }
+
+      currentOp = inst->getPrevNode();
+    }
+
+    // if (earlyTermination || (dsReadInstAs.size() + dsReadInstBs.size() <= 6)) {
+    //   schedHint->emitWarning("iglp-8 ds insts collection meeting insts count less condition!");
+    // }
+
+    /* Note: for num_stage = 1 case, actually no need to do this interleave ds reads insts scheduling,
+     * due to existing barrer op after ds_read a insts. we still keep the code just for try tune
+     * stage 1 with GemmOptAdvanceSchedGroupCnt.
+     **/
+    while(dsReadInstAs.size() > 0 && dsReadInstBs.size() > 0) {
+      auto dsReadInstA = dsReadInstAs.back();
+      auto dsReadInstB = dsReadInstBs.back();
+      dsReadInstAs.pop_back();
+      dsReadInstBs.pop_back();
+
+      LLVM::LLVMFuncOp func = dsReadInstA->getParentOfType<LLVM::LLVMFuncOp>();
+      assert(succeeded(mlir::verify(func)));
+
+      SmallVector<Operation *> movedOperations;
+      moveImmediatelyAfterOperandsWithBoundaryOp(dsReadInstB, dsReadInstA, movedOperations);
+    }
+
+    return;
+  }
 
   // The following is inspired by ROCm Composable Kernel library's V3 pipelining
   // (see ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_v3.hpp).
@@ -439,7 +628,8 @@ struct InstructionSchedHintsRewriter
     const bool limitSchedulingRange =
         !(schedulingType == SchedulingType::NONE ||
           schedulingType == SchedulingType::LLVM_IGLP_0 ||
-          schedulingType == SchedulingType::LLVM_IGLP_1);
+          schedulingType == SchedulingType::LLVM_IGLP_1 ||
+          schedulingType == SchedulingType::LLVM_IGLP_8);
     Location loc = instructionSchedHint->getLoc();
     Block *block = instructionSchedHint->getBlock();
     if (limitSchedulingRange) {
@@ -453,7 +643,11 @@ struct InstructionSchedHintsRewriter
     switch (schedulingType) {
     case SchedulingType::LLVM_IGLP_0:
     case SchedulingType::LLVM_IGLP_1:
+    case SchedulingType::LLVM_IGLP_8:
       createIglpOpt(rewriter, loc, static_cast<int>(schedulingType) - 1);
+
+      if (schedulingType == SchedulingType::LLVM_IGLP_8)
+        createInterleaveDsReadsABInsts(rewriter, loc, instructionSchedHint);
       break;
     case SchedulingType::LOCAL_PREFETCH:
       createLocalPrefetchSchedule(rewriter, loc, instructionSchedHint);
