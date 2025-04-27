@@ -1,5 +1,6 @@
 from triton.backends.compiler import BaseBackend, GPUTarget, AttrsDescriptor, register_descriptor
 from triton._C.libtriton import ir, passes, llvm, amd
+from triton.runtime.errors import HSACOError
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 from types import ModuleType
@@ -417,10 +418,10 @@ class HIPBackend(BaseBackend):
 
         except subprocess.CalledProcessError as e:
             print(f"Compilation failed: {e.stderr}")
-            raise
+            raise HSACOError(f"Compilation failed: {e.stderr}") from e
         except IOError as e:
             print(f"File operation failed: {str(e)}")
-            raise
+            raise HSACOError(f"File operation failed: {str(e)}") from e
         finally:
             # Clean up temporary files
             for file in [llir_file, asm_file]:
@@ -459,10 +460,10 @@ class HIPBackend(BaseBackend):
 
         except subprocess.CalledProcessError as e:
             print(f"Compilation failed: {e.stderr}")
-            raise
+            raise HSACOError(f"Compilation failed: {e.stderr}") from e
         except IOError as e:
             print(f"File operation failed: {str(e)}")
-            raise
+            raise HSACOError(f"File operation failed: {str(e)}") from e
 
         return ret
 

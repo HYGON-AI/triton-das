@@ -7,7 +7,7 @@ import inspect
 from typing import Dict
 
 from .jit import KernelInterface
-from .errors import OutOfResources, PTXASError
+from .errors import OutOfResources, PTXASError, HSACOError
 from .driver import driver
 
 
@@ -173,7 +173,7 @@ class Autotuner(KernelInterface):
                 self.perf_dict[config]=compiled_kernel
         try:
             return self.do_bench(kernel_call, quantiles=(0.5, 0.2, 0.8))
-        except (OutOfResources, CompileTimeAssertionFailure, PTXASError) as e:
+        except (OutOfResources, CompileTimeAssertionFailure, PTXASError, HSACOError) as e:
             if verbose:
                 print(f"Autotuning failed with {e}")
             return [float("inf"), float("inf"), float("inf")]
@@ -195,6 +195,7 @@ class Autotuner(KernelInterface):
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
                 timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
+
                 bench_end = time.time()
                 self.bench_time = bench_end - bench_start
                 self.cache[key] = builtins.min(timings, key=timings.get)
