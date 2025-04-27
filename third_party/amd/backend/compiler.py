@@ -65,7 +65,16 @@ class HIPOptions:
     #                 Kernel library. Note, this variant requires the use of buffer load/store ops
     #                 and a special software pipelining style - i.e., 1x LDS and 1x register
     #                 prefetch buffers for each GEMM tile.
+    # Extend options for HCU:
+    # llvm-iglp-8: injects `llvm.amdgcn.iglp_opt` intrinsic call with value `8` to the GEMM's
+    #              k-loop; i.e., "interleave DS and MFMA instructions for common GEMM kernels".
     instruction_sched_variant: str = 'none'
+
+    # Extend options for HCU
+    # 1. set scheduling latency for mmac and ds:
+    #    - none: use default scheduling latency which equal mmac1-ds5
+    #    - see get_options_args() to get more options.
+    sched_latency: str = 'none'
 
     def __post_init__(self):
         default_libdir = os.path.join(HIPBackend.path_to_rocm(), 'amdgcn/bitcode/')
@@ -224,6 +233,43 @@ class HIPBackend(BaseBackend):
         if clang.is_file():
             return clang
         raise Exception(f"ROCm compiler {rocm_path}/llvm/bin/clang not found. Set 'TRITON_HIP_CLANG_PATH' to its path.")
+
+    @staticmethod
+    def _get_clang_args(options):
+        arch_args = {
+            "gfx928": [
+                        "-mllvm=-support-512-vgprs=true",
+                      ],
+            "gfx936": [
+                        "-mllvm=-support-768-vgprs=true",
+                      ],
+        }
+        if options.arch in arch_args:
+            options_args = arch_args[options.arch]
+        else:
+            raise ValueError(f"Unknown arch: {options.arch}")
+
+        if options.sched_latency != 'none':
+            sched_latency_args = {
+                "mmac5-ds10": ["-mllvm=-enable-latency-hack=true", "-mllvm=-mmac-latency=5", "-mllvm=-ds-load-store-latency=10"],
+                "mmac5-ds6" : ["-mllvm=-enable-latency-hack=true", "-mllvm=-mmac-latency=5", "-mllvm=-ds-load-store-latency=6" ],
+            }
+            if options.sched_latency in sched_latency_args:
+                options_args.extend(sched_latency_args[options.sched_latency])
+            else:
+                raise ValueError(f"Unsupported scheduling latency: {options.sched_latency}")
+
+
+        clang_args = [
+            "-target", amd.TARGET_TRIPLE,
+            f"-mcpu={options.arch}:xnack-",
+            "-mllvm=-check-valu-data-forward-hazards=0",
+            "-mllvm=-disable-cluster-lds-memops=true",
+            *options_args,
+            "-O3",
+        ]
+
+        return clang_args
 
     @staticmethod
     def make_ttir(mod, metadata, options):
@@ -398,19 +444,10 @@ class HIPBackend(BaseBackend):
             asm_file = tempfile.mktemp(suffix=".amdgcn")
 
             clang_path = HIPBackend.path_to_rocm_clang()
-            common_args = [
-                clang_path,
-                "-target", amd.TARGET_TRIPLE,
-                f"-mcpu={options.arch}:xnack-",
-                "-mllvm=-support-512-vgprs=true" if options.arch == "gfx928" else ("-mllvm=-support-768-vgprs=true" if options.arch == "gfx936" else ""),
-                "-mllvm=-check-valu-data-forward-hazards=0",
-                # "-mllvm=-disable-strict-mmop-constraints=true",
-                "-O3",
-                llir_file
-            ]
+            clang_args = HIPBackend._get_clang_args(options)
 
             # Compile to ASM
-            asm_command = common_args + ["-S", "-o", asm_file]
+            asm_command = [clang_path] + clang_args + [llir_file, "-S", "-o", asm_file]
             subprocess.run(asm_command, check=True, capture_output=True, text=True)
 
             with open(asm_file, "r") as fd_out:
@@ -440,19 +477,10 @@ class HIPBackend(BaseBackend):
             hsaco_file = tempfile.mktemp(suffix=".hsaco")
 
             clang_path = HIPBackend.path_to_rocm_clang()
-            common_args = [
-                clang_path,
-                "-target", amd.TARGET_TRIPLE,
-                f"-mcpu={options.arch}:xnack-",
-                "-mllvm=-support-512-vgprs=true" if options.arch == "gfx928" else ("-mllvm=-support-768-vgprs=true" if options.arch == "gfx936" else ""),
-                "-mllvm=-check-valu-data-forward-hazards=0",
-                # "-mllvm=-disable-strict-mmop-constraints=true",
-                "-O3",
-                asm_file
-            ]
+            clang_args = HIPBackend._get_clang_args(options)
 
             # Compile to HSACO
-            hsaco_command = common_args + ["-x", "assembler", "-o", hsaco_file]
+            hsaco_command = [clang_path] + clang_args + [asm_file, "-x", "assembler", "-o", hsaco_file]
             subprocess.run(hsaco_command, check=True, capture_output=True, text=True)
 
             with open(hsaco_file, "rb") as fd_out:
