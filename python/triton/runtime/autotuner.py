@@ -205,7 +205,8 @@ class Autotuner(KernelInterface):
 
                 if self.perf_debug:
                    print(f"\n{self.base_fn.__name__}:\n" + str(key) + " Configs:\n")
-                   for index, (key_config, compiled_kernel) in enumerate(self.perf_dict.items(), 0):
+                   sorted_configs = sorted(self.perf_dict.items(), key=lambda x: timings[x[0]][0])
+                   for index, (key_config, compiled_kernel) in enumerate(sorted_configs, 0):
                        perf_time = timings[key_config][0]
                        perf_best = "*" if key_config == self.cache[key] else " "
                        num_warmup=self.warmup if self.warmup is not None else 25

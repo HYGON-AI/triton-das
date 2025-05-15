@@ -235,7 +235,7 @@ class HIPBackend(BaseBackend):
         raise Exception(f"ROCm compiler {rocm_path}/llvm/bin/clang not found. Set 'TRITON_HIP_CLANG_PATH' to its path.")
 
     @staticmethod
-    def _get_clang_args(options):
+    def _get_clang_args(metadata, options):
         arch_args = {
             "gfx928": [
                         "-mllvm=-support-512-vgprs=true",
@@ -259,6 +259,11 @@ class HIPBackend(BaseBackend):
             else:
                 raise ValueError(f"Unsupported scheduling latency: {options.sched_latency}")
 
+        if options.instruction_sched_variant == "llvm-iglp-8":
+            if (options.num_warps >= 4 and metadata["shared"] <= 32*1024):
+                options_args.extend(["-mllvm=-amdgpu-iglp8-advance-sched-group-cnt=2"])
+            if options.kpack == 2:
+                options_args.extend(["-mllvm=-amdgpu-iglp8-interleave-ds-cnt-per-mfma=1"])
 
         clang_args = [
             "-target", amd.TARGET_TRIPLE,
@@ -444,7 +449,7 @@ class HIPBackend(BaseBackend):
             asm_file = tempfile.mktemp(suffix=".amdgcn")
 
             clang_path = HIPBackend.path_to_rocm_clang()
-            clang_args = HIPBackend._get_clang_args(options)
+            clang_args = HIPBackend._get_clang_args(metadata, options)
 
             # Compile to ASM
             asm_command = [clang_path] + clang_args + [llir_file, "-S", "-o", asm_file]
@@ -477,7 +482,7 @@ class HIPBackend(BaseBackend):
             hsaco_file = tempfile.mktemp(suffix=".hsaco")
 
             clang_path = HIPBackend.path_to_rocm_clang()
-            clang_args = HIPBackend._get_clang_args(options)
+            clang_args = HIPBackend._get_clang_args(metadata,options)
 
             # Compile to HSACO
             hsaco_command = [clang_path] + clang_args + [asm_file, "-x", "assembler", "-o", hsaco_file]
