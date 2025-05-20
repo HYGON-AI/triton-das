@@ -4,54 +4,58 @@ import os
 import json
 import torch
 import triton
-from triton.runtime.cache import get_home_dir
-from typing import Dict
+from triton.runtime.cache import default_cache_dir
 
-config_cache = {}
+file_cache = {}
+
+
+def _get_result_template(arg_names: list, keys:list):
+    ret = {
+        "arg_names": arg_names,
+        "keys": keys,
+        "configs": {},
+    }
+    return ret
+
+
+def get_config_cache_dir():
+    return os.path.join(default_cache_dir(), "configs")
 
 
 class Hcutuner(triton.runtime.Autotuner):
     """
-    Re-implements Triton autotune to support custom operations, e.g. save best config to file.
+    Re-implements Triton autotune to support custom operations:
+    1. save best config to files(under ~/.triton/json).
     """
-
-    def __init__(self, fn, arg_names, configs, key, reset_to_zero, restore_value, pre_hook=None,
-                 post_hook=None, prune_configs_by: Dict = None, warmup=None, rep=None,
-                 use_cuda_graph=False, do_bench=None, perf_debug=False, perf_profiling=False,
-                 do_save_config=None, save_config_dir=None):
-        if do_save_config:
-            self.do_save_config = do_save_config
-        else:
-            self.do_save_config = default_save_config
-
-        # make output config dir, like ~/.triton/json/function_name/configs
-        if not save_config_dir:
-            save_config_dir = os.path.join(get_home_dir(), ".triton", "json")
-
-        self.save_config_dir = os.path.join(save_config_dir, fn.__name__, "configs")
-        os.makedirs(self.save_config_dir, exist_ok=True)
-
-        super().__init__(fn, arg_names, configs, key, reset_to_zero, restore_value, pre_hook=pre_hook,
-                    post_hook=post_hook, prune_configs_by=prune_configs_by, warmup=warmup, rep=rep,
-                    use_cuda_graph=use_cuda_graph, do_bench=do_bench, perf_debug=perf_debug,
-                    perf_profiling=perf_profiling)
 
     def run(self, *args, **kwargs):
         ret = super().run(*args, **kwargs)
-        if self.do_save_config:
-            nargs = dict(zip(self.arg_names, args))
-            all_args = {**nargs, **kwargs}
-            self.do_save_config(self.save_config_dir, self.best_config, self.keys, **all_args)
+        self.save_config(self.best_config, *args, **kwargs)
         return ret
+
+    def save_config(self, config, *args, **kwargs):
+        if not hasattr(self, 'save_config_dir') or self.save_config_dir is None:
+            device_name = get_gpu_label()
+            self.save_config_dir = os.path.join(get_config_cache_dir(),
+                                                self.fn.__name__,
+                                                device_name)
+            os.makedirs(self.save_config_dir, exist_ok=True)
+        fname = os.path.join(self.save_config_dir, "config.json")
+        key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
+        configs = file_cache[fname] if fname in file_cache else \
+                                    _get_result_template(self.arg_names, self.keys)
+        if key not in configs['configs']:
+            configs['configs'][key] = config.all_kwargs()
+            with open(fname, "w") as f:
+                json.dump(configs, f, indent=4)
+            file_cache[fname] = configs
 
 
 def hcutune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_value=None, pre_hook=None, post_hook=None,
-             warmup=None, rep=None, use_cuda_graph=False, do_bench=None, perf_debug=False, perf_profiling=False,
-             do_save_config=None, save_config_dir=None):
+             warmup=None, rep=None, use_cuda_graph=False, do_bench=None, perf_debug=False, perf_profiling=False):
     """
     Decorator for auto-tuning a :code:`triton.jit`'d function. Its usage is consistent with Triton autotune.
-    `do_save_config` has been added to specify a function for saving the best config. `save_config_dir` has
-    been added to specify top output dir for configs, if it's None, set path to `<TRITON_HOME_DIR>/.triton/json`.
+    It's save best config file to `$TRITON_HOME_DIR/.triton/json` directory.
 
     .. highlight:: python
     .. code-block:: python
@@ -63,8 +67,6 @@ def hcutune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_val
           ],
           key=['x_size'], # the two above configs will be evaluated anytime
                          # the value of x_size changes
-          do_save_config=save_config_gemm,
-          save_config_dir=...
         )
         @triton.jit
         def kernel(x_ptr, x_size, **META):
@@ -106,22 +108,23 @@ def hcutune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_val
     :type rep: int
     :param do_bench: a benchmark function to measure the time of each run.
     :type do_bench: lambda fn, quantiles
-    :param do_save_config: a function to save best config
-    :type do_save_config: lambda fn: JITFunction, keys: list, best_config: triton.Config, *args, **kwargs
     """
 
     def decorator(fn):
         return Hcutuner(fn, fn.arg_names, configs, key, reset_to_zero, restore_value, pre_hook=pre_hook,
                          post_hook=post_hook, prune_configs_by=prune_configs_by, warmup=warmup, rep=rep,
-                         use_cuda_graph=use_cuda_graph, perf_debug=perf_debug, perf_profiling=perf_profiling,
-                         do_save_config=do_save_config, save_config_dir=save_config_dir)
+                         use_cuda_graph=use_cuda_graph, perf_debug=perf_debug, perf_profiling=perf_profiling)
 
     return decorator
 
 
-def get_dtypes(nargs):
-    return '_'.join([str(arg.dtype).replace('torch.', '')
-                     for _, arg in nargs.items() if hasattr(arg, "dtype")])
+def get_config_key(arg_names, keys, *args, **kwargs):
+    # key format : str(tuple([autotune's key] + [dtypes]))
+    nargs = dict(zip(arg_names, args))
+    all_args = {**nargs, **kwargs}
+    key = [all_args[o] for o in keys if o in all_args]
+    dtype = [str(arg.dtype) for _, arg in all_args.items() if hasattr(arg, "dtype")]
+    return str(tuple(key + dtype))
 
 
 def get_gpu_label():
@@ -129,104 +132,62 @@ def get_gpu_label():
     return gpu_name
 
 
-def _save_config(dirname, config, keys, create_filename_and_key, **kwargs):
-    fn, key = create_filename_and_key(kwargs, keys)
-    key = str(key)
-    fname = os.path.join(dirname, fn)
+class TunedConfig:
+    def __init__(self, op_name, device_name, cache):
+        self.op_name = op_name
+        self.device_name = device_name
+        self.cache = cache
 
-    configs = config_cache[fname] if fname in config_cache else {}
-    if key not in configs:
-        configs[key] = config.all_kwargs()
-        with open(fname, "w") as f:
-            json.dump(configs, f)
-        config_cache[fname] = configs
-
-
-def create_filename_key_gemm(nargs, keys):
-    """
-    example, N=7168,K=1536,device_name=K100_AI,dtype=..._float16.json:
-    {
-        '10': ...
-    }
-    key = M
-    """
-    _keys = [o for o in keys if o != "M"]
-    device_name = get_gpu_label()
-    dtype = get_dtypes(nargs)
-    tune_key_str = ','.join([f"{o}={nargs[o]}" for o in _keys if o in nargs])
-    fn = f"{tune_key_str},device_name={device_name},dtype={dtype}.json"
-    return fn, str(nargs['M'])
+    def get_optimal_config(self, *args, **kwargs):
+        key = get_config_key(self.cache['arg_names'], self.cache['keys'],
+                             *args, **kwargs)
+        if key in self.cache['configs']:
+            return self.cache['configs'][key]
+        return None
 
 
-def default_create_filename_key(nargs, keys):
-    """
-    example, device_name=K100_AI,dtype=float16_int32.json:
-    {
-        '(10, 512, 3)': ...
-    }
-    '(10, 512, 3)' is the original autotune key, dtype are hosited to filename.
-    """
-    device_name = get_gpu_label()
-    dtype = get_dtypes(nargs)
-    fn = f"device_name={device_name},dtype={dtype}.json"
-    kval = [nargs[o] for o in keys]
-    key = str(tuple(kval)) if len(kval) > 1 else str(kval[0])
-    return fn, key
+class ConfigLoader:
+    _instance = None
 
+    def __new__(cls, *args, **kargs):
+        if cls._instance is None:
+            cls._instance = super(ConfigLoader, cls).__new__(cls)
+        return cls._instance
 
-def save_config_gemm(dirname, config, keys, create_filename_and_key=None, **kwargs):
-    """
-    save best config to files, like
-    https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/layers/fused_moe/configs.
+    def __init__(self, config_dir=None, device=None):
+        self.config_dir = get_config_cache_dir() if config_dir is None else config_dir
+        self.device = get_gpu_label() if device is None else device
+        self.tuned_cache = {}
 
-    you can change filename and key through create_filename_and_key().
+        if not hasattr(self, "initialized"):
+            self.load_all()
+            self.initialized = True
 
-    :param dirname: output dir path
-    :type dirname: str
-    :param config: best config
-    :type config: triton.Config
-    :param keys: hcutune's key list
-    :type keys: []
-    :param create_filename_and_key: callable, create config filename and key from saving config to files
-    :type create_filename_and_key: nargs: {}, keys: []
-    """
-    if create_filename_and_key is None:
-        create_filename_and_key = create_filename_key_gemm
-    return _save_config(dirname, config, keys, create_filename_and_key, **kwargs)
+    def load_all(self):
+        def parse_all_config_files(root_dir):
+            res = []
+            for dirpath, _, filenames in os.walk(root_dir):
+                for filename in filenames:
+                    if filename != "config.json":
+                        continue
+                    fullpath = os.path.join(dirpath, filename)
+                    relative_path = os.path.relpath(fullpath, root_dir)
+                    parts = relative_path.split("/")
+                    assert len(parts) == 3
+                    # (filepath, op_name, device_name)
+                    res.append((fullpath, parts[0], parts[1]))
+            return res
 
+        for fpath, op, device in parse_all_config_files(self.config_dir):
+            self.tuned_cache[op] = self.create_tuned_config(fpath, op, device)
 
-def default_save_config(dirname, config, keys, create_filename_and_key=None, **kwargs):
-    """
-    save best config to config.json in output dir, like
+    def create_tuned_config(self, fullpath, op_name, device_name):
+        try:
+            with open(fullpath) as f:
+                data = json.load(f)
+        except Exception as e:
+            raise Exception(f"[hcutuner] Fail to load best config {fullpath} : {e}")
+        return TunedConfig(op_name, device_name, data)
 
-    N=14336,device_name=K100_AI,dtype=float16_int32.json:
-    {
-        '(10, 512)': {
-            BLOCK_SIZE_M: 16, num_warps: 2, num_ctas: 1, num_stages: 1, maxnreg: None
-        }
-        ...
-    }
-    '(10, 512)' are the autotune keys.
-
-    you can change filename and key through create_filename_and_key(), hosits "E" key
-    to filename, like
-    E=10,N=14336,device_name=K100_AI,dtype=float16_int32.json:
-    {
-        '512': {
-            BLOCK_SIZE_M: 16, num_warps: 2, num_ctas: 1, num_stages: 1, maxnreg: None
-        }
-        ...
-    }
-
-    :param dirname: output dir path
-    :type dirname: str
-    :param config: best config
-    :type config: triton.Config
-    :param keys: hcutune's key list
-    :type keys: []
-    :param create_filename_and_key: callable, create config filename and key from saving config to files
-    :type create_filename_and_key: nargs: {}, keys: []
-    """
-    if create_filename_and_key is None:
-        create_filename_and_key = default_create_filename_key
-    return _save_config(dirname, config, keys, create_filename_and_key, **kwargs)
+    def get_tuned_cache(self, op_name):
+        return self.tuned_cache[op_name] if op_name in self.tuned_cache else None
