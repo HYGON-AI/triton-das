@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import uuid
 import json
 import torch
 import triton
+from collections import defaultdict
 from triton.runtime.cache import default_cache_dir
 
 file_cache = {}
@@ -36,9 +38,12 @@ class Hcutuner(triton.runtime.Autotuner):
     def save_config(self, config, *args, **kwargs):
         if not hasattr(self, 'save_config_dir') or self.save_config_dir is None:
             device_name = get_gpu_label()
+            # random run_id for multiprocessing
+            run_id = str(uuid.uuid4())
             self.save_config_dir = os.path.join(get_config_cache_dir(),
                                                 self.fn.__name__,
-                                                device_name)
+                                                device_name,
+                                                run_id)
             os.makedirs(self.save_config_dir, exist_ok=True)
         fname = os.path.join(self.save_config_dir, "config.json")
         key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
@@ -157,7 +162,7 @@ class ConfigLoader:
     def __init__(self, config_dir=None, device=None):
         self.config_dir = get_config_cache_dir() if config_dir is None else config_dir
         self.device = get_gpu_label() if device is None else device
-        self.tuned_cache = {}
+        self.tuned_cache = defaultdict(list)
 
         if not hasattr(self, "initialized"):
             self.load_all()
@@ -173,13 +178,13 @@ class ConfigLoader:
                     fullpath = os.path.join(dirpath, filename)
                     relative_path = os.path.relpath(fullpath, root_dir)
                     parts = relative_path.split("/")
-                    assert len(parts) == 3
-                    # (filepath, op_name, device_name)
-                    res.append((fullpath, parts[0], parts[1]))
+                    assert len(parts) == 4
+                    # (filepath, op_name, device_name, run_id)
+                    res.append((fullpath, *parts[:3]))
             return res
 
-        for fpath, op, device in parse_all_config_files(self.config_dir):
-            self.tuned_cache[op] = self.create_tuned_config(fpath, op, device)
+        for fpath, op, device, _ in parse_all_config_files(self.config_dir):
+            self.tuned_cache[op].append(self.create_tuned_config(fpath, op, device))
 
     def create_tuned_config(self, fullpath, op_name, device_name):
         try:

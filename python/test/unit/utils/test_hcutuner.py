@@ -1,11 +1,13 @@
 import os
 import json
 import torch
+import tempfile
 
 import triton
 import triton.language as tl
 import pytest
 from triton.runtime.cache import default_cache_dir
+import subprocess
 
 
 def do_bench(kernel_call, quantiles):
@@ -28,10 +30,16 @@ def get_device_name(device: str):
         raise NotImplementedError
 
 
-def get_save_config_file(fname, device):
+def get_save_config_files(fname, device):
     root_dir = get_save_config_root_dir()
-    config_fpath = os.path.join(root_dir, fname, get_device_name(device), "config.json")
-    return config_fpath
+    sub_dir = os.path.join(root_dir, fname, get_device_name(device))
+    res = []
+    for dirpath, _, filenames in os.walk(sub_dir):
+        for filename in filenames:
+            if filename != "config.json":
+                continue
+            res.append(os.path.join(dirpath, filename))
+    return res
 
 
 @pytest.mark.parametrize('device', ['cuda'])
@@ -54,16 +62,17 @@ def test_save_config(device: str):
     assert len(_kernel.cache) == 1
 
     # check configs
-    config_fpath = get_save_config_file("_kernel", device)
-    assert os.path.exists(config_fpath)
-    with open(config_fpath, "r") as fp:
-        data = json.load(fp)
-    for k in ["arg_names", "keys", "configs"]:
-        assert k in data
-    assert len(data['configs']) == 1
-    assert list(data['configs'].keys())[0] == "(1024, 'torch.float32')"
-    assert (value := list(data['configs'].values())[0])['BLOCK_SIZE'] == 32 or \
-            value['BLOCK_SIZE'] == 128
+    config_fpaths = get_save_config_files("_kernel", device)
+    for config_fpath in config_fpaths:
+        assert os.path.exists(config_fpath)
+        with open(config_fpath, "r") as fp:
+            data = json.load(fp)
+        for k in ["arg_names", "keys", "configs"]:
+            assert k in data
+        assert len(data['configs']) == 1
+        assert list(data['configs'].keys())[0] == "(1024, 'torch.float32')"
+        assert (value := list(data['configs'].values())[0])['BLOCK_SIZE'] == 32 or \
+                value['BLOCK_SIZE'] == 128
 
 
 @pytest.mark.parametrize('device', ['cuda'])
@@ -96,8 +105,8 @@ def test_save_configs(pass_kwargs_to_kernel: bool, device: str, use_cuda_graph: 
     assert len(fn.cache) == len(N) * len(M)
 
     # check configs
-    config_fpath = get_save_config_file("_kernel2", device)
-    with open(config_fpath, "r") as fp:
+    config_fpaths = get_save_config_files("_kernel2", device)
+    with open(config_fpaths[0], "r") as fp:
         data = json.load(fp)
     assert len(data['configs']) == len(N) * len(M)
 
@@ -124,8 +133,92 @@ def test_restore_config(pass_kwargs_to_kernel, device):
         args = (src, N)
         kwargs = {}
 
-    config_fpath = get_save_config_file("_kernel", device)
-    assert os.path.exists(config_fpath)
+    triton.utils.global_config_loader.load_all()
     config = triton.utils.get_optimal_config("_kernel", *args, **kwargs)
     _kernel[grid](*args, **kwargs, **config)
+    triton.testing.assert_close(src, torch.ones_like(src))
+
+
+@pytest.mark.parametrize('device', ['cuda'])
+@pytest.mark.parametrize('world_size', [4])
+def test_mp_save_config(device, world_size):
+    code = """
+import os
+import sys
+import torch
+import triton
+import triton.language as tl
+
+def do_bench(kernel_call, quantiles):
+    return triton.testing.do_bench(kernel_call, quantiles=quantiles, warmup=1, rep=1)
+
+N = int(sys.argv[1])
+device = sys.argv[2]
+
+configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+
+@triton.utils.hcutune(configs=configs, key=['N'], restore_value=['src'], do_bench=do_bench)
+@triton.jit
+def _kernel_mp(src, N, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    x = tl.load(src + offsets, mask=offsets < N) + 1
+    tl.store(src + offsets, x, mask=offsets < N)
+
+def main():
+    src = torch.randn(N, device=device)
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    _kernel_mp[grid](src, N)
+
+if __name__ == "__main__":
+    main()
+    """
+
+    temp_filename = None
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(code.strip())
+        temp_filename = f.name
+
+    N = [i * 128 for i in range(1, world_size + 1)]
+    processes = []
+    for i in range(world_size):
+        cmd = ["python3", temp_filename, str(N[i]), device]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(p)
+
+    for p in processes:
+        p.wait()
+        assert p.returncode == 0
+
+    config_fpaths = get_save_config_files("_kernel_mp", device)
+    assert len(config_fpaths) == world_size
+    # run id check
+    run_ids = [f.split('/')[-2] for f in config_fpaths]
+    assert len(run_ids) == len(set(run_ids))
+    # key check
+    keys = []
+    for f in config_fpaths:
+        with open(f, "r") as fp:
+            data = json.load(fp)
+            keys += list(data['configs'].keys())
+    assert len(keys) == len(set(keys))
+
+
+@pytest.mark.parametrize('device', ['cuda'])
+@pytest.mark.parametrize('world_size', [4])
+def test_mp_restore_config(device, world_size):
+    N = 256
+    src = torch.zeros(N, device=device)
+
+    @triton.jit
+    def _kernel_mp(src, N, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        tl.store(src + offsets, x, mask=offsets < N)
+
+    triton.utils.global_config_loader.load_all()
+    tuned = triton.utils.global_config_loader.get_tuned_cache("_kernel_mp")
+    assert len(tuned) == world_size
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    config = triton.utils.get_optimal_config("_kernel_mp", src, N)
+    _kernel_mp[grid](src, N, **config)
     triton.testing.assert_close(src, torch.ones_like(src))
