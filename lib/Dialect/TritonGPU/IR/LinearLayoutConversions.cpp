@@ -241,6 +241,39 @@ LinearLayout sharedToLinearLayoutLeadingOffset(ArrayRef<int64_t> shape,
 
 } // anonymous namespace
 
+inline LinearLayout
+getLinearLayoutForMmacLayout(MLIRContext *ctx, MfmaMmacLayout mfmaMmacLayout,
+                             ArrayRef<StringAttr> outDimNames) {
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  switch (mfmaMmacLayout) {
+  case MfmaMmacLayout::MMAC_DEFAULT:
+    return LinearLayout(
+        {{kRegister, {{4, 0}, {8, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}}}},
+        outDimNames);
+  case MfmaMmacLayout::MMAC_4INTERLEAVE:
+    return LinearLayout(
+        {{kRegister, {{1, 0}, {2, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {4, 0}, {8, 0}}}},
+        outDimNames);
+  case MfmaMmacLayout::MMAC_TRANSPOSE:
+    return LinearLayout(
+        {{kRegister, {{0, 4}, {0, 8}}},
+         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 1}, {0, 2}}}},
+        outDimNames);
+  case MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE:
+    return LinearLayout(
+        {{kRegister, {{0, 1}, {0, 2}}},
+         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 4}, {0, 8}}}},
+        outDimNames);
+  case MfmaMmacLayout::MFMA:
+    assert(false && "This function is only used for mmac layout");
+  default:
+    assert(false && "Unsupported layout");
+  }
+}
+
 std::optional<LinearLayout>
 AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   int rank = shape.size();
@@ -292,7 +325,7 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
           {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
-    assert(isMmacV1());
+    assert(isMmacHCU());
     // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
     //
     // For the register (i.e., element) dimension, these 4 elements are along
@@ -301,10 +334,10 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     // For the lane (i.e., thread) dimension, these threads are along the
     // matrix C's N dimension, with 16 consecutive threads covering a whole
     // row and the next 16 threads start after a gap spanning 4 rows.
-    tileLayout = LinearLayout(
-        {{kRegister, {{4, 0}, {8, 0}}},
-         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {1, 0}, {2, 0}}}},
+    tileLayout = getLinearLayoutForMmacLayout(
+        ctx, getMfmaMmacLayout(),
         {outDimNames[order[0]], outDimNames[order[1]]});
+
     // For mfma.transposed layout, the element ownership among threads are
     // "transposed" within each warp.
     if (getIsTransposed())

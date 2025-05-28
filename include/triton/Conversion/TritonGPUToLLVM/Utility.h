@@ -483,6 +483,7 @@ using ::mlir::triton::gpu::CTALayoutAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
 using ::mlir::triton::gpu::SliceEncodingAttr;
+using ::mlir::triton::gpu::MfmaMmacLayout;
 
 inline Value dot(RewriterBase &rewriter, Location loc, ArrayRef<Value> offsets,
                  ArrayRef<Value> strides) {
@@ -715,6 +716,48 @@ emitOffsetForMmaLayoutV3(const NvidiaMmaEncodingAttr &mmaLayout,
   return ret;
 }
 
+inline void emitBaseIndexForMmacLayout(Location loc, RewriterBase &rewriter,
+                                       const AMDMfmaEncodingAttr &mfmaLayout,
+                                       SmallVector<Value> &multiDimBase,
+                                       Value laneId,
+                                       SmallVector<Value> offWarp) {
+  auto rank = multiDimBase.size();
+  unsigned mDim = mfmaLayout.getMDim();
+  unsigned nDim = mfmaLayout.getNDim();
+  Value offWarp0 = offWarp[0];
+  Value offWarp1 = offWarp[1];
+  switch (mfmaLayout.getMfmaMmacLayout()) {
+  case MfmaMmacLayout::MMAC_DEFAULT: {
+    multiDimBase[rank - 2] = add(urem(laneId, i32_val(mDim)), offWarp0);
+    multiDimBase[rank - 1] =
+        add(mul(i32_val(1), udiv(laneId, i32_val(mDim))), offWarp1);
+    break;
+  }
+  case MfmaMmacLayout::MMAC_TRANSPOSE: {
+    multiDimBase[rank - 1] = add(urem(laneId, i32_val(mDim)), offWarp1);
+    multiDimBase[rank - 2] =
+        add(mul(i32_val(1), udiv(laneId, i32_val(mDim))), offWarp0);
+    break;
+  }
+  case MfmaMmacLayout::MMAC_4INTERLEAVE: {
+    multiDimBase[rank - 2] = add(urem(laneId, i32_val(mDim)), offWarp0);
+    multiDimBase[rank - 1] =
+        add(mul(i32_val(4), udiv(laneId, i32_val(mDim))), offWarp1);
+    break;
+  }
+  case MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE: {
+    multiDimBase[rank - 1] = add(urem(laneId, i32_val(mDim)), offWarp1);
+    multiDimBase[rank - 2] =
+        add(mul(i32_val(4), udiv(laneId, i32_val(mDim))), offWarp0);
+    break;
+  }
+  case MfmaMmacLayout::MFMA:
+    assert(false && "This function is only used for mmac layout");
+  default:
+    assert(false && "Unsupported layout");
+  }
+}
+
 inline SmallVector<Value>
 emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
                            const AMDMfmaEncodingAttr &mfmaLayout,
@@ -759,9 +802,9 @@ emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
   Value offWarp1 = mul(multiDimWarpId[rank - 1], i32_val(nDim));
 
   SmallVector<Value> multiDimBase(rank);
-  if (mfmaLayout.isMmacV1()) {
-    multiDimBase[rank - 2] = add(urem(laneId, i32_val(mDim)), offWarp0);
-    multiDimBase[rank - 1] = add(mul(i32_val(1), udiv(laneId, i32_val(mDim))), offWarp1);
+  if (mfmaLayout.isMmacHCU()) {
+    emitBaseIndexForMmacLayout(loc, rewriter, mfmaLayout, multiDimBase, laneId,
+                               {offWarp0, offWarp1});
   } else if (mfmaLayout.getIsTransposed()) {
     multiDimBase[rank - 1] =
         add(mul(i32_val(4), udiv(laneId, i32_val(mDim))), offWarp1);
@@ -780,7 +823,7 @@ emitBaseIndexForMfmaLayout(Location loc, RewriterBase &rewriter,
   return multiDimBase;
 }
 
-inline void emitMfmaOffsetForCTAMmacV1(const AMDMfmaEncodingAttr &mfmaLayout,
+inline void emitMfmaOffsetForCTAMmacHCU(const AMDMfmaEncodingAttr &mfmaLayout,
                           SmallVector<SmallVector<unsigned>> &offsets,
                           unsigned bOff, unsigned ctaOffsetX, unsigned ctaOffsetY) {
   auto mDim = mfmaLayout.getMDim();
@@ -795,11 +838,47 @@ inline void emitMfmaOffsetForCTAMmacV1(const AMDMfmaEncodingAttr &mfmaLayout,
   auto rank = shapePerCta.size();
   assert(rank == 2 || rank == 3);
   SmallVector<unsigned> elemOff(rank, bOff);
-  for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
-    elemOff[rank - 2] = ctaOffsetX * shapePerCta[rank - 2];
-    elemOff[rank - 1] =
-      ctaOffsetY * shapePerCta[rank - 1] + elem * (warpSize / mDim) + rowOrColOffset;
-    offsets.push_back(elemOff);
+  switch(mfmaLayout.getMfmaMmacLayout()) {
+  case MfmaMmacLayout::MMAC_DEFAULT: {
+    for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
+      elemOff[rank - 2] = ctaOffsetX * shapePerCta[rank - 2];
+      elemOff[rank - 1] = ctaOffsetY * shapePerCta[rank - 1] +
+                          elem * (warpSize / mDim) + rowOrColOffset;
+      offsets.push_back(elemOff);
+    }
+    break;
+  }
+  case MfmaMmacLayout::MMAC_4INTERLEAVE: {
+    for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
+      elemOff[rank - 2] = ctaOffsetX * shapePerCta[rank - 2];
+      elemOff[rank - 1] =
+          ctaOffsetY * shapePerCta[rank - 1] + elem + rowOrColOffset;
+      offsets.push_back(elemOff);
+    }
+    break;
+  }
+  case MfmaMmacLayout::MMAC_TRANSPOSE: {
+    for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
+      elemOff[rank - 1] = ctaOffsetY * shapePerCta[rank - 1];
+      elemOff[rank - 2] = ctaOffsetX * shapePerCta[rank - 2] +
+                          elem * (warpSize / mDim) + rowOrColOffset;
+      offsets.push_back(elemOff);
+    }
+    break;
+  }
+  case MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE: {
+    for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
+      elemOff[rank - 1] = ctaOffsetY * shapePerCta[rank - 1];
+      elemOff[rank - 2] =
+          ctaOffsetX * shapePerCta[rank - 2] + elem + rowOrColOffset;
+      offsets.push_back(elemOff);
+    }
+    break;
+  }
+  case MfmaMmacLayout::MFMA:
+    assert(false && "This function is only used for mmac layout");
+  default:
+    assert(false && "Unsupported layout");
   }
 }
 
@@ -807,8 +886,9 @@ inline void emitMfmaOffsetForCTA(const AMDMfmaEncodingAttr &mfmaLayout,
                                  SmallVector<SmallVector<unsigned>> &offsets,
                                  unsigned bOff, unsigned ctaOffsetX,
                                  unsigned ctaOffsetY) {
-  if (mfmaLayout.isMmacV1())
-    return emitMfmaOffsetForCTAMmacV1(mfmaLayout, offsets, bOff, ctaOffsetX, ctaOffsetY);
+  if (mfmaLayout.isMmacHCU())
+    return emitMfmaOffsetForCTAMmacHCU(mfmaLayout, offsets, bOff, ctaOffsetX,
+                                       ctaOffsetY);
 
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();

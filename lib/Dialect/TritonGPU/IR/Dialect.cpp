@@ -21,6 +21,7 @@
 // Include TableGen'erated code
 #include "triton/Dialect/TritonGPU/IR/Dialect.cpp.inc"
 #include "triton/Dialect/TritonGPU/IR/TypeInterfaces.cpp.inc"
+#include "triton/Dialect/TritonGPU/IR/OpsEnums.cpp.inc"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -937,13 +938,27 @@ AMDMfmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
   auto elemsPerThreadPerTile = (nonKDim == 16 ? 4 : 16);
   if (rank == 3)
     elemsPerThread[0] = ceil<unsigned>(shape[0], getWarpsPerCTA()[0]);
-  if (isMmacV1()) {
+  if (isMmacHCU()) {
     assert((nonKDim == 16) && (elemsPerThreadPerTile == 4));
-    unsigned elemsCol = ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]) *
-                        elemsPerThreadPerTile;
-    unsigned elemsRow = ceil<unsigned>(shape[rank - 2], nonKDim * getWarpsPerCTA()[rank - 2]);
-    elemsPerThread[rank - 2] = elemsRow;
-    elemsPerThread[rank - 1] = elemsCol;
+    auto mfmaMmacLayout = getMfmaMmacLayout();
+    if (mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE) {
+      unsigned elemsCol =
+          ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]);
+      unsigned elemsRow = ceil<unsigned>(shape[rank - 2],
+                                         nonKDim * getWarpsPerCTA()[rank - 2]) *
+                          elemsPerThreadPerTile;
+      elemsPerThread[rank - 2] = elemsRow;
+      elemsPerThread[rank - 1] = elemsCol;
+    } else {
+      unsigned elemsCol = ceil<unsigned>(shape[rank - 1],
+                                         nonKDim * getWarpsPerCTA()[rank - 1]) *
+                          elemsPerThreadPerTile;
+      unsigned elemsRow =
+          ceil<unsigned>(shape[rank - 2], nonKDim * getWarpsPerCTA()[rank - 2]);
+      elemsPerThread[rank - 2] = elemsRow;
+      elemsPerThread[rank - 1] = elemsCol;
+    }
   } else if (getIsTransposed()) {
     unsigned elemsCol =
         ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]) *
@@ -1775,6 +1790,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
   SmallVector<unsigned> warpsPerCTA;
   SmallVector<unsigned> instrShape;
   bool isTransposed;
+  unsigned mfmaMmacLayout;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
   std::optional<SmallVector<unsigned>> CTASplitNum;
   std::optional<SmallVector<unsigned>> CTAOrder;
@@ -1815,6 +1831,10 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
               .failed())
         return {};
     }
+    if (attr.getName() == "mfmaMmacLayout") {
+      if (parseUInt(parser, attr, mfmaMmacLayout, "mfmaMmacLayout").failed())
+        return {};
+    }
   }
 
   std::optional<CTALayoutAttr> CTALayout = getCTALayoutOrError(
@@ -1824,7 +1844,8 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
 
   return parser.getChecked<AMDMfmaEncodingAttr>(
       parser.getContext(), versionMajor, versionMinor, warpsPerCTA,
-      instrShape[0], instrShape[1], isTransposed, *CTALayout);
+      instrShape[0], instrShape[1], isTransposed, *CTALayout,
+      *symbolizeMfmaMmacLayout(mfmaMmacLayout));
 }
 
 void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
@@ -1833,7 +1854,8 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
           << ", versionMinor = " << getVersionMinor()                    //
           << ", warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]"    //
           << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
-          << ", isTransposed = " << getIsTransposed();
+          << ", isTransposed = " << getIsTransposed()
+          << ", mfmaMmacLayout = " << (uint32_t)getMfmaMmacLayout();
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getWarpsPerCTA().size());
   printer << "}>";
@@ -1844,7 +1866,8 @@ AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
                             unsigned versionMajor, unsigned versionMinor,
                             llvm::ArrayRef<unsigned int> warpsPerCTA,
                             unsigned mDim, unsigned nDim, bool isTransposed,
-                            mlir::triton::gpu::CTALayoutAttr) {
+                            mlir::triton::gpu::CTALayoutAttr,
+                            mlir::triton::gpu::MfmaMmacLayout mfmaMmacLayout) {
   if (!(versionMajor >= 0 && versionMajor <= 3)) {
     return emitError() << "major version must be in the [0, 3] range";
   }
@@ -2031,8 +2054,9 @@ void SharedEncodingAttr::print(AsmPrinter &printer) const {
 // TODO: there is a lot of common code with MmaEncoding here
 
 /* Hygon support: mmac has special C/D layout */
-bool AMDMfmaEncodingAttr::isMmacV1() const {
-  return getVersionMajor() == 3 && getVersionMinor() == 10;
+bool AMDMfmaEncodingAttr::isMmacHCU() const {
+  return (uint32_t)getMfmaMmacLayout() >=
+         (uint32_t)mlir::triton::gpu::MfmaMmacLayout::MMAC_DEFAULT;
 }
 
 SmallVector<unsigned> AMDMfmaEncodingAttr::getCTAsPerCGA() const {
@@ -2053,9 +2077,16 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getWarpOrder() const {
 SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadOrder() const {
   auto order = ::getOrder(*this);
 
-  // Hygon mmac layout always distributes threads to tensor values in column-major order.
-  if (isMmacV1())
-    return {0, 1};
+  // Hygon mmac layout always distributes threads to tensor values in
+  // column-major order if LTS is flase, else in row-major order.
+  if (isMmacHCU()) {
+    auto mfmaMmacLayout = getMfmaMmacLayout();
+    if (mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE)
+      return {1, 0};
+    else
+      return {0, 1};
+  }
 
   if (getIsTransposed())
     std::swap(order[0], order[1]);
@@ -2066,13 +2097,21 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadsPerWarp() const {
   auto rank = ::getOrder(*this).size();
   SmallVector<unsigned> res(rank, 1);
 
-  if (isMmacV1()) {
-    // Hygon matrix core only supports 16x16xk matrix-multiplications which follow [16, 4] tile
-    // layout.
+  // Hygon matrix core only supports 16x16xk matrix-multiplications which follow
+  // [16, 4] tile layout if LTS is flase, else follow [4, 16] tile layout.
+  if (isMmacHCU()) {
     assert(getMDim() == 16 && getNDim() == 16);
-    res[rank - 2] = 16;
-    res[rank - 1] = 4;
-    return res;
+    auto mfmaMmacLayout = getMfmaMmacLayout();
+    if (mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE) {
+      res[rank - 2] = 4;
+      res[rank - 1] = 16;
+      return res;
+    } else {
+      res[rank - 2] = 16;
+      res[rank - 1] = 4;
+      return res;
+    }
   }
 
   if (getMDim() == 32) {
@@ -2098,14 +2137,22 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getSizePerThread() const {
   auto rank = ::getOrder(*this).size();
   SmallVector<unsigned> res(rank, 1);
 
-  if (isMmacV1()) {
-    // The core of the mmac layout(C/D matrix core layout) is the 16x16 col-major tile of values,
-    // so each thread in a 64-threads warp operates on [batch, 1, 4] elements(whether consecutive
-    // or not).
+  // The core of the mmac layout(C/D matrix core layout) is the 16x16 tile of
+  // values, each thread in a 64-threads warp operates on [batch, 1, 4] elements
+  // (whether consecutive or not) if LTS is false.
+  if (isMmacHCU()) {
     assert(getMDim() == 16 && getNDim() == 16);
-    res[rank - 2] = 1;
-    res[rank - 1] = 4;
-    return res;
+    auto mfmaMmacLayout = getMfmaMmacLayout();
+    if (mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE) {
+      res[rank - 2] = 4;
+      res[rank - 1] = 1;
+      return res;
+    } else {
+      res[rank - 2] = 1;
+      res[rank - 1] = 4;
+      return res;
+    }
   }
 
   if (getMDim() == 32) {
@@ -3776,7 +3823,6 @@ void TritonGPUDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "triton/Dialect/TritonGPU/IR/Ops.cpp.inc"
-#include "triton/Dialect/TritonGPU/IR/OpsEnums.cpp.inc"
       >();
   addInterfaces<TritonGPUOpAsmInterface>();
   addInterfaces<TritonGPUInferLayoutInterface>();

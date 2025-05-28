@@ -16,22 +16,16 @@ namespace ttg = mlir::triton::gpu;
 namespace {
 using triton::AMD::ISAFamily;
 
-/* Hygon support: mmac has special C/D layout */
-enum class MfmaMmacVersion {
-  MFMA_MMAC_NONE = 0,
-  MFMA_MMAC_V1   = 10,
-};
-
-bool isMfmaMmacV1(int mfmaMmacVersion) {
-  return mfmaMmacVersion == (int)MfmaMmacVersion::MFMA_MMAC_V1;
+bool isMfmaMmacHCU(int mfmaMmacVersion) {
+  return mfmaMmacVersion >= (int)ttg::MfmaMmacLayout::MMAC_DEFAULT;
 }
 
 int getMfmaMmacVersion(StringRef archGen) {
   if (archGen.contains("gfx926") ||
       archGen.contains("gfx928") ||
       archGen.contains("gfx936"))
-      return (int)(MfmaMmacVersion::MFMA_MMAC_V1);
-  return (int)MfmaMmacVersion::MFMA_MMAC_NONE;
+      return (int)(ttg::MfmaMmacLayout::MMAC_DEFAULT);
+  return (int)(ttg::MfmaMmacLayout::MFMA);
 }
 
 /* Hygon support: mmac v1 dont have chaindot or has special accel mode */
@@ -111,12 +105,12 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
   auto slices = getSlice(dotOp, bwdOpt, fwdOpt);
 
   /* Hygon support: mmac v1 don't have chaindot or has special accel mode */
-  bool mmacV1 = isMfmaMmacV1(mfmaMmacVersion);
+  bool mmacHCU = isMfmaMmacHCU(mfmaMmacVersion);
   bool reduceInChainDots = hasReduceInChainDots(dotOp);
 
   for (Operation *op : slices)
     if ((op->hasTrait<OpTrait::DotLike>() && (op != dotOp)))
-      if (!mmacV1 || reduceInChainDots)
+      if (!mmacHCU || reduceInChainDots)
         return {(unsigned)numWarps, 1};
 
   SmallVector<int64_t, 2> tensorShape = {shape[0], shape[1]};
@@ -470,13 +464,16 @@ public:
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
-        /*instrShape*/ mDim, nDim, /*isTransposed*/ true, CTALayout);
+        /*instrShape*/ mDim, nDim, /*isTransposed*/ true, CTALayout,
+        ttg::MfmaMmacLayout::MFMA);
     #endif
     // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
-        oldRetType.getContext(),
-        /*versionMajor*/ mfmaVersion, /*versionMinor*/ mfmaMmacVersion, warpsPerTile,
-        /*instrShape*/ mDim, nDim, /*isTransposed*/ !isMfmaMmacV1(mfmaMmacVersion), CTALayout);
+        oldRetType.getContext(), /*versionMajor*/ mfmaVersion,
+        /*versionMinor*/ mfmaMmacVersion, warpsPerTile,
+        /*instrShape*/ mDim, nDim,
+        /*isTransposed*/ !isMfmaMmacHCU(mfmaMmacVersion), CTALayout,
+        *ttg::symbolizeMfmaMmacLayout(mfmaMmacVersion));
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -635,13 +632,16 @@ public:
     // for global store instructions.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
-        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
+        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout,
+        ttg::MfmaMmacLayout::MFMA);
     #endif
 
     // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
-        /*instrShape=*/mDim, nDim, /*isTransposed=*/!isMfmaMmacV1(mfmaMmacVersion), ctaLayout);
+        /*instrShape=*/mDim, nDim,
+        /*isTransposed=*/!isMfmaMmacHCU(mfmaMmacVersion), ctaLayout,
+        *ttg::symbolizeMfmaMmacLayout(mfmaMmacVersion));
     auto newRetType = RankedTensorType::get(
         oldRetType.getShape(), oldRetType.getElementType(), mfmaEnc);
 

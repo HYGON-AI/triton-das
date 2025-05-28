@@ -4,6 +4,7 @@
 include "mlir/IR/AttrTypeBase.td"
 include "triton/Dialect/Triton/IR/TritonInterfaces.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUDialect.td"
+include "mlir/IR/EnumAttr.td"
 
 //===----------------------------------------------------------------------===//
 // TritonGPU Attribute Definitions
@@ -57,6 +58,19 @@ Right now, Triton implements two main classes of layouts: shared, and distribute
     unsigned getTotalElemsPerThread(ArrayRef<int64_t> shape, Type eltTy) const;
     SmallVector<unsigned> getElemsPerThread(ArrayRef<int64_t> shape, Type eltTy) const;
   }];
+}
+
+// Enum for MMA layout attribute
+def TTG_MfmaMmacLayoutEnum : I32EnumAttr<
+    "MfmaMmacLayout", "",
+    [
+        I32EnumAttrCase<"MFMA", 0, "mfma">,  // for AMD layout
+        I32EnumAttrCase<"MMAC_DEFAULT", 10, "mmac_default">,
+        I32EnumAttrCase<"MMAC_4INTERLEAVE", 11, "mmac_4interleave">,
+        I32EnumAttrCase<"MMAC_TRANSPOSE", 12, "mmac_transpose">,
+        I32EnumAttrCase<"MMAC_4INTERLEAVE_TRANSPOSE", 13, "mmac_4interleave_transpose">
+    ]> {
+    let cppNamespace = "::mlir::triton::gpu";
 }
 
 //===----------------------------------------------------------------------===//
@@ -905,14 +919,15 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
     "unsigned":$MDim,
     "unsigned":$NDim,
     "bool":$isTransposed,
-    "CTALayoutAttr":$CTALayout
+    "CTALayoutAttr":$CTALayout,
+    DefaultValuedParameter<"MfmaMmacLayout", "MfmaMmacLayout::MMAC_DEFAULT">:$mfmaMmacLayout
   );
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
     bool supportReduction() const {
       return true;
     }
-    bool isMmacV1() const;
+    bool isMmacHCU() const;
     SmallVector<unsigned> getSizePerThreadForOperand(int kWidth, int opIdx) const;
     unsigned getTotalElemsPerThreadForOperand(ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const;
     SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
@@ -923,7 +938,7 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
       auto rank = getWarpsPerCTA().size();
       SmallVector<unsigned> contigPerThread(rank, 1);
 
-      if (isMmacV1())
+      if (isMmacHCU())
         return contigPerThread;   // always {[batch,] 1, 1}
 
       if (getIsTransposed())

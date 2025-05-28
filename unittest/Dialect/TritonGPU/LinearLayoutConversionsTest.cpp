@@ -61,7 +61,8 @@ public:
     std::iota(cOrd.begin(), cOrd.end(), 0);
     return AMDMfmaEncodingAttr::get(
         &ctx, /*versionMajor=*/2, /*versionMinor=*/0, warps, mDim, nDim,
-        isTransposed, CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd));
+        isTransposed, CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd),
+        MfmaMmacLayout::MFMA);
   }
 
   DotOperandEncodingAttr mfmaDotOp(AMDMfmaEncodingAttr mfma, unsigned opIdx,

@@ -55,7 +55,7 @@ Attribute createTmpLayout(Attribute layout, ArrayRef<unsigned> warpsPerCTA) {
     return triton::gpu::AMDMfmaEncodingAttr::get(
         ctx, src.getVersionMajor(), src.getVersionMinor(), warpsPerCTA,
         src.getMDim(), src.getNDim(), src.getIsTransposed(),
-        src.getCTALayout());
+        src.getCTALayout(), src.getMfmaMmacLayout());
   if (auto src = dyn_cast<triton::gpu::AMDWmmaEncodingAttr>(layout))
     return triton::gpu::AMDWmmaEncodingAttr::get(
         ctx, /*version=*/1, warpsPerCTA, src.getCTALayout());

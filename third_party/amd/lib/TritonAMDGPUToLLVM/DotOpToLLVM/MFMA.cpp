@@ -35,6 +35,7 @@ using ::mlir::LLVM::AMD::shuffleXor;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::MfmaMmacLayout;
 
 using ValueTable = std::map<std::array<int, 3>, Value>;
 
@@ -61,14 +62,22 @@ struct DotOpMFMAConversionHelper {
   }
 
   Value generateMFMAOp(StringRef mfmaInsnName, Value valA, Value valB,
-                       Value valC) const {
+                       Value valC, MfmaMmacLayout mfmaMmacLayout) const {
     auto resType = valC.getType();
     OperationState loweredOp(loc, mfmaInsnName);
     loweredOp.addTypes(resType);
     Value i32Flag = i32_val(0);
     Value i1Flag = false_val();
+    bool isMmacLTS =
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE;
+    bool isMmacLIT =
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE ||
+        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE;
+    Value ltsFlag = isMmacLTS ? true_val() : false_val();
+    Value litFlag = isMmacLIT ? true_val() : false_val();
     if (mfmaInsnName.compare("rocdl.mmac.16x16x4.f32") == 0) {
-      loweredOp.addOperands({valA, valB, valC, i32Flag, i1Flag});
+      loweredOp.addOperands({valA, valB, valC, i32Flag, ltsFlag});
     } else if (mfmaInsnName.compare("rocdl.mmac.16x16x8.f32") == 0 ||
                mfmaInsnName.compare("rocdl.mmac.f32.16x16x16.f16") == 0 ||
                mfmaInsnName.compare("rocdl.mmac.f32.16x16x16.bf16") == 0 ||
@@ -76,10 +85,10 @@ struct DotOpMFMAConversionHelper {
                mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.bf8.fp8") == 0 ||
                mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.fp8.bf8") == 0 ||
                mfmaInsnName.compare("rocdl.mmac.f32.16x16x32.fp8.fp8") == 0) {
-      loweredOp.addOperands({valA, valB, valC, i1Flag, i1Flag});
+      loweredOp.addOperands({valA, valB, valC, litFlag, ltsFlag});
     } else if (mfmaInsnName.compare("rocdl.mmac.i32.16x16x32.i8") == 0 ||
                mfmaInsnName.compare("rocdl.mmac.i32.16x16x32.u8") == 0) {
-      loweredOp.addOperands({valA, valB, valC, i1Flag, i1Flag, i1Flag});
+      loweredOp.addOperands({valA, valB, valC, litFlag, i1Flag, ltsFlag});
     } else {
       loweredOp.addOperands({valA, valB, valC});
     }
@@ -225,16 +234,15 @@ struct DotOpMFMAConversionHelper {
     auto numRepK = repA[2];
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
-    bool isMmacV1 =
-        cast<AMDMfmaEncodingAttr>(aEncoding.getParent())
-            ? cast<AMDMfmaEncodingAttr>(aEncoding.getParent()).isMmacV1()
-            : false;
+    auto mfmaEncoding = cast<AMDMfmaEncodingAttr>(aEncoding.getParent());
+    auto mfmaMmacLayout = mfmaEncoding.getMfmaMmacLayout();
+    bool isMmacHCU = mfmaEncoding ? mfmaEncoding.isMmacHCU() : false;
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
-        aTensorTy.getElementType(), isMmacV1);
+        aTensorTy.getElementType(), isMmacHCU);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
-        aTensorTy.getElementType(), isMmacV1);
+        aTensorTy.getElementType(), isMmacHCU);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -264,9 +272,11 @@ struct DotOpMFMAConversionHelper {
               acc =
                   mfmaLayout.getIsTransposed()
                       ? generateMFMAOp(mfmaInsnName, operandB[kPack][{b, n, k}],
-                                       operandA[kPack][{b, m, k}], acc)
+                                       operandA[kPack][{b, m, k}], acc,
+                                       mfmaMmacLayout)
                       : generateMFMAOp(mfmaInsnName, operandA[kPack][{b, m, k}],
-                                       operandB[kPack][{b, n, k}], acc);
+                                       operandB[kPack][{b, n, k}], acc,
+                                       mfmaMmacLayout);
           }
           acc = reduceSubBlocks(subBlocks, acc);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
@@ -298,7 +308,7 @@ struct DotOpMFMAConversionHelper {
   /// rawElems is a vector of kWidth elements. We need to prepare vector(s) of
   /// kBase elements for each mfma instruction
   SmallVector<Value> extractOperands(Value rawElems, int kWidth, int kBase,
-                                     Type type, bool isMmacV1 = false) const {
+                                     Type type, bool isMmacHCU = false) const {
     int kpack = kWidth / kBase;
     SmallVector<Value> results;
     auto vecTy = vec_ty(type, kBase);
@@ -321,7 +331,7 @@ struct DotOpMFMAConversionHelper {
           // This is for int8 on pre- MI300 GPUs
           results.push_back(bitcast(vec, i32_ty));
         if (8 == kBase) {
-          if (isMmacV1) {
+          if (isMmacHCU) {
             // Pack 8bit element to I32, e.g. 8xi8 -> 2xi32
             auto v4x8BitTy = vec_ty(type, 4);
             auto v2x32BitTy = vec_ty(i32_ty, 2);
@@ -352,7 +362,7 @@ struct DotOpMFMAConversionHelper {
   SmallVector<ValueTable>
   getValuesFromDotOperandLayoutStruct(Value value, int batch, int n0, int n1,
                                       int kWidth, int kBase, Type type,
-                                      bool isMmacV1 = false) const {
+                                      bool isMmacHCU = false) const {
     auto elems = unpackLLElements(loc, value, rewriter);
     int kpack = kWidth / kBase;
     SmallVector<ValueTable> dotOpVals(kpack);
@@ -388,7 +398,7 @@ struct DotOpMFMAConversionHelper {
           } else {
             SmallVector<Value> vals;
             if (type.getIntOrFloatBitWidth() == 8) {
-              vals = extractOperands(rawElems, kWidth, kBase, i8_ty, isMmacV1);
+              vals = extractOperands(rawElems, kWidth, kBase, i8_ty, isMmacHCU);
             } else if (type.isBF16()) {
               vals = extractOperands(rawElems, kWidth, kBase, bf16_ty);
             } else {
