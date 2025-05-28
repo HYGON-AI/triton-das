@@ -1,6 +1,6 @@
 from .kernelentry import kernelentry
 from .hcutuner import hcutune, ConfigLoader
-
+from .lang import annotate_hint
 
 def get_optimal_config(op_name, *args, **kwargs):
     tuned = global_config_loader.get_tuned_cache(op_name)
@@ -17,4 +17,5 @@ __all__ = [
     "kernelentry",
     "hcutune",
     "get_optimal_config",
+    "annotate_hint",
 ]
