@@ -1,6 +1,6 @@
-# HYGON Test Suit
+# HCU Test Suit
 
-This directory contains utility scripts customized for daily development on Hygon GPUs.
+This directory contains utility scripts customized for daily development on HCU GPUs.
 
 # Scripts Usage
 

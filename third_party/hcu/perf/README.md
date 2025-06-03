@@ -1,5 +1,5 @@
-# HYGON Perf Kernels
-This directory contains customized/tuned/experimental kernels for HYGON GPUs.
+# HCU Perf Kernels
+This directory contains customized/tuned/experimental kernels for HCU GPUs.
 
 ## attention
 

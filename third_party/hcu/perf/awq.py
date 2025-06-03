@@ -1,7 +1,7 @@
 """AWQ Triton Implementation.
 
 This module contains the AWQ (Activation-Weight Quantization) implementation using Triton.
-Cloned from vllm main branch (commit:cb080f32) and modified to fit Hygon.
+Cloned from vllm main branch (commit:cb080f32) and modified to fit HCU.
 Original file path: vllm/model_executor/layers/quantization/awq_triton.py
 """
 
@@ -303,14 +303,14 @@ def awq_gemm_triton(
     split_k_iters: int,
 ) -> torch.Tensor:
     """Perform AWQ GEMM operation using Triton implementation.
-    
+
     Args:
         input: Input tensor
         qweight: Quantized weight tensor
         scales: Scale factors tensor
         qzeros: Zero points tensor
         split_k_iters: Number of split K iterations
-        
+
     Returns:
         Result tensor from GEMM operation
     """
@@ -358,10 +358,10 @@ def awq_gemm_triton(
 
 def reverse_awq_order(tensor: torch.Tensor) -> torch.Tensor:
     """Reverse the AWQ order of the given tensor.
-    
+
     Args:
         tensor: Input tensor to reorder
-        
+
     Returns:
         Reordered tensor with bits masked to 4 bits
     """
@@ -387,13 +387,13 @@ def awq_dequantize_torch(
     group_size: int,
 ) -> torch.Tensor:
     """Dequantize weights using PyTorch implementation.
-    
+
     Args:
         qweight: Quantized weight tensor
         scales: Scale factors tensor
         qzeros: Zero points tensor
         group_size: Size of groups for quantization
-        
+
     Returns:
         Dequantized tensor
     """
@@ -770,7 +770,7 @@ bench_configs = [
 @triton.testing.perf_report(bench_configs)
 def bench_awq_gemm(M, K, N, G, splitK, provider, device="cuda"):
     """Benchmark AWQ GEMM performance.
-    
+
     Args:
         M: Number of rows in input matrix
         K: Number of columns in input matrix
@@ -819,10 +819,10 @@ def bench_awq_gemm(M, K, N, G, splitK, provider, device="cuda"):
         )
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
-        
+
     else:  # provider == "torch"
         fn = lambda: torch.matmul(
-            input_tensor, 
+            input_tensor,
             awq_dequantize_torch(qweight, scales, qzeros, G)
         )
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
