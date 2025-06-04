@@ -9,7 +9,7 @@ function run_pytest() {
     "matmul.py"
     "rmsnorm.py"
   )
-  file_path=${SRC_HOME}/third_party/hygon/test
+  file_path=${SRC_HOME}/third_party/hcu/test
   for f in ${test_files[@]}; do
     pytest_file=${file_path}/${f}
     pytest ${pytest_file}
