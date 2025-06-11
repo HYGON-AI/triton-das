@@ -8,7 +8,7 @@ import triton.language as tl
 import pytest
 from triton.runtime.cache import default_cache_dir
 import subprocess
-from triton.utils.hcutuner import get_config_key
+from triton.utils.hcutuner import get_config_key, get_gpu_label
 
 
 def do_bench(kernel_call, quantiles):
@@ -229,7 +229,7 @@ def test_mp_restore_config(device, world_size):
         tl.store(src + offsets, x, mask=offsets < N)
 
     triton.utils.global_config_loader.load_all()
-    tuned = triton.utils.global_config_loader.get_tuned_cache("_kernel_mp")
+    tuned = triton.utils.global_config_loader.get_tuned_cache("_kernel_mp", get_gpu_label())
     assert len(tuned) == world_size
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     config = triton.utils.get_optimal_config("_kernel_mp", src, N)

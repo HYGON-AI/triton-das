@@ -265,7 +265,7 @@ class ConfigLoader:
             return res
 
         for fpath, op, device, _ in parse_all_config_files(self.config_dir):
-            self.tuned_cache[op].append(self.create_tuned_config(fpath, op, device))
+            self.tuned_cache[(op, device)].append(self.create_tuned_config(fpath, op, device))
 
     def create_tuned_config(self, fullpath, op_name, device_name):
         try:
@@ -275,8 +275,9 @@ class ConfigLoader:
             raise Exception(f"[hcutuner] Fail to load best config {fullpath} : {e}")
         return TunedConfig(op_name, device_name, data)
 
-    def get_tuned_cache(self, op_name):
-        return self.tuned_cache[op_name] if op_name in self.tuned_cache else None
+    def get_tuned_cache(self, op_name, device_name):
+        key = (op_name, device_name)
+        return self.tuned_cache[key] if key in self.tuned_cache else None
 
 
 class ConfigCacheManager(FileCacheManager):
