@@ -26,9 +26,8 @@ def split_x_vals(vals: list):
     Environment:
     1. TRITON_HCUTUNE_WORLD_SIZE, the total number of processes
     2. TRITON_HCUTUNE_LOCAL_RANK, the current process id
-    3. TRITON_HCUTUNE_VISIBLE_DEVICES, benchmarking is distributed on the given devices
 
-    Each process is assigned the above environment variables by triton.utils.distributed.launch.py
+    Each process is assigned the above environment variables by triton.tools.launch.py
     """
     rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
     world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
@@ -36,6 +35,16 @@ def split_x_vals(vals: list):
     _vals = split_list_balanced(vals, world_size)
     assert len(_vals) == world_size
     return _vals[rank]
+
+
+def set_device():
+    """
+    TRITON_HCUTUNE_VISIBLE_DEVICES, benchmarking is distributed on the given devices
+    """
+    if "TRITON_HCUTUNE_VISIBLE_DEVICES" in os.environ:
+        rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK").strip())
+        devices = os.getenv("TRITON_HCUTUNE_VISIBLE_DEVICES").split(",")
+        os.environ["CUDA_VISIBLE_DEVICES"] = devices[rank % len(devices)]
 
 
 def dist_perf_report(benchmarks):
@@ -47,5 +56,6 @@ def dist_perf_report(benchmarks):
     """
     for o in benchmarks:
         o.x_vals = split_x_vals(o.x_vals)
+    set_device()
     wrapper = lambda fn: MPMark(fn, benchmarks)
     return wrapper

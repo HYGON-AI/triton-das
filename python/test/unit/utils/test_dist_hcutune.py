@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 import pytest
 import subprocess
-from triton.utils.testing import split_x_vals
+from triton.utils.testing import split_x_vals, set_device
 
 
 def get_config_cache_files(fn, *args, **kwargs):
@@ -56,6 +56,46 @@ def test_split_vals(monkeypatch):
     monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", "3")
     res = split_x_vals(vals)
     assert res == [6, 7]
+
+
+def test_set_devices(monkeypatch):
+    # not enough: num_vals = 3, world_size = 4
+    vals = list(range(3))
+    monkeypatch.setenv("TRITON_HCUTUNE_WORLD_SIZE", "4")
+    monkeypatch.setenv("TRITON_HCUTUNE_VISIBLE_DEVICES", "0")
+    for i in range(4):
+        monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", str(i))
+        set_device()
+        assert os.getenv("CUDA_VISIBLE_DEVICES") == "0"
+
+    # with remainder: num_vals = 5, world_size = 4
+    vals = list(range(5))
+    monkeypatch.setenv("TRITON_HCUTUNE_WORLD_SIZE", "4")
+    monkeypatch.setenv("TRITON_HCUTUNE_VISIBLE_DEVICES", "0,1")
+    for i in range(4):
+        monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", str(i))
+        set_device()
+        if i % 2 == 0:
+            assert os.getenv("CUDA_VISIBLE_DEVICES") == "0"
+        else:
+            assert os.getenv("CUDA_VISIBLE_DEVICES") == "1"
+
+    # alignment: num_vals = 8, world_size = 4
+    vals = list(range(8))
+    monkeypatch.setenv("TRITON_HCUTUNE_WORLD_SIZE", "4")
+    monkeypatch.setenv("TRITON_HCUTUNE_VISIBLE_DEVICES", "3,2,1,0")
+    monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", "0")
+    set_device()
+    assert os.getenv("CUDA_VISIBLE_DEVICES") == "3"
+    monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", "1")
+    set_device()
+    assert os.getenv("CUDA_VISIBLE_DEVICES") == "2"
+    monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", "2")
+    set_device()
+    assert os.getenv("CUDA_VISIBLE_DEVICES") == "1"
+    monkeypatch.setenv("TRITON_HCUTUNE_LOCAL_RANK", "3")
+    set_device()
+    assert os.getenv("CUDA_VISIBLE_DEVICES") == "0"
 
 
 @pytest.mark.parametrize('world_size', [4])

@@ -19,7 +19,7 @@ auto-tuning and benchmarking.
 
 **Important Notices:**
 
-This utility must be work with triton.utils.testing.perf_report,
+This utility must be work with triton.utils.dist_perf_report,
 which should be used to replace @triton.testing.perf_report decorator in YOUR_PYTHON_SCRIPT.py.
 """
 
@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument("--nproc", type=int, default=1,
                         help="The number of processes to launch on each node, "
                              "each process is responsible for handling a portion of the cases.")
+    parser.add_argument("--devices", type=str, default="0",
+                        help="Set GPU devices for benchmarking, each process is responsible for handling a portion of the cases.")
 
     # positional
     parser.add_argument("src", type=str,
