@@ -80,7 +80,7 @@ def test_save_config(device: str):
         assert os.path.exists(config_fpath)
         with open(config_fpath, "r") as fp:
             data = json.load(fp)
-        for k in ["arg_names", "keys", "configs"]:
+        for k in ["key", "configs"]:
             assert k in data
         assert len(data['configs']) == 1
         assert list(data['configs'].keys())[0] == "(1024, 'torch.float32')"
@@ -147,9 +147,15 @@ def test_restore_config(pass_kwargs_to_kernel, device):
         kwargs = {}
 
     triton.utils.global_config_loader.load_all()
-    config = triton.utils.get_optimal_config("_kernel", *args, **kwargs)
+    key_dict = {
+        'N': N,
+        'src': src.dtype
+    }
+    config = triton.utils.get_optimal_config("_kernel", key_dict)
     _kernel[grid](*args, **kwargs, **config)
     triton.testing.assert_close(src, torch.ones_like(src))
+    config2 = triton.utils.get_optimal_config("_kernel", [N, src.dtype])
+    assert config == config2
 
 
 @pytest.mark.parametrize('device', ['cuda'])
@@ -232,7 +238,11 @@ def test_mp_restore_config(device, world_size):
     tuned = triton.utils.global_config_loader.get_tuned_cache("_kernel_mp", get_gpu_label())
     assert len(tuned) == world_size
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
-    config = triton.utils.get_optimal_config("_kernel_mp", src, N)
+    key_dict = {
+        'src': src,
+        'N': N,
+    }
+    config = triton.utils.get_optimal_config("_kernel_mp", key_dict)
     _kernel_mp[grid](src, N, **config)
     triton.testing.assert_close(src, torch.ones_like(src))
 
@@ -269,7 +279,7 @@ def test_restore_cache(device: str, always_tuning: bool):
     # cache hit
     keys = [str(o) for o in fn.cache.keys()]
     for _src, m, n in zip(src, M, N):
-        key = get_config_key(fn.arg_names, fn.keys, _src, m, n)
+        _, key = get_config_key(fn.arg_names, fn.keys, _src, m, n)
         assert key in keys
 
 

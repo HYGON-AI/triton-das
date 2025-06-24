@@ -10,7 +10,7 @@ import triton
 from collections import defaultdict
 from triton.runtime.cache import default_cache_dir, default_dump_dir, default_override_dir
 
-from typing import Dict
+from typing import Dict, Union
 from distutils.util import strtobool
 
 from triton.runtime.cache import FileCacheManager, _base32
@@ -24,10 +24,9 @@ manager_cache = {}
 config_cache = {}
 
 
-def _get_result_template(arg_names: list, keys:list):
+def _get_result_template(key: list):
     ret = {
-        "arg_names": arg_names,
-        "keys": keys,
+        "key": key,
         "configs": {},
     }
     return ret
@@ -85,9 +84,9 @@ class Hcutuner(triton.runtime.Autotuner):
         Save best config as JSON file to cache dir: triton_cache_dir/configs/...
         """
         fname = os.path.join(self.save_config_dir, "config.json")
-        key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
+        key_name, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
         configs = file_cache[fname] if fname in file_cache else \
-                                    _get_result_template(self.arg_names, self.keys)
+                                    _get_result_template(key_name)
         if key not in configs['configs']:
             configs['configs'][key] = self.best_config.all_kwargs()
             with open(fname, "w") as f:
@@ -104,8 +103,8 @@ class Hcutuner(triton.runtime.Autotuner):
         arg_names = self.arg_names
         cache_manager = self.get_config_cache_manager(*args, **kwargs)
         key = cache_manager.key
-        cache_json = config_cache[key] if key in config_cache else _get_result_template(arg_names, keys)
-        config_key = get_config_key(arg_names, keys, *args, **kwargs)
+        config_name, config_key = get_config_key(arg_names, keys, *args, **kwargs)
+        cache_json = config_cache[key] if key in config_cache else _get_result_template(config_name)
         if config_key not in cache_json:
             cache_json['configs'][config_key] = self.best_config.all_kwargs()
             # print(f"[hcutuner] added best config to {cache_manager.cache_dir}")
@@ -116,7 +115,7 @@ class Hcutuner(triton.runtime.Autotuner):
         data = None
         cache_manager = self.get_config_cache_manager(*args, **kwargs)
         data = cache_manager.get("config.json")
-        if data and self.keys == data['keys']:
+        if data:
             for k, v in data['configs'].items():
                 kt = _create_tuple(k)
                 kv = _create_config_args(v)
@@ -212,9 +211,20 @@ def get_config_key(arg_names, keys, *args, **kwargs):
     # key format : str(tuple([autotune's key] + [dtypes]))
     nargs = dict(zip(arg_names, args))
     all_args = {**nargs, **kwargs}
-    key = [all_args[o] for o in keys if o in all_args]
-    dtype = [str(arg.dtype) for _, arg in all_args.items() if hasattr(arg, "dtype")]
-    return str(tuple(key + dtype))
+
+    k_name, k_val = [], []
+    for k in keys:
+        if k in all_args:
+            k_name.append(k)
+            k_val.append(all_args[k])
+
+    other, dtype = [], []
+    for n, arg in all_args.items():
+        if hasattr(arg, "dtype"):
+            dtype.append(str(arg.dtype))
+            other.append(n)
+
+    return k_name + other, str(tuple(k_val + dtype))
 
 
 def get_gpu_label():
@@ -228,30 +238,32 @@ class TunedConfig:
         self.device_name = device_name
         self.cache = cache
 
-    def get_optimal_config(self, *args, **kwargs):
-        key = get_config_key(self.cache['arg_names'], self.cache['keys'],
-                             *args, **kwargs)
+    def get_optimal_config(self, key: Union[list, dict]):
+        def handle(value):
+            if hasattr(value, "dtype"): # torch tensor
+                return str(value.dtype)
+            elif isinstance(value, torch.dtype):
+                return str(value)
+            else: # int, float, bool, str
+                return value
+
+        keys = self.cache['key']
+        if isinstance(key, dict):
+            key = str(tuple(handle(key[n]) for n in keys))
+        else:
+            key = str(tuple(handle(o) for o in key))
         if key in self.cache['configs']:
             return self.cache['configs'][key]
         return None
 
 
 class ConfigLoader:
-    _instance = None
-
-    def __new__(cls, *args, **kargs):
-        if cls._instance is None:
-            cls._instance = super(ConfigLoader, cls).__new__(cls)
-        return cls._instance
-
     def __init__(self, config_dir=None, device=None):
         self.config_dir = get_config_cache_dir() if config_dir is None else config_dir
         self.device = get_gpu_label() if device is None else device
         self.tuned_cache = defaultdict(list)
-
-        if not hasattr(self, "initialized"):
-            self.load_all()
-            self.initialized = True
+        self.kernel_device_map = defaultdict(list)
+        self.load_all()
 
     def load_all(self):
         def parse_all_config_files(root_dir):
@@ -262,6 +274,8 @@ class ConfigLoader:
                 assert len(parts) == 4
                 # (filepath, op_name, device_name, run_id)
                 res.append((fpath, *parts[:3]))
+                if parts[1] not in self.kernel_device_map[parts[0]]:
+                    self.kernel_device_map[parts[0]].append(parts[1])
             return res
 
         for fpath, op, device, _ in parse_all_config_files(self.config_dir):
@@ -278,6 +292,54 @@ class ConfigLoader:
     def get_tuned_cache(self, op_name, device_name):
         key = (op_name, device_name)
         return self.tuned_cache[key] if key in self.tuned_cache else None
+
+
+# class ConfigLoader:
+#     _instance = None
+
+#     def __new__(cls, *args, **kargs):
+#         if cls._instance is None:
+#             cls._instance = super(ConfigLoader, cls).__new__(cls)
+#         return cls._instance
+
+#     def __init__(self, config_dir=None, device=None):
+#         self.config_dir = get_config_cache_dir() if config_dir is None else config_dir
+#         self.device = get_gpu_label() if device is None else device
+#         self.tuned_cache = defaultdict(list)
+#         self.kernel_device_map = defaultdict(list)
+
+#         if not hasattr(self, "initialized"):
+#             self.load_all()
+#             import pdb; pdb.set_trace()
+#             self.initialized = True
+
+#     def load_all(self):
+#         def parse_all_config_files(root_dir):
+#             res = []
+#             for fpath in get_config_files(root_dir):
+#                 relative_path = os.path.relpath(fpath, root_dir)
+#                 parts = relative_path.split("/")
+#                 assert len(parts) == 4
+#                 # (filepath, op_name, device_name, run_id)
+#                 res.append((fpath, *parts[:3]))
+#                 if parts[1] not in self.kernel_device_map[parts[0]]:
+#                     self.kernel_device_map[parts[0]].append(parts[1])
+#             return res
+
+#         for fpath, op, device, _ in parse_all_config_files(self.config_dir):
+#             self.tuned_cache[(op, device)].append(self.create_tuned_config(fpath, op, device))
+
+#     def create_tuned_config(self, fullpath, op_name, device_name):
+#         try:
+#             with open(fullpath) as f:
+#                 data = json.load(f)
+#         except Exception as e:
+#             raise Exception(f"[hcutuner] Fail to load best config {fullpath} : {e}")
+#         return TunedConfig(op_name, device_name, data)
+
+#     def get_tuned_cache(self, op_name, device_name):
+#         key = (op_name, device_name)
+#         return self.tuned_cache[key] if key in self.tuned_cache else None
 
 
 class ConfigCacheManager(FileCacheManager):
@@ -320,7 +382,7 @@ class ConfigCacheManager(FileCacheManager):
             except Exception as e:
                 raise Exception(f"[hcutuner] Fail to load best config {fpath} : {e}")
         if data:
-            ret = _get_result_template(data[0]['arg_names'], data[0]['keys'])
+            ret = _get_result_template(data[0]['key'])
             ret['configs'] = {k: v for d in data for k, v in d['configs'].items()}
         return ret
 

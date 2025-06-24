@@ -1,15 +1,30 @@
+from typing import Union
 from .kernelentry import kernelentry
 from .hcutuner import hcutune, ConfigLoader, get_gpu_label
 from .lang import annotate_hint
 from .testing import dist_perf_report
 
 
-def get_optimal_config(op_name, *args, device_name=None, **kwargs):
+def get_optimal_config(op_name: str, key: Union[list, dict], device_name: str = None):
     device_name = device_name if device_name else get_gpu_label()
     tuned = global_config_loader.get_tuned_cache(op_name, device_name)
     if tuned:
-        configs = [t.get_optimal_config(*args, **kwargs) for t in tuned]
-        return {k: v for d in configs if d for k, v in d.items()}
+        configs = [t.get_optimal_config(key) for t in tuned]
+        res = {k: v for d in configs if d for k, v in d.items()}
+        if res:
+            return res
+        else:
+            import os
+            from triton.runtime.cache import default_cache_dir
+            cache_dir = os.getenv("TRITON_CACHE_DIR", "").strip() or default_cache_dir()
+            print(
+                f"[hcutuner] WARNING: Not found optimal config for {op_name} !!! cache dir: {cache_dir},\t"
+                f"device name: {device_name},\tconfig key: {key}"
+            )
+            return None
+    print(
+        f"[hcutuner] WARNING: Not found config cache for ({op_name}, {device_name})."
+    )
     return None
 
 

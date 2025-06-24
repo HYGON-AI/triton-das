@@ -689,6 +689,7 @@ def get_entry_points():
         entry_points["console_scripts"] = [
             "proton-viewer = triton.profiler.viewer:main",
             "proton = triton.profiler.proton:main",
+            "opt_config_cli = triton.tools.opt_config_cli:main",
         ]
     return entry_points
 
