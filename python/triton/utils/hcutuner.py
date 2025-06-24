@@ -90,7 +90,28 @@ class Hcutuner(triton.runtime.Autotuner):
         self.autotune_key_hash = get_list_hash(self.keys)
         self.kernel_config_hash = get_config_list_hash(self.configs)
 
+    def warmup(self, *args, **kwargs):
+        self.nargs = dict(zip(self.arg_names, args))
+        ret = []
+        rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
+        world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
+        config_loader = PruneConfigLoader(self.prune_configs(kwargs), world_size, rank)
+        for config in config_loader:
+            if config:
+                ret.append(self.fn.warmup(
+                    *args,
+                    **kwargs,
+                    **config.all_kwargs(),
+                ))
+        self.nargs = None
+        return ret
+
     def run(self, *args, **kwargs):
+        if os.getenv("TRITON_HCUTUNE_COMPILE_ONLY") == "1":
+            del kwargs['warmup']
+            self.warmup(*args, **kwargs)
+            return
+
         if self.flag_restore_tuned_cache:
             self.restore_tuned_cache(*args, **kwargs)
             self.flag_restore_tuned_cache = False

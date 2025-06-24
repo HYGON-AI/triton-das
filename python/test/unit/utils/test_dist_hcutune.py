@@ -135,9 +135,7 @@ def test_prune_config_loader():
     assert res == [6, 7]
 
 
-@pytest.mark.parametrize('world_size', [4])
-def test_dist_launch(world_size):
-    code = """
+code = """
 import os
 import sys
 import torch
@@ -201,6 +199,8 @@ if __name__ == "__main__":
     main()
     """
 
+@pytest.mark.parametrize('world_size', [4])
+def test_dist_launch(world_size):
     # multi-process tuning
 
     temp_filename = None
@@ -277,3 +277,15 @@ def test_min_timings_config():
     assert len(cache['configs']) == len(cache['timings']) == 1
     assert cache['configs']['(16, 32)'] == {"BLOCK_SIZE_M": 64}
     assert cache['timings']['(16, 32)'] == [0.00010, 0.00018, 0.00012]
+
+
+def test_compile_only():
+    temp_filename = None
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(code.strip())
+        temp_filename = f.name
+
+    cmd = ["python3", "-m", "triton.tools.launch", "--nproc",
+            "4", "--compile-only", temp_filename]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE)
+    assert res.returncode == 0

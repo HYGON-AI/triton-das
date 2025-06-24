@@ -44,6 +44,8 @@ def parse_args():
                              "each process is responsible for handling a portion of the cases.")
     parser.add_argument("--devices", type=str, default="0",
                         help="Set GPU devices for benchmarking, each process is responsible for handling a portion of the cases.")
+    parser.add_argument("--compile-only", action="store_true",
+                        help="Just compile kernel, no tuning")
 
     # positional
     parser.add_argument("src", type=str,
@@ -67,6 +69,9 @@ def main():
     # set environmental variables for processes
     current_env = os.environ.copy()
     current_env["TRITON_HCUTUNE_WORLD_SIZE"] = str(dist_world_size)
+
+    if args.compile_only:
+        current_env["TRITON_HCUTUNE_COMPILE_ONLY"] = "1"
 
     processes = []
     for local_rank in range(0, args.nproc):
