@@ -294,54 +294,6 @@ class ConfigLoader:
         return self.tuned_cache[key] if key in self.tuned_cache else None
 
 
-# class ConfigLoader:
-#     _instance = None
-
-#     def __new__(cls, *args, **kargs):
-#         if cls._instance is None:
-#             cls._instance = super(ConfigLoader, cls).__new__(cls)
-#         return cls._instance
-
-#     def __init__(self, config_dir=None, device=None):
-#         self.config_dir = get_config_cache_dir() if config_dir is None else config_dir
-#         self.device = get_gpu_label() if device is None else device
-#         self.tuned_cache = defaultdict(list)
-#         self.kernel_device_map = defaultdict(list)
-
-#         if not hasattr(self, "initialized"):
-#             self.load_all()
-#             import pdb; pdb.set_trace()
-#             self.initialized = True
-
-#     def load_all(self):
-#         def parse_all_config_files(root_dir):
-#             res = []
-#             for fpath in get_config_files(root_dir):
-#                 relative_path = os.path.relpath(fpath, root_dir)
-#                 parts = relative_path.split("/")
-#                 assert len(parts) == 4
-#                 # (filepath, op_name, device_name, run_id)
-#                 res.append((fpath, *parts[:3]))
-#                 if parts[1] not in self.kernel_device_map[parts[0]]:
-#                     self.kernel_device_map[parts[0]].append(parts[1])
-#             return res
-
-#         for fpath, op, device, _ in parse_all_config_files(self.config_dir):
-#             self.tuned_cache[(op, device)].append(self.create_tuned_config(fpath, op, device))
-
-#     def create_tuned_config(self, fullpath, op_name, device_name):
-#         try:
-#             with open(fullpath) as f:
-#                 data = json.load(f)
-#         except Exception as e:
-#             raise Exception(f"[hcutuner] Fail to load best config {fullpath} : {e}")
-#         return TunedConfig(op_name, device_name, data)
-
-#     def get_tuned_cache(self, op_name, device_name):
-#         key = (op_name, device_name)
-#         return self.tuned_cache[key] if key in self.tuned_cache else None
-
-
 class ConfigCacheManager(FileCacheManager):
     """
     Re-implements Triton's cache manager to:
