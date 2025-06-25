@@ -80,10 +80,11 @@ def test_save_config(device: str):
         assert os.path.exists(config_fpath)
         with open(config_fpath, "r") as fp:
             data = json.load(fp)
-        for k in ["key", "configs"]:
+        for k in ["key", "configs", "timings"]:
             assert k in data
-        assert len(data['configs']) == 1
+        assert len(data['configs']) == len(data['timings']) == 1
         assert list(data['configs'].keys())[0] == "(1024, 'torch.float32')"
+        assert list(data['timings'].keys())[0] == "(1024, 'torch.float32')"
         assert (value := list(data['configs'].values())[0])['BLOCK_SIZE'] == 32 or \
                 value['BLOCK_SIZE'] == 128
 
@@ -121,7 +122,7 @@ def test_save_configs(pass_kwargs_to_kernel: bool, device: str, use_cuda_graph: 
     config_fpaths = get_save_config_files("_kernel2", device)
     with open(config_fpaths[0], "r") as fp:
         data = json.load(fp)
-    assert len(data['configs']) == len(N) * len(M)
+    assert len(data['configs']) == len(data['timings']) == len(N) * len(M)
 
 
 @pytest.mark.parametrize('device', ['cuda'])
@@ -235,8 +236,6 @@ def test_mp_restore_config(device, world_size):
         tl.store(src + offsets, x, mask=offsets < N)
 
     triton.utils.global_config_loader.load_all()
-    tuned = triton.utils.global_config_loader.get_tuned_cache("_kernel_mp", get_gpu_label())
-    assert len(tuned) == world_size
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     key_dict = {
         'src': src,
@@ -274,13 +273,15 @@ def test_restore_cache(device: str, always_tuning: bool):
     files = get_config_cache_files(fn, src[0], M[0], N[0])
     assert len(files) == 1
     fn.restore_tuned_cache(src[0], M[0], N[0])
-    assert len(fn.cache) == SIZE
+    assert len(fn.cache) == len(fn.configs_timings) == SIZE
+    for _, v in fn.cache.items():
+        assert v in fn.configs_timings
 
     # cache hit
     keys = [str(o) for o in fn.cache.keys()]
     for _src, m, n in zip(src, M, N):
         _, key = get_config_key(fn.arg_names, fn.keys, _src, m, n)
-        assert key in keys
+        assert str(key) in keys
 
 
 @pytest.mark.parametrize('device', ['cuda'])

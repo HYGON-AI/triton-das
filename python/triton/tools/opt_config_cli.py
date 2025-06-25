@@ -42,15 +42,17 @@ def _show_config(loader, kernel, device_name, indent=""):
   cache = loader.get_tuned_cache(kernel, device_name)
 
   if cache:
-    config = cache[0].cache
+    config = cache.cache
     print(f"{indent}key: {config['key']}")
 
     if _OCCLI_ALL.value:
-      configs = {k: v for d in cache for k, v in d.cache['configs'].items()}
-      if configs:
-        print(f"{indent}configs:")
-        for k, v in configs.items():
-          print(f"  {indent}{k}: {to_config_str(v)}")
+      print(f"{indent}configs:")
+      for k, v in config['configs'].items():
+        print(f"  {indent}{k}: {to_config_str(v)}")
+
+      print(f"{indent}timings:")
+      for k, v in config['timings'].items():
+        print(f"  {indent}{k}: {v}")
 
 
 def _show_device(loader, kernel, device_name, indent=""):

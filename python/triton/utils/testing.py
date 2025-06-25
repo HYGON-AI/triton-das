@@ -1,6 +1,6 @@
 import os
 import uuid
-from triton.testing import Mark
+from triton.testing import Mark, perf_report
 
 
 class MPMark(Mark):
@@ -54,8 +54,14 @@ def dist_perf_report(benchmarks):
     :param benchmarks: Benchmarking configurations.
     :type benchmarks: List of :class:`Benchmark`
     """
-    for o in benchmarks:
-        o.x_vals = split_x_vals(o.x_vals)
-    set_device()
-    wrapper = lambda fn: MPMark(fn, benchmarks)
-    return wrapper
+
+    print(
+        "[DEPRECATED] @triton.utils.dist_perf_report is deprecated, please use @triton.testing.perf_report instead."
+    )
+    return perf_report(benchmarks)
+
+    # for o in benchmarks:
+    #     o.x_vals = split_x_vals(o.x_vals)
+    # set_device()
+    # wrapper = lambda fn: MPMark(fn, benchmarks)
+    # return wrapper

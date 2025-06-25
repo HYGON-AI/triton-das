@@ -62,6 +62,8 @@ def main():
     # world size in terms of number of processes
     dist_world_size = args.nproc
 
+    devices = args.devices.split(",")
+
     # set environmental variables for processes
     current_env = os.environ.copy()
     current_env["TRITON_HCUTUNE_WORLD_SIZE"] = str(dist_world_size)
@@ -69,6 +71,7 @@ def main():
     processes = []
     for local_rank in range(0, args.nproc):
         current_env["TRITON_HCUTUNE_LOCAL_RANK"] = str(local_rank)
+        current_env["CUDA_VISIBLE_DEVICES"] = devices[local_rank % len(devices)]
 
         # spawn the processes
         cmd = [sys.executable, "-u"]
