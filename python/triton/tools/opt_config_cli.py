@@ -6,9 +6,12 @@ queried using the show command.
 
 **Usage: **
 ::
-    >>> python -m triton.tools.opt_config_cli show [--all] [--kernel ...] [--device_name ...]
+    >>> python -m triton.tools.opt_config_cli show [--all] [--kernel ...] [--device ...]
 """
 
+import os
+import json
+from collections import defaultdict
 from absl import app  # pylint: disable=unused-import
 from absl import flags
 from absl.flags import argparse_flags
@@ -30,8 +33,38 @@ _OCCLI_KERNEL = flags.DEFINE_string(
     help='Comma-separated set of triton function name.')
 
 _OCCLI_DEVICE_NAME = flags.DEFINE_string(
-    name='device_name', default=None,
+    name='device', default=None,
     help='Comma-separated set of device label.')
+
+_OCCLI_OUTPUT_DIR = flags.DEFINE_string(
+    name='output_dir', default=None, help='Output directory path.')
+
+_OCCLI_OUTPUT = flags.DEFINE_string(
+    name='output', default=None,
+    help='User-provided filename of the output file.\n' \
+         'Which support custom placeholder for dynamic values:\n' \
+         '  %G  - When encountered, It will be replaced by the group name.\n\n' \
+         'Example Usage:\n' \
+         '  template = "layernorm,%G,device=K100,dtype=fp16.json"\n' \
+         '  # After parsing, this might become:\n' \
+         '  "layernorm,M=4096,device=K100,dtype=fp16.json"')
+
+_OCCLI_FULL_KEY = flags.DEFINE_bool(
+    name='full_key', default=False,
+    help='keep full key in the exported file.')
+
+_OCCLI_HOIST_KEY = flags.DEFINE_string(
+    name='hoist_key', default=None,
+    help='Comma-separated key set (not include dtype keys) is hoisted to filename.')
+
+_OCCLI_DELIMITER = flags.DEFINE_string(
+    name='delimiter', default='-',
+    help='The delimiter for the field in the file name.')
+
+command_required_flags = {
+    'show': [],
+    'export': ['kernel', 'device', 'output'],
+}
 
 
 def _show_config(loader, kernel, device_name, indent=""):
@@ -89,6 +122,122 @@ def show():
       _show_kernel(loader, name)
 
 
+def _remove_dtype_key(data):
+  """ remove dtypes in key (They are expected to be defined in filename) """
+  def _create_list(k):
+      s = k[1:-1]
+      entries = s.split(", ")
+      ret = []
+      for e in entries:
+          if e[0] == "'" or e[0] == '"':
+              ret.append(e[1:-1])
+          else:
+              ret.append(eval(e))
+      return ret
+
+  key = _create_list(list(data['configs'].keys())[0])
+  new_key = [o for o in key if not isinstance(o, str)]
+  num_consts = len(new_key)
+
+  res = {
+    'key': data['key'][:num_consts],
+    'configs': {},
+  }
+
+  for k, v in data['configs'].items():
+    res['configs'][str(tuple(_create_list(k)[:num_consts]))] = v
+
+  return res
+
+
+def _hoist_key(data, keys, hoisted):
+  """
+  hoists the specified keys to create groups.
+
+  return:
+  res: The configs of each groups
+  group_names: group names, e.g., "N=16,K=512", which is part of filename
+  """
+  parsed = {}
+  hoisted_ids = [keys.index(o) for o in hoisted]
+  keep_ids = [i for i in range(len(keys)) if i not in hoisted_ids]
+  assert keep_ids
+
+  if not hoisted_ids:
+    raise NameError(f"Not found hoisted key {hoisted}")
+
+  for key, value in data.items():
+    nums = key[1:-1].split(', ')
+    parsed[tuple(nums)] = value
+
+  grouped = defaultdict(dict)
+  for k, v in parsed.items():
+    gk = tuple([k[i] for i in hoisted_ids])
+    kk = [k[i] for i in keep_ids]
+    kk = tuple(kk) if len(kk) > 1 else kk[0]
+    grouped[gk][kk] = v
+
+  res, group_names = [], []
+  for k, v in grouped.items():
+    res.append(v)
+    group_names.append(_OCCLI_DELIMITER.value.join([f"{n}={_v}" for n, _v in zip(hoisted, k)]))
+
+  return res, group_names
+
+
+def _get_filename(output_dir, group_name=''):
+  """
+  User-provided filename of the output file.
+  Which support custom placeholder for dynamic value:
+    %G  - When encountered, It will be replaced by the group name.
+
+  Example Usage:
+    template = "layernorm,%G,device=K100,dtype=fp16.json"
+    # After parsing, this might become:
+    "layernorm,M=4096,device=K100,dtype=fp16.json"
+  """
+  filename = _OCCLI_OUTPUT.value
+  if "%G" in filename:
+    filename = filename.replace("%G", group_name)
+  else:
+    if group_name != '':
+      # add group_name at the head of filename
+      filename = group_name + _OCCLI_DELIMITER.value + filename
+
+  return os.path.join(output_dir, filename)
+
+
+def export():
+  """Function triggered by export command."""
+  loader = ConfigLoader(_OCCLI_DIR.value)
+  cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value)
+
+  configs, group_names = [], []
+  if not _OCCLI_FULL_KEY.value:
+    _cache = _remove_dtype_key(cache.cache)
+    if _OCCLI_HOIST_KEY.value:
+      configs, group_names = _hoist_key(_cache['configs'], _cache['key'],
+                                        _OCCLI_HOIST_KEY.value.split(','))
+    else:
+      configs = [_cache['configs']]
+
+  else:
+    configs = [cache.cache['configs']]
+
+  if len(group_names) == 0:
+    assert len(configs) == 1
+    group_names = ['']
+
+  output_dir = _OCCLI_OUTPUT_DIR.value if _OCCLI_OUTPUT_DIR.value else os.getcwd()
+  os.makedirs(output_dir, exist_ok=True)
+
+  for i, config in enumerate(configs):
+    output_file = _get_filename(output_dir, group_names[i])
+    if config:
+      with open(output_file, "w") as f:
+        json.dump(config, f, indent=4)
+
+
 def add_show_subparser(subparsers):
   """Add parser for `show`."""
   show_msg = (
@@ -100,13 +249,31 @@ def add_show_subparser(subparsers):
       'To show all metadata of configs from specified kernel functions:\n'
       '$opt_config_cli show --kernel layernorm_kernel,awq_kernel [--dir ...]\n\n'
       'To show all metadata of configs from specified kernel functions and devices:\n'
-      '$opt_config_cli show --kernel fused_moe_kernel,awq_kernel --device_name DCU_K100_AI'
+      '$opt_config_cli show --kernel fused_moe_kernel,awq_kernel --device DCU_K100_AI'
       ' [--dir ...]\n\n')
   parser_show = subparsers.add_parser(
       'show',
       description=show_msg,
       formatter_class=argparse.RawTextHelpFormatter)
   parser_show.set_defaults(func=show)
+
+
+def add_export_subparser(subparsers):
+  """Add parser for `export`."""
+  export_msg = (
+      'Usage examples:\n'
+      'To export the specfied kernel\'s optimal configs to JSON file:\n'
+      '$opt_config_cli export --kernel _layernorm_kernel --device DCU_K100_AI'
+      ' --output _layernorm_kernel-DCU_K100_AI-fp32.json'
+      ' [--full_key]'
+      ' [--hoist_key key,...]'
+      ' [--output_dir /path/to/save/output/file]'
+      ' [--dir /path/to/triton/config/cache/dir]\n\n')
+  parser_export = subparsers.add_parser(
+      'export',
+      description=export_msg,
+      formatter_class=argparse.RawTextHelpFormatter)
+  parser_export.set_defaults(func=export)
 
 
 def create_parser():
@@ -125,6 +292,10 @@ def create_parser():
 
   # show command
   add_show_subparser(subparsers)
+
+  # export command
+  add_export_subparser(subparsers)
+
   return parser
 
 
@@ -133,6 +304,7 @@ def main():
     parser = create_parser()
     if len(argv) < 2:
       parser.error('Too few arguments.')
+    flags.mark_flags_as_required(command_required_flags[argv[1]])
     args = parser.parse_args()
     args.func()
 
