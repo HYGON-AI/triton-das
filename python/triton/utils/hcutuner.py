@@ -58,6 +58,15 @@ class PruneConfigLoader:
             yield self.configs[i]
 
 
+def _get_fn_name(fn):
+    if isinstance(fn, triton.runtime.jit.JITFunction):
+        return fn.__name__
+    elif isinstance(fn, triton.runtime.autotuner.Heuristics):
+        return fn.fn.__name__
+    else:
+        raise NotImplementedError
+
+
 class Hcutuner(triton.runtime.Autotuner):
     """
     Re-implements Triton autotune to support custom operations:
@@ -78,7 +87,7 @@ class Hcutuner(triton.runtime.Autotuner):
         device_name = get_gpu_label()
         run_id = str(uuid.uuid4()) # random run_id for multiprocessing
         self.save_config_dir = os.path.join(get_config_cache_dir(),
-                                            fn.__name__,
+                                            _get_fn_name(fn),
                                             device_name,
                                             run_id)
         os.makedirs(self.save_config_dir, exist_ok=True)
@@ -96,9 +105,13 @@ class Hcutuner(triton.runtime.Autotuner):
         rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
         world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
         config_loader = PruneConfigLoader(self.prune_configs(kwargs), world_size, rank)
+        if isinstance(self.fn, triton.runtime.autotuner.Heuristics):
+            fn = self.fn.fn
+        else:
+            fn = self.fn
         for config in config_loader:
             if config:
-                ret.append(self.fn.warmup(
+                ret.append(fn.warmup(
                     *args,
                     **kwargs,
                     **config.all_kwargs(),
@@ -522,6 +535,9 @@ def _get_cache_hash(fn, autotune_param_hash, key_hash, kernel_config_hash, *args
     """
     target = driver.active.get_current_target()
     backend = make_backend(target)
+
+    if isinstance(fn, triton.runtime.autotuner.Heuristics):
+        fn = fn.fn
 
     if fn.binder is None:
         fn.create_binder(backend)

@@ -279,7 +279,33 @@ def test_min_timings_config():
     assert cache['timings']['(16, 32)'] == [0.00010, 0.00018, 0.00012]
 
 
-def test_compile_only():
+code_heuristics = """
+import torch
+import triton
+import triton.language as tl
+
+device = 'cuda'
+N = 1024
+src = torch.zeros(N, device=device)
+
+def do_bench(kernel_call, quantiles):
+    return triton.testing.do_bench(kernel_call, quantiles=quantiles, warmup=1, rep=1)
+
+configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+
+@triton.utils.hcutune(configs=configs, key=['N', 'DUMMY'], restore_value=['src'], do_bench=do_bench)
+@triton.heuristics(values={
+    "N_DIVISIBLE_BY_16": lambda args: args["N"] % 16 == 0,
+})
+@triton.jit
+def _kernel(src, N, N_DIVISIBLE_BY_16: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    x = tl.load(src + offsets, mask=offsets < N) + 1
+    tl.store(src + offsets, x, mask=offsets < N)
+"""
+
+@pytest.mark.parametrize('code', [code, code_heuristics])
+def test_compile_only(code: str):
     temp_filename = None
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         f.write(code.strip())

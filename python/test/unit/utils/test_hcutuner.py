@@ -403,3 +403,24 @@ if __name__ == "__main__":
 
     files = get_config_cache_files(_kernel_mp_cache, src[0], N[0])
     assert len(files) == world_size
+
+
+def test_heuristics_decorator(device: str = "cuda"):
+    N = 1024
+    src = torch.zeros(N, device=device)
+
+    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+
+    @triton.utils.hcutune(configs=configs, key=['N', 'DUMMY'], restore_value=['src'], do_bench=do_bench)
+    @triton.heuristics(values={
+        "N_DIVISIBLE_BY_16": lambda args: args["N"] % 16 == 0,
+    })
+    @triton.jit
+    def _kernel(src, N, N_DIVISIBLE_BY_16: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        tl.store(src + offsets, x, mask=offsets < N)
+
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    _kernel[grid](src, N)
+    triton.testing.assert_close(src, torch.ones_like(src))
