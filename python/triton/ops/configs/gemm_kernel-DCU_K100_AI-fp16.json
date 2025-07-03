@@ -1,0 +1,16 @@
+{
+    "(1, 256, 576)": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 64,
+        "SCHEDULER": 0,
+        "SPLITK": 1,
+        "RASTER": 0,
+        "SWIZZLE_SIZE": 16,
+        "kpack": 2,
+        "instruction_sched_variant": "local-prefetch",
+        "num_warps": 2,
+        "num_ctas": 1,
+        "num_stages": 2
+    }
+}

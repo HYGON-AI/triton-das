@@ -26,6 +26,7 @@ from . import language
 from . import testing
 from . import tools
 from . import utils
+from . import ops
 
 __all__ = [
     "autotune",

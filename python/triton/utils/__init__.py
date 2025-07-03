@@ -27,6 +27,17 @@ def get_optimal_config(op_name: str, key: Union[list, dict], device_name: str = 
     return None
 
 
+def get_config_cache(op_name: str, device_name: str = None):
+    device_name = device_name if device_name else get_gpu_label()
+    tuned = global_config_loader.get_tuned_cache(op_name, device_name)
+    if not tuned:
+        print(
+            f"[hcutuner] WARNING: Not found config cache for ({op_name}, {device_name})."
+        )
+        return None
+    return tuned.cache['configs']
+
+
 global_config_loader = ConfigLoader()
 
 
@@ -35,5 +46,7 @@ __all__ = [
     "hcutune",
     "get_optimal_config",
     "annotate_hint",
-    "dist_perf_report"
+    "dist_perf_report",
+    "get_gpu_label",
+    "get_config_cache",
 ]
