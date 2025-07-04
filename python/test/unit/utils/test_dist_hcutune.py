@@ -135,7 +135,7 @@ def test_prune_config_loader():
     assert res == [6, 7]
 
 
-code = """
+code_configs_sharding = """
 import os
 import sys
 import torch
@@ -149,7 +149,7 @@ configs = [triton.Config(kwargs={'BLOCK_SIZE_M': 32}), triton.Config(kwargs={'BL
 
 @triton.utils.hcutune(configs=configs, key=['M'], warmup=1, rep=1, do_bench=do_bench)
 @triton.jit
-def _kernel_dist_launch(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
+def _kernel_configs_sharding(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
     offsets_m = tl.program_id(0) * stride_m + tl.arange(0, BLOCK_SIZE_M)
     offsets_n = tl.arange(0, BLOCK_SIZE_N)
     x = tl.load(src + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :])
@@ -178,7 +178,71 @@ configs = [
 
 def dist_launch(dst, src, M, N):
      grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_M']), )
-     _kernel_dist_launch[grid](dst, src, N, M, N)
+     _kernel_configs_sharding[grid](dst, src, N, M, N)
+
+
+@triton.testing.perf_report(configs)
+def benchmark(M, N, provider, device='cuda'):
+    def _bench():
+        return dist_launch(dst, src, M, N)
+
+    src = torch.randn(M * N, device=device)
+    dst = torch.empty(M * N, device=device)
+    triton.testing.do_bench(_bench)
+
+
+def main():
+    benchmark.run()
+
+
+if __name__ == "__main__":
+    main()
+    """
+
+code_x_vals_sharding = """
+import os
+import sys
+import torch
+import triton
+import triton.language as tl
+
+def do_bench(kernel_call, quantiles):
+    return triton.testing.do_bench(kernel_call, quantiles=quantiles, warmup=1, rep=1)
+
+configs = [triton.Config(kwargs={'BLOCK_SIZE_M': 32}), triton.Config(kwargs={'BLOCK_SIZE_M': 128})]
+
+@triton.utils.hcutune(configs=configs, key=['M'], warmup=1, rep=1, do_bench=do_bench)
+@triton.jit
+def _kernel_x_vals_sharding(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
+    offsets_m = tl.program_id(0) * stride_m + tl.arange(0, BLOCK_SIZE_M)
+    offsets_n = tl.arange(0, BLOCK_SIZE_N)
+    x = tl.load(src + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :])
+    tl.store(dst + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :], x)
+
+device = 'cuda'
+
+M = [256, 512, 1024, 1536, 2048, 3072, 4096]
+N = 16
+CASES = [(m, N) for m in M]
+
+configs = [
+    triton.testing.Benchmark(
+        x_names=['M', 'N'],
+        x_vals=CASES,
+        line_arg='provider',
+        line_vals=['triton'],
+        line_names=['Triton'],
+        styles=[('red', '-')],
+        ylabel='TOPS',
+        xlabel='M',
+        plot_name="test",
+        args={'device': 'cuda'},
+    )
+]
+
+def dist_launch(dst, src, M, N):
+     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_M']), )
+     _kernel_x_vals_sharding[grid](dst, src, N, M, N)
 
 
 @triton.utils.dist_perf_report(configs)
@@ -200,8 +264,16 @@ if __name__ == "__main__":
     """
 
 @pytest.mark.parametrize('world_size', [4])
-def test_dist_launch(world_size):
+@pytest.mark.parametrize('sharding', ["", "--configs-sharding"]) # configs sharding, x_vals/cases sharding
+def test_dist_launch(world_size, sharding):
     # multi-process tuning
+
+    if sharding == "--configs-sharding":
+        filename = "_kernel_configs_sharding" 
+        code = code_configs_sharding
+    else:
+        filename = "_kernel_x_vals_sharding"
+        code = code_x_vals_sharding
 
     temp_filename = None
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -210,8 +282,10 @@ def test_dist_launch(world_size):
 
     device = 'cuda'
 
-    cmd = ["python3", "-m", "triton.tools.launch", "--nproc",
-            str(world_size), temp_filename]
+    cmd = ["python3", "-m", "triton.tools.launch", "--nproc", str(world_size)]
+    if sharding != "":
+        cmd.append(sharding)
+    cmd.append(temp_filename)
     subprocess.run(cmd, stdout=subprocess.PIPE)
 
     # check dist result
@@ -222,7 +296,15 @@ def test_dist_launch(world_size):
 
     @triton.utils.hcutune(configs=configs, key=['M'], warmup=1, rep=1, do_bench=do_bench)
     @triton.jit
-    def _kernel_dist_launch(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
+    def _kernel_configs_sharding(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
+        offsets_m = tl.program_id(0) * stride_m + tl.arange(0, BLOCK_SIZE_M)
+        offsets_n = tl.arange(0, BLOCK_SIZE_N)
+        x = tl.load(src + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :])
+        tl.store(dst + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :], x)
+
+    @triton.utils.hcutune(configs=configs, key=['M'], warmup=1, rep=1, do_bench=do_bench)
+    @triton.jit
+    def _kernel_x_vals_sharding(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
         offsets_m = tl.program_id(0) * stride_m + tl.arange(0, BLOCK_SIZE_M)
         offsets_n = tl.arange(0, BLOCK_SIZE_N)
         x = tl.load(src + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :])
@@ -232,11 +314,15 @@ def test_dist_launch(world_size):
     src = torch.randn(M * N, device=device)
     dst = torch.empty(M * N, device=device)
 
-    files = get_config_cache_files(_kernel_dist_launch, dst, src, N, M, N)
-    assert len(files) == len(configs)
+    if filename == "_kernel_configs_sharding":
+        files = get_config_cache_files(_kernel_configs_sharding, dst, src, N, M, N)
+        assert len(files) == len(configs)
+    else:
+        files = get_config_cache_files(_kernel_x_vals_sharding, dst, src, N, M, N)
+        assert len(files) == world_size
 
     global_config_loader.load_all()
-    config_cache = global_config_loader.get_tuned_cache("_kernel_dist_launch", get_gpu_label()).cache
+    config_cache = global_config_loader.get_tuned_cache(filename, get_gpu_label()).cache
     assert config_cache['key'] == ['M', 'dst', 'src']
     # M = [256, 512, 1024, 1536, 2048, 3072, 4096], len(M) == 7
     assert len(config_cache['configs']) == len(config_cache['timings']) == 7
@@ -304,7 +390,7 @@ def _kernel(src, N, N_DIVISIBLE_BY_16: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     tl.store(src + offsets, x, mask=offsets < N)
 """
 
-@pytest.mark.parametrize('code', [code, code_heuristics])
+@pytest.mark.parametrize('code', [code_x_vals_sharding, code_heuristics])
 def test_compile_only(code: str):
     temp_filename = None
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:

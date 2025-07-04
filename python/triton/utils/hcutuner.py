@@ -102,13 +102,16 @@ class Hcutuner(triton.runtime.Autotuner):
     def warmup(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
         ret = []
-        rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
-        world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
-        config_loader = PruneConfigLoader(self.prune_configs(kwargs), world_size, rank)
         if isinstance(self.fn, triton.runtime.autotuner.Heuristics):
             fn = self.fn.fn
         else:
             fn = self.fn
+        if os.getenv("TRITON_HCUTUNE_CONFIGS_SHARDING", "0") == "1":
+            rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
+            world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
+            config_loader = PruneConfigLoader(self.prune_configs(kwargs), world_size, rank)
+        else:
+            config_loader = self.prune_configs(kwargs)
         for config in config_loader:
             if config:
                 ret.append(fn.warmup(
@@ -146,13 +149,15 @@ class Hcutuner(triton.runtime.Autotuner):
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
 
-                rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
-                world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
-                config_loader = PruneConfigLoader(pruned_configs, world_size, rank)
-                timings = {config: self._bench(*args, config=config, **kwargs) for config in config_loader}
-
-                if not timings:
-                    return None
+                if os.getenv("TRITON_HCUTUNE_CONFIGS_SHARDING", "0") == "1":
+                    rank = eval(os.getenv("TRITON_HCUTUNE_LOCAL_RANK", "0").strip())
+                    world_size = eval(os.getenv("TRITON_HCUTUNE_WORLD_SIZE", "1").strip())
+                    config_loader = PruneConfigLoader(pruned_configs, world_size, rank)
+                    timings = {config: self._bench(*args, config=config, **kwargs) for config in config_loader}
+                    if not timings:
+                        return None
+                else:
+                    timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
 
                 bench_end = time.time()
                 self.bench_time = bench_end - bench_start

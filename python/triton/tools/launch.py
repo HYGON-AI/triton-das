@@ -46,6 +46,11 @@ def parse_args():
                         help="Set GPU devices for benchmarking, each process is responsible for handling a portion of the cases.")
     parser.add_argument("--compile-only", action="store_true",
                         help="Just compile kernel, no tuning")
+    parser.add_argument("--configs-sharding", action="store_true",
+                        help="Enable sharding the pruned configs, each shard will be performed on a sub-process. "
+                             "It is in conflict with triton.utils.dist_perf_report, and enable it on means that "
+                             "triton.utils.dist_perf_report(x_vals/cases sharding) is disabled and replaced by "
+                             "triton.testing.perf_report")
 
     # positional
     parser.add_argument("src", type=str,
@@ -72,6 +77,9 @@ def main():
 
     if args.compile_only:
         current_env["TRITON_HCUTUNE_COMPILE_ONLY"] = "1"
+
+    if args.configs_sharding:
+        current_env["TRITON_HCUTUNE_CONFIGS_SHARDING"] = "1"
 
     processes = []
     for local_rank in range(0, args.nproc):

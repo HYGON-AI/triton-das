@@ -55,13 +55,14 @@ def dist_perf_report(benchmarks):
     :type benchmarks: List of :class:`Benchmark`
     """
 
-    print(
-        "[DEPRECATED] @triton.utils.dist_perf_report is deprecated, please use @triton.testing.perf_report instead."
-    )
-    return perf_report(benchmarks)
+    if os.getenv("TRITON_HCUTUNE_CONFIGS_SHARDING", "0") == "1":
+        print(
+            "[hcutuner] WARNING: Since TRITON_HCUTUNE_CONFIGS_SHARDING=1, triton.utils.dist_perf_report is disabled and replaced by triton.testing.perf_report."
+        )
+        return perf_report(benchmarks)
+    else:
+        for o in benchmarks:
+            o.x_vals = split_x_vals(o.x_vals)
+        wrapper = lambda fn: MPMark(fn, benchmarks)
+        return wrapper
 
-    # for o in benchmarks:
-    #     o.x_vals = split_x_vals(o.x_vals)
-    # set_device()
-    # wrapper = lambda fn: MPMark(fn, benchmarks)
-    # return wrapper
