@@ -83,8 +83,8 @@ def test_save_config(device: str):
         for k in ["key", "configs", "timings"]:
             assert k in data
         assert len(data['configs']) == len(data['timings']) == 1
-        assert list(data['configs'].keys())[0] == "(1024, 'torch.float32')"
-        assert list(data['timings'].keys())[0] == "(1024, 'torch.float32')"
+        assert list(data['configs'].keys())[0] == "1024"
+        assert list(data['timings'].keys())[0] == "1024"
         assert (value := list(data['configs'].values())[0])['BLOCK_SIZE'] == 32 or \
                 value['BLOCK_SIZE'] == 128
 

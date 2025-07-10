@@ -49,10 +49,6 @@ _OCCLI_OUTPUT = flags.DEFINE_string(
          '  # After parsing, this might become:\n' \
          '  "layernorm,M=4096,device=K100,dtype=fp16.json"')
 
-_OCCLI_FULL_KEY = flags.DEFINE_bool(
-    name='full_key', default=False,
-    help='keep full key in the exported file.')
-
 _OCCLI_HOIST_KEY = flags.DEFINE_string(
     name='hoist_key', default=None,
     help='Comma-separated key set (not include dtype keys) is hoisted to filename.')
@@ -122,34 +118,6 @@ def show():
       _show_kernel(loader, name)
 
 
-def _remove_dtype_key(data):
-  """ remove dtypes in key (They are expected to be defined in filename) """
-  def _create_list(k):
-      s = k[1:-1]
-      entries = s.split(", ")
-      ret = []
-      for e in entries:
-          if e[0] == "'" or e[0] == '"':
-              ret.append(e[1:-1])
-          else:
-              ret.append(eval(e))
-      return ret
-
-  key = _create_list(list(data['configs'].keys())[0])
-  new_key = [o for o in key if not isinstance(o, str)]
-  num_consts = len(new_key)
-
-  res = {
-    'key': data['key'][:num_consts],
-    'configs': {},
-  }
-
-  for k, v in data['configs'].items():
-    res['configs'][str(tuple(_create_list(k)[:num_consts]))] = v
-
-  return res
-
-
 def _hoist_key(data, keys, hoisted):
   """
   hoists the specified keys to create groups.
@@ -210,19 +178,14 @@ def _get_filename(output_dir, group_name=''):
 def export():
   """Function triggered by export command."""
   loader = ConfigLoader(_OCCLI_DIR.value)
-  cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value)
+  cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value).cache
 
   configs, group_names = [], []
-  if not _OCCLI_FULL_KEY.value:
-    _cache = _remove_dtype_key(cache.cache)
-    if _OCCLI_HOIST_KEY.value:
-      configs, group_names = _hoist_key(_cache['configs'], _cache['key'],
-                                        _OCCLI_HOIST_KEY.value.split(','))
-    else:
-      configs = [_cache['configs']]
-
+  if _OCCLI_HOIST_KEY.value:
+    configs, group_names = _hoist_key(cache['configs'], cache['key'],
+                                      _OCCLI_HOIST_KEY.value.split(','))
   else:
-    configs = [cache.cache['configs']]
+    configs = [cache['configs']]
 
   if len(group_names) == 0:
     assert len(configs) == 1
@@ -265,7 +228,6 @@ def add_export_subparser(subparsers):
       'To export the specfied kernel\'s optimal configs to JSON file:\n'
       '$opt_config_cli export --kernel _layernorm_kernel --device DCU_K100_AI'
       ' --output _layernorm_kernel-DCU_K100_AI-fp32.json'
-      ' [--full_key]'
       ' [--hoist_key key,...]'
       ' [--output_dir /path/to/save/output/file]'
       ' [--dir /path/to/triton/config/cache/dir]\n\n')

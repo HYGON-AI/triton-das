@@ -211,7 +211,14 @@ class Hcutuner(triton.runtime.Autotuner):
         """
         fname = os.path.join(self.save_config_dir, "config.json")
         key_name, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
-        key = str(key)
+        # simplify key, remove dtypes
+        indices, new_key = [], []
+        for i, k in enumerate(key):
+            if not isinstance(k, str):
+                new_key.append(k)
+                indices.append(i)
+        key_name = [key_name[i] for i in indices]
+        key = str(new_key[0] if len(new_key) == 1 else tuple(new_key))
         configs = file_cache[fname] if fname in file_cache else _get_result_template(key_name)
         if key not in configs['configs']:
             configs['configs'][key] = self.best_config.all_kwargs()
@@ -398,11 +405,11 @@ class TunedConfig:
             else: # int, float, bool, str
                 return value
 
-        if isinstance(key, dict):
-            keys = self.cache['key']
-            key = str(tuple(handle(key[n]) for n in keys))
-        else:
-            key = str(tuple(handle(o) for o in key))
+        keys = self.cache['key']
+        if isinstance(key, list):
+            key = dict(zip(keys, key))
+        _key = [handle(key[n]) for n in keys]
+        key = str(_key[0] if len(_key) == 1 else tuple(_key))
         if key in self.cache['configs']:
             return self.cache['configs'][key]
         return None
