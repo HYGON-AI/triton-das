@@ -150,13 +150,13 @@ def test_restore_config(pass_kwargs_to_kernel, device):
     triton.utils.global_config_loader.load_all()
     key_dict = {
         'N': N,
-        'src': src.dtype
     }
     config = triton.utils.get_optimal_config("_kernel", key_dict)
     _kernel[grid](*args, **kwargs, **config)
     triton.testing.assert_close(src, torch.ones_like(src))
-    config2 = triton.utils.get_optimal_config("_kernel", [N, src.dtype])
-    assert config == config2
+    config2 = triton.utils.get_optimal_config("_kernel", [N])
+    config3 = triton.utils.get_optimal_config("_kernel", str(N))
+    assert config == config2 == config3
 
 
 @pytest.mark.parametrize('device', ['cuda'])
@@ -238,7 +238,6 @@ def test_mp_restore_config(device, world_size):
     triton.utils.global_config_loader.load_all()
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     key_dict = {
-        'src': src,
         'N': N,
     }
     config = triton.utils.get_optimal_config("_kernel_mp", key_dict)
@@ -424,3 +423,83 @@ def test_heuristics_decorator(device: str = "cuda"):
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     _kernel[grid](src, N)
     triton.testing.assert_close(src, torch.ones_like(src))
+
+
+def test_hcutune_configured(device: str = "cuda"):
+    N = 1024
+    src = torch.zeros(N, device=device)
+    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+
+    @triton.jit
+    def _kernel_hcutune_configured(src, N, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        tl.store(src + offsets, x, mask=offsets < N)
+
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    fn = triton.utils.hcutune(configs=configs, key=['N'], restore_value=['src'],
+                              do_bench=do_bench)(_kernel_hcutune_configured)
+    fn[grid](src, N)
+    triton.utils.global_config_loader.load_all()
+
+    fn_infer = triton.utils.hcutune_configured()(_kernel_hcutune_configured)
+    src = torch.zeros(N, device=device)
+    fn_infer[grid](src, N)
+    triton.testing.assert_close(src, torch.ones_like(src))
+
+    # test get_config_fn
+    src = torch.zeros(N, device=device)
+    get_config_fn = lambda META: {'BLOCK_SIZE': 32, 'num_warps': 4, 'num_ctas': 1, 'num_stages': 2} if META['N'] == N else {}
+    fn_infer = triton.utils.hcutune_configured(get_config_fn=get_config_fn)(_kernel_hcutune_configured)
+    fn_infer[grid](src, N)
+    triton.testing.assert_close(src, torch.ones_like(src))
+
+    # test get_key_fn
+    def get_key_fn(data, META):
+        total_N = [eval(o) for o in data.keys()]
+        n = min(total_N, key=lambda x: abs(x - META['N']))
+        return str(n)
+
+    src = torch.zeros(N, device=device)
+    fn_infer = triton.utils.hcutune_configured(get_key_fn=get_key_fn)(_kernel_hcutune_configured)
+    fn_infer[grid](src, 2 * N)
+    triton.testing.assert_close(src, torch.ones_like(src))
+
+
+def test_hcutune_configured_tuning(device: str = "cuda"):
+    N = 1024
+    src = torch.zeros(N, device=device)
+    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32, 'BRANCH': 1}), triton.Config(kwargs={'BLOCK_SIZE': 128, 'BRANCH': 1})]
+
+    @triton.utils.hcutune(configs=configs, key=['N'], restore_value=['src'], do_bench=do_bench)
+    @triton.utils.hcutune_configured(get_config_fn=lambda META: {'BLOCK_SIZE': 32, 'BRANCH': 0, 'num_warps': 4, 'num_ctas': 1, 'num_stages': 2} if META['N'] == N else {})
+    @triton.jit
+    def _kernel_hcutune_configured_tuning(src, N, BLOCK_SIZE: tl.constexpr, BRANCH: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        if BRANCH:
+            tl.store(src + offsets, x, mask=offsets < N)
+
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    _kernel_hcutune_configured_tuning[grid](src, N)
+    triton.testing.assert_close(src, torch.ones_like(src))
+
+
+def test_hcutune_configured_warmup(monkeypatch, device: str = "cuda"):
+    monkeypatch.setenv("TRITON_HCUTUNE_COMPILE_ONLY", "1")
+
+    N = 1024
+    src = torch.zeros(N, device=device)
+    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32, 'BRANCH': 1}), triton.Config(kwargs={'BLOCK_SIZE': 128, 'BRANCH': 1})]
+
+    @triton.utils.hcutune(configs=configs, key=['N'], restore_value=['src'], do_bench=do_bench)
+    @triton.utils.hcutune_configured(get_config_fn=lambda META: {'BLOCK_SIZE': 32, 'BRANCH': 0, 'num_warps': 4, 'num_ctas': 1, 'num_stages': 2} if META['N'] == N else {})
+    @triton.jit
+    def _kernel_hcutune_configured_tuning(src, N, BLOCK_SIZE: tl.constexpr, BRANCH: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        if BRANCH:
+            tl.store(src + offsets, x, mask=offsets < N)
+
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    _kernel_hcutune_configured_tuning[grid](src, N)

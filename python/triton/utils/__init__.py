@@ -1,11 +1,11 @@
 from typing import Union
 from .kernelentry import kernelentry
-from .hcutuner import hcutune, ConfigLoader, get_gpu_label
+from .hcutuner import hcutune, ConfigLoader, get_gpu_label, hcutune_configured
 from .lang import annotate_hint
 from .testing import dist_perf_report
 
 
-def get_optimal_config(op_name: str, key: Union[list, dict], device_name: str = None):
+def get_optimal_config(op_name: str, key: Union[list, dict, tuple, str], device_name: str = None):
     device_name = device_name if device_name else get_gpu_label()
     tuned = global_config_loader.get_tuned_cache(op_name, device_name)
     if tuned:
@@ -49,4 +49,5 @@ __all__ = [
     "dist_perf_report",
     "get_gpu_label",
     "get_config_cache",
+    "hcutune_configured",
 ]

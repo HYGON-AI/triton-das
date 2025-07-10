@@ -12,14 +12,14 @@ import triton
 from collections import defaultdict
 from triton.runtime.cache import default_cache_dir, default_dump_dir, default_override_dir
 
-from typing import Dict, Union
+from typing import Dict, Union, Generic
 from distutils.util import strtobool
 
 from triton.runtime.cache import FileCacheManager, _base32
 from triton.compiler.compiler import make_backend, triton_key, ASTSource
 from triton.runtime.driver import driver
 from triton._C.libtriton import get_cache_invalidating_env_vars
-from triton.runtime.jit import mangle_type, DependenciesFinder
+from triton.runtime.jit import mangle_type, DependenciesFinder, T
 
 file_cache = {}
 manager_cache = {}
@@ -58,15 +58,6 @@ class PruneConfigLoader:
             yield self.configs[i]
 
 
-def _get_fn_name(fn):
-    if isinstance(fn, triton.runtime.jit.JITFunction):
-        return fn.__name__
-    elif isinstance(fn, triton.runtime.autotuner.Heuristics):
-        return fn.fn.__name__
-    else:
-        raise NotImplementedError
-
-
 class Hcutuner(triton.runtime.Autotuner):
     """
     Re-implements Triton autotune to support custom operations:
@@ -86,8 +77,9 @@ class Hcutuner(triton.runtime.Autotuner):
         # create dir for saving config (e.g. ~/.triton/cache/configs/...)
         device_name = get_gpu_label()
         run_id = str(uuid.uuid4()) # random run_id for multiprocessing
+        fn_name = fn.fn.__name__ if isinstance(fn, triton.runtime.autotuner.Heuristics) else fn.__name__
         self.save_config_dir = os.path.join(get_config_cache_dir(),
-                                            _get_fn_name(fn),
+                                            fn_name,
                                             device_name,
                                             run_id)
         os.makedirs(self.save_config_dir, exist_ok=True)
@@ -396,20 +388,13 @@ class TunedConfig:
         self.device_name = device_name
         self.cache = cache
 
-    def get_optimal_config(self, key: Union[list, dict]):
-        def handle(value):
-            if hasattr(value, "dtype"): # torch tensor
-                return str(value.dtype)
-            elif isinstance(value, torch.dtype):
-                return str(value)
-            else: # int, float, bool, str
-                return value
+    def get_optimal_config(self, key: Union[list, dict, tuple, str]):
+        if isinstance(key, dict):
+            key = [key[n] for n in self.cache['key']]
 
-        keys = self.cache['key']
-        if isinstance(key, list):
-            key = dict(zip(keys, key))
-        _key = [handle(key[n]) for n in keys]
-        key = str(_key[0] if len(_key) == 1 else tuple(_key))
+        if isinstance(key, (list, tuple)):
+            key = str(key[0] if len(key) == 1 else tuple(key))
+
         if key in self.cache['configs']:
             return self.cache['configs'][key]
         return None
@@ -545,7 +530,7 @@ def _get_cache_hash(fn, autotune_param_hash, key_hash, kernel_config_hash, *args
     hash format: triton_code-backend-option-env-src-autotune_params-tune_keys-kernel_configs
     Adapted from: triton/compiler/compiler.py:compile()
     """
-    if isinstance(fn, triton.runtime.autotuner.Heuristics):
+    while not isinstance(fn, triton.runtime.jit.JITFunction):
         fn = fn.fn
 
     _, _, backend, _ = fn.create_binder()
@@ -653,3 +638,88 @@ def get_list_hash(l):
 
 def get_string_hash(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+class KernelWithConfigInterface(Generic[T]):
+    """
+    adptived from KernelInterface to run with get_config=True
+    """
+    run: T
+
+    def __getitem__(self, grid) -> T:
+        return lambda *args, **kwargs: self.run(grid=grid, warmup=False, get_config=True,
+                                                *args, **kwargs)
+
+
+class JITFunctionWithConfig(KernelWithConfigInterface[T]):
+    """
+    adptived from JITFunction to get optimal config if get_config=True
+    """
+    def __init__(self, fn, get_config_fn=None, get_key_fn=None):
+        self.fn = fn
+        self.__name__ = fn.__name__
+        self.arg_names = fn.arg_names
+        self.get_config_fn = get_config_fn
+        self.get_key_fn = get_key_fn
+
+    def run(self, *args, **kwargs):
+        if 'get_config' in kwargs and kwargs['get_config']:
+            config = self.get_config(*args, **kwargs)
+            if config:
+                kwargs = {**kwargs, **config}
+            del kwargs['get_config']
+        return self.fn.run(*args, **kwargs)
+
+    def warmup(self, *args, **kwargs):
+        if 'get_config' in kwargs and kwargs['get_config']:
+            config = self.get_config(*args, **kwargs)
+            if config:
+                kwargs = {**kwargs, **config}
+            del kwargs['get_config']
+        return self.fn.warmup(*args, **kwargs)
+
+    def get_config(self, *args, **kwargs):
+        config = None
+        nargs = {**dict(zip(self.arg_names, args)), **kwargs}
+        if self.get_config_fn:
+            config = self.get_config_fn(nargs)
+        else:
+            # load config from cache
+            tuned = triton.utils.global_config_loader.get_tuned_cache(self.__name__, get_gpu_label())
+            if tuned:
+                if self.get_key_fn:
+                    key = self.get_key_fn(tuned.cache['configs'], nargs)
+                else:
+                    key = [nargs[k] for k in tuned.cache['key']]
+                    key = str(key[0]) if len(key) == 1 else str(tuple(key))
+                config = tuned.get_optimal_config(key)
+                if not config:
+                    print(
+                        f"[hcutune_configured] WARNING: Not found optimal config for {self.__name__}, "
+                        f"config key: {key} !!!"
+                    )
+
+        return config
+
+
+def hcutune_configured(get_config_fn=None, get_key_fn=None):
+    """
+    Decorator for run a :code:`triton.jit`'d function with tuned optimal config.
+
+    .. highlight:: python
+    .. code-block:: python
+
+        @triton.utils.hcutune_configured
+        @triton.jit
+        ...
+
+    :param get_config_fn: a user-provided function to get or create optimal config
+    :type get_config_fn: lambda META
+    :param get_key_fn: a user-provided function to create a key to load optimal config from cache
+    :type get_key_fn: lambda config_cache, META
+    """
+
+    def decorator(fn):
+        return JITFunctionWithConfig(fn, get_config_fn, get_key_fn)
+
+    return decorator
