@@ -532,7 +532,7 @@ def _get_src_hash(src: ASTSource):
         return dependencies_finder.ret
 
     sorted_sig = [v for k, v in sorted(src.signature.items())]
-    key = f"{get_fn_hash(src.fn)}-{src.attrs.hash()}-{sorted_sig}"
+    key = f"{get_fn_hash(src.fn)}-{str(src.attrs)}-{sorted_sig}"
     return key
 
 
@@ -545,14 +545,10 @@ def _get_cache_hash(fn, autotune_param_hash, key_hash, kernel_config_hash, *args
     hash format: triton_code-backend-option-env-src-autotune_params-tune_keys-kernel_configs
     Adapted from: triton/compiler/compiler.py:compile()
     """
-    target = driver.active.get_current_target()
-    backend = make_backend(target)
-
     if isinstance(fn, triton.runtime.autotuner.Heuristics):
         fn = fn.fn
 
-    if fn.binder is None:
-        fn.create_binder(backend)
+    _, _, backend, _ = fn.create_binder()
 
     nargs = dict(zip(fn.arg_names, args))
     all_args = {**nargs, **kwargs}
