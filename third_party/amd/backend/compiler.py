@@ -14,27 +14,13 @@ from pathlib import Path
 
 
 def min_dot_size(target: GPUTarget):
+    # If some given configuration is not supported in hardware we fallback to FMA and cast arguments
+    return lambda lhsType, rhsType: (1, 1, 1)
 
-    def is_fma_supported(lhsType, rhsType):
-        return lhsType == rhsType and (lhsType.is_fp16() or lhsType.is_fp32())
 
-    def get_gfx94_limits(lhsType, rhsType):
-        if is_fma_supported(lhsType.scalar, rhsType.scalar):
-            return (1, 1, 1)
-        return (16, 16, 1)
-
-    def get_gfx9_limits(lhsType, rhsType):
-        if is_fma_supported(lhsType.scalar, rhsType.scalar):
-            return (1, 1, 1)
-        return (16, 16, 1)
-
-    arch_str = target.arch
-    if "gfx94" in arch_str:
-        return get_gfx94_limits
-    if "gfx9" in arch_str:
-        return get_gfx9_limits
-    # gfx11 and gfx12 architectures will only support 16,16,16 with wmma instructions
-    return lambda lhsType, rhsType: (1, 1, 1) if is_fma_supported(lhsType.scalar, rhsType.scalar) else (16, 16, 16)
+def is_pingpong_enabled(arch):
+    default = "1" if arch == "gfx942" else "0"
+    return os.getenv("TRITON_HIP_USE_BLOCK_PINGPONG", default) == "1"
 
 
 @dataclass(frozen=True)
@@ -95,6 +81,15 @@ class HIPOptions:
         # Ignore user-defined warp size for gfx9
         warp_size = 32 if 'gfx10' in self.arch or 'gfx11' in self.arch or 'gfx12' in self.arch else 64
         object.__setattr__(self, 'warp_size', warp_size)
+        # Error out if max threads per block is exceeded.
+        # This is theoretically architecture specific but in reality they are all 1024.
+        max_threads = 1024
+        assert self.num_warps * warp_size <= max_threads, \
+                f"{self.num_warps} warps * {warp_size} warp size" \
+                f" must not exceed the max threads per block limit ({max_threads})"
+        # Only kpack=1 is supported on gfx950
+        kpack = 1 if self.arch == 'gfx950' else self.kpack
+        object.__setattr__(self, 'kpack', kpack)
         libs = ["ocml", "ockl", "hip", "opencl"]
         for lib in libs:
             extern_libs[lib] = str(os.path.join(default_libdir, f'{lib}.bc'))
@@ -131,7 +126,9 @@ class HIPBackend(BaseBackend):
             supported_fp8_dtypes = set(HIPOptions.supported_fp8_dtypes)
             if self.target.arch in ('gfx940', 'gfx941', 'gfx942'):
                 supported_fp8_dtypes.update({'fp8e4nv', 'fp8e4b8', 'fp8e5b16'})
-            if self.target.arch in ('gfx938', 'gfx946', 'gfx948'):
+            elif self.target.arch in ('gfx950'):
+                supported_fp8_dtypes.update({'fp8e4nv', 'fp8e5'})
+            elif self.target.arch in ('gfx938', 'gfx946', 'gfx948'):    # for HCUs
                 supported_fp8_dtypes.update({'fp8e4b8', 'fp8e5b16'})
             args["supported_fp8_dtypes"] = tuple(sorted(supported_fp8_dtypes))
 
@@ -160,17 +157,27 @@ class HIPBackend(BaseBackend):
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from triton.language.extra.hip import libdevice
+
         return {"triton.language.extra.libdevice": libdevice}
 
     def load_dialects(self, ctx):
         amd.load_dialects(ctx)
 
     @staticmethod
+    @functools.lru_cache()
+    # In most cases, buffer ops are beneficial for performance on HCUs.
+    def use_buffer_ops():
+        return os.environ.get("AMDGCN_USE_BUFFER_OPS", "1") == "1"
+
+    @staticmethod
     def is_within_2gb(arg):
+        import torch
+
+        MAX_INT_32 = 2**31 - 1
         if hasattr(arg, "ptr_range"):
-            return arg.ptr_range() <= 2**31 - 1
-        if "torch.Tensor" in str(type(arg)) and hasattr(arg, "untyped_storage"):
-            return arg.untyped_storage().size() <= 2**31 - 1
+            return arg.ptr_range() <= MAX_INT_32
+        if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
+            return arg.untyped_storage().size() <= MAX_INT_32
         return False
 
     @staticmethod
@@ -183,7 +190,9 @@ class HIPBackend(BaseBackend):
     @staticmethod
     def get_arg_specialization(arg, ty, **kwargs):
         ret = BaseBackend.get_arg_specialization(arg, ty, **kwargs)
-        if ty == "tensor" and HIPBackend.is_within_2gb(arg):
+        # Only attempt to do buffer ops specialization if buffer ops are enabled.
+        # Otherwise the is_within_2gb check is unnecessary overhead.
+        if HIPBackend.use_buffer_ops() and ty == "tensor" and HIPBackend.is_within_2gb(arg):
             ret += "S"
         return ret
 
@@ -284,7 +293,7 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
         passes.common.add_cse(pm)
-        passes.common.add_licm(pm)
+        passes.ttir.add_triton_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         pm.run(mod)
@@ -307,13 +316,19 @@ class HIPBackend(BaseBackend):
         if options.optimize_epilogue:
             amd.passes.ttgpuir.add_optimize_epilogue(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
 
-        stream_prefetch = os.getenv("TRITON_HIP_STREAM_PREFETCH", "0") == "1"
-        use_buffer_ops = os.environ.get("AMDGCN_USE_BUFFER_OPS", "0") == "1"
+        passes.ttgpuir.add_fuse_nested_loops(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_triton_licm(pm)
+        passes.common.add_canonicalizer(pm)
+
+        global_prefetch = int(os.getenv("TRITON_HIP_GLOBAL_PREFETCH", "0"))
+        local_prefetch = int(os.getenv("TRITON_HIP_LOCAL_PREFETCH", "0"))
 
         # The `local-prefetch` scheduling variant requires turning on buffer ops.
         if options.instruction_sched_variant == "local-prefetch":
-            stream_prefetch = True
+            global_prefetch = local_prefetch = 1
 
         if amd.has_matrix_core_feature(options.arch):
             assert options.num_stages != 0, ("Triton AMD backend pipeliner has been updated. "
@@ -321,21 +336,20 @@ class HIPBackend(BaseBackend):
                                              "num_stages == 0. Now it will not happen anymore; "
                                              "please update to use num_stages == 2 for "
                                              "equivalent behavior in the past.")
-            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, stream_prefetch)
+            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch)
             passes.common.add_canonicalizer(pm)
-        amd.passes.ttgpuir.insert_instruction_sched_hints(pm)
+        if options.instruction_sched_variant.lower() != "none":
+            amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.instruction_sched_variant)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
         if amd.has_matrix_core_feature(options.arch):
             amd.passes.ttgpuir.add_reorder_instructions(pm)
-            use_block_pingpong = os.getenv("TRITON_HIP_USE_BLOCK_PINGPONG", "0") == "1"
+            use_block_pingpong = is_pingpong_enabled(options.arch)
             if use_block_pingpong and options.num_stages == 2:
                 amd.passes.ttgpuir.add_block_pingpong(pm)
 
-        # In most cases, buffer ops are beneficial for performance on HCUs.
-        use_buffer_ops = os.environ.get("AMDGCN_USE_BUFFER_OPS", "1") == "1"
-        if use_buffer_ops:
+        if HIPBackend.use_buffer_ops():
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
             passes.common.add_canonicalizer(pm)
             amd.passes.ttgpuir.add_convert_to_buffer_ops(pm, options.arch)
@@ -380,8 +394,8 @@ class HIPBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
-        amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.arch, options.num_stages,
-                                                         options.instruction_sched_variant)
+        if options.instruction_sched_variant.lower() != "none":
+            amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.arch, options.num_stages)
         if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "0":
             passes.llvmir.add_di_scope(pm)
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)

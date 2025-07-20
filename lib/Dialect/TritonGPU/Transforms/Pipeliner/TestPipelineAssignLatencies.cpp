@@ -15,8 +15,6 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUTESTPIPELINEASSIGNLATENCIES
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
-static const char *kLatencyAttrName = "tt.latency";
-
 struct TestPipelineAssignLatencies
     : public impl::TritonGPUTestPipelineAssignLatenciesBase<
           TestPipelineAssignLatencies> {
@@ -24,15 +22,7 @@ struct TestPipelineAssignLatencies
       TestPipelineAssignLatencies>::TritonGPUTestPipelineAssignLatenciesBase;
 
   void runOnOperation() override {
-    ModuleOp m = getOperation();
-
-    DenseMap<Operation *, int> opLatencies = assignLatencies(m, numStages);
-
-    for (auto [op, latency] : opLatencies) {
-      op->setAttr(
-          kLatencyAttrName,
-          IntegerAttr::get(IntegerType::get(m.getContext(), 32), latency));
-    }
+    assignLatencies(getOperation(), numStages, /*assignMMA=*/true);
   }
 };
 

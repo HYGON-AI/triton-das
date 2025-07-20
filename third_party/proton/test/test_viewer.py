@@ -1,6 +1,6 @@
 import pytest
 import subprocess
-from triton.profiler.viewer import get_min_time_flops, get_min_time_bytes, get_raw_metrics, format_frames, derive_metrics, filter_frames
+from triton.profiler.viewer import get_min_time_flops, get_min_time_bytes, get_raw_metrics, format_frames, derive_metrics, filter_frames, parse
 from triton.profiler.hook import COMPUTE_METADATA_SCOPE_NAME
 import numpy as np
 
@@ -86,6 +86,12 @@ def test_filter_metadata():
         assert "triton_kernel" in gf.dataframe["name"].tolist()
 
 
+def test_parse():
+    gf, derived_metrics = parse(["time/s"], triton_example_file)
+    for derived_metric in derived_metrics:
+        assert derived_metric in gf.inc_metrics or derived_metric in gf.exc_metrics
+
+
 def test_min_time_flops():
     with open(cuda_example_file, "r") as f:
         gf, _, _, device_info = get_raw_metrics(f)
@@ -104,9 +110,9 @@ def test_min_time_flops():
         ret = get_min_time_flops(gf.dataframe, device_info)
         device0_idx = gf.dataframe["device_id"] == "0"
         device1_idx = gf.dataframe["device_id"] == "1"
-        # MI200
+        # CDNA2
         np.testing.assert_allclose(ret[device0_idx].to_numpy(), [[0.000026]], atol=1e-5)
-        # MI300
+        # CDNA3
         np.testing.assert_allclose(ret[device1_idx].to_numpy(), [[0.000038]], atol=1e-5)
 
 
@@ -125,9 +131,9 @@ def test_min_time_bytes():
         ret = get_min_time_bytes(gf.dataframe, device_info)
         device0_idx = gf.dataframe["device_id"] == "0"
         device1_idx = gf.dataframe["device_id"] == "1"
-        # MI200
+        # CDNA2
         np.testing.assert_allclose(ret[device0_idx].to_numpy(), [[6.10351e-06]], atol=1e-6)
-        # MI300
+        # CDNA3
         np.testing.assert_allclose(ret[device1_idx].to_numpy(), [[1.93378e-05]], atol=1e-6)
 
 

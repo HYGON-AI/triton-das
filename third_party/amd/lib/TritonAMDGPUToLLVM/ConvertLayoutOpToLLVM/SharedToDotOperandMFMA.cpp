@@ -29,7 +29,7 @@ using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
-using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
 namespace SharedToDotOperandMFMA {
 
@@ -123,7 +123,7 @@ llvm::SmallVector<llvm::SmallVector<Value>> computeTensorElemMappingInBlock(
   return mapping;
 }
 
-bool hasSwizzleEnabled(const SharedEncodingAttr &srcEncoding) {
+bool hasSwizzleEnabled(const SwizzledSharedEncodingAttr &srcEncoding) {
   return srcEncoding.getMaxPhase() > 1;
 }
 
@@ -199,6 +199,17 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
                     Location loc, Value tensor, DotOperandEncodingAttr encoding,
                     const SharedMemoryObject &smemObj,
                     const LLVMTypeConverter *typeConverter, Value thread) {
+  // We observe mismatches going down this path for scaled dot operations.
+  // However, these mismatches do not occur when the conversion is performed via
+  // LL, which is the preferred anyway.
+  // TODO: Deprecate and remove this path once fixing LLM performance issues.
+  for (auto op : tensor.getUsers()) {
+    if (auto localLoadOp = llvm::dyn_cast<triton::gpu::LocalLoadOp>(op)) {
+      if (mlir::LLVM::AMD::isUsedByDotScaledOp(op))
+        return Value();
+    }
+  }
+
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
   assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
   auto aTensorTy = cast<triton::gpu::MemDescType>(tensor.getType());
@@ -214,7 +225,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
          (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
   auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
-  auto sharedLayout = cast<SharedEncodingAttr>(aTensorTy.getEncoding());
+  auto sharedLayout = cast<SwizzledSharedEncodingAttr>(aTensorTy.getEncoding());
   auto order = sharedLayout.getOrder();
   assert((rank == 2 || order[2] == 0) &&
          "expect batch to be the slowest dimension");
@@ -252,7 +263,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
     numRepK = numReps[kDimIdx + 1];
   }
 
-  unsigned iWarpSize = triton::gpu::getWarpSize(mfmaLayout);
+  unsigned iWarpSize = triton::gpu::lookupThreadsPerWarp(rewriter);
   assert(iWarpSize == 64);
   Value warpSize = tb.i32_val(iWarpSize);
   Value linearWarpId = tb.udiv(thread, warpSize);
@@ -260,7 +271,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
 
   Value spatialWarpId = AMD::getWarpIdInBlock(
       rewriter, loc, linearWarpId, warpsPerCTA, mfmaInstrNonK,
-      shape[nonKDimIdx], nonKDimIdx, triton::gpu::getOrder(mfmaLayout));
+      shape[nonKDimIdx], nonKDimIdx, mfmaLayout.getDefaultOrder());
 
   // number of duplicates of elements in warp
   // In case of 64x4 x 4x4 multiplication, 4x4 B operand is duplicated 16 times

@@ -44,14 +44,14 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   m.def("add_builtin_func_to_llvmir", [](mlir::PassManager &pm, bool ftz) {
     pm.addPass(createConvertBuiltinFuncToLLVMPass(ftz));
   });
-  m.def("insert_instruction_sched_hints", [](mlir::PassManager &pm) {
-    pm.addPass(createTritonAMDGPUInsertInstructionSchedHintsPass());
+  m.def("insert_instruction_sched_hints", [](mlir::PassManager &pm,
+                                             const std::string &variant) {
+    pm.addPass(createTritonAMDGPUInsertInstructionSchedHintsPass(variant));
   });
   m.def("lower_instruction_sched_hints",
-        [](mlir::PassManager &pm, const std::string &arch, int32_t numStages,
-           const std::string &variant) {
+        [](mlir::PassManager &pm, const std::string &arch, int32_t numStages) {
           pm.addPass(createTritonAMDGPULowerInstructionSchedHintsPass(
-              arch, numStages, variant));
+              arch, numStages));
         });
   m.def("add_decompose_unsupported_conversions", [](mlir::PassManager &pm,
                                                     const std::string &arch) {
@@ -66,8 +66,14 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                      const std::string, int, int);
   ADD_PASS_WRAPPER_0("add_optimize_epilogue",
                      mlir::createTritonAMDGPUOptimizeEpiloguePass);
-  ADD_PASS_WRAPPER_0("add_canonicalize_pointers",
-                     mlir::createTritonAMDGPUCanonicalizePointersPass);
+  m.def("add_hoist_layout_conversions", [](mlir::PassManager &pm) {
+    pm.addNestedPass<mlir::triton::FuncOp>(
+        mlir::createTritonAMDGPUHoistLayoutConversionsPass());
+  });
+  m.def("add_canonicalize_pointers", [](mlir::PassManager &pm) {
+    pm.addNestedPass<mlir::triton::FuncOp>(
+        mlir::createTritonAMDGPUCanonicalizePointersPass());
+  });
   ADD_PASS_WRAPPER_1("add_convert_to_buffer_ops",
                      mlir::createTritonAMDGPUConvertToBufferOpsPass,
                      const std::string &);
@@ -75,8 +81,8 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                      mlir::createTritonAMDGPUReorderInstructionsPass);
   ADD_PASS_WRAPPER_0("add_block_pingpong",
                      mlir::createTritonAMDGPUBlockPingpongPass);
-  ADD_PASS_WRAPPER_2("add_stream_pipeline",
-                     mlir::createTritonAMDGPUStreamPipelinePass, int, int);
+  ADD_PASS_WRAPPER_3("add_stream_pipeline",
+                     mlir::createTritonAMDGPUStreamPipelinePass, int, int, int);
 }
 
 void addControlConstant(llvm::Module *module, const char *name,
@@ -116,8 +122,9 @@ void init_triton_amd(py::module &&m) {
     context.loadAllAvailableDialects();
   });
 
-  m.def("attach_target_triple",
-        [](llvm::Module *module) { module->setTargetTriple(amdTargetTriple); });
+  m.def("attach_target_triple", [](llvm::Module *module) {
+    module->setTargetTriple(llvm::Triple(amdTargetTriple));
+  });
 
   // Set target architecture ISA version
   m.def("set_isa_version", [](llvm::Module *module, const std::string &arch) {
@@ -271,6 +278,7 @@ void init_triton_amd(py::module &&m) {
   m.def("has_matrix_core_feature", [](const std::string &arch) {
     using mlir::triton::AMD::ISAFamily;
     switch (mlir::triton::AMD::deduceISAFamily(arch)) {
+    case ISAFamily::CDNA4:
     case ISAFamily::CDNA3:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA1:

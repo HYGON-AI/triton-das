@@ -15,9 +15,10 @@ void initProton(pybind11::module &&m) {
 
   m.def("start",
         [](const std::string &path, const std::string &contextSourceName,
-           const std::string &dataName, const std::string &profilerName) {
+           const std::string &dataName, const std::string &profilerName,
+           const std::string &profilerPath) {
           auto sessionId = SessionManager::instance().addSession(
-              path, profilerName, contextSourceName, dataName);
+              path, profilerName, profilerPath, contextSourceName, dataName);
           SessionManager::instance().activateSession(sessionId);
           return sessionId;
         });
@@ -76,6 +77,10 @@ void initProton(pybind11::module &&m) {
            const std::map<std::string, MetricValueType> &metrics) {
           SessionManager::instance().addMetrics(scopeId, metrics);
         });
+
+  m.def("get_context_depth", [](size_t sessionId) {
+    return SessionManager::instance().getContextDepth(sessionId);
+  });
 
   pybind11::bind_map<std::map<std::string, MetricValueType>>(m, "MetricMap");
 }

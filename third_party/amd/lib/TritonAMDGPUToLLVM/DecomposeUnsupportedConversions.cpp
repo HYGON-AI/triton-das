@@ -30,7 +30,6 @@ struct DecomposeUnsupportedAMDConversions
     int sharedMemoryLimit = targetInfo.getSharedMemorySize();
 
     ModuleOp mod = getOperation();
-    int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
     int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
     int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
 
@@ -43,6 +42,7 @@ struct DecomposeUnsupportedAMDConversions
     };
 
     triton::gpu::decomposeTensorCoreToDotLayoutConversion(mod, shortcutFn);
+
     // Try to reduce LDS usage of cvt(mfma->blocked) op by changing the shape of
     // WarpsPerCta attribute in mfma layout. The implicit LDS usage of
     // cvt(mfma->blocked) op depends on the number of warps per CTA that mfma
@@ -67,7 +67,8 @@ struct DecomposeUnsupportedAMDConversions
       auto srcType = cvtOp.getSrc().getType();
       auto dstType = cvtOp.getType();
 
-      auto srcEnc = srcType.getEncoding();
+      auto srcEnc =
+          cast<triton::gpu::DistributedEncodingTrait>(srcType.getEncoding());
       auto dstBlocked =
           dyn_cast<triton::gpu::BlockedEncodingAttr>(dstType.getEncoding());
 
@@ -81,7 +82,7 @@ struct DecomposeUnsupportedAMDConversions
         return;
       }
 
-      unsigned numWarps = triton::gpu::getNumWarpsPerCTA(srcEnc);
+      unsigned numWarps = lookupNumWarps(cvtOp);
 
       // Find all possible shapes of WarpsPerCTA by finding all possible
       // factorizations of numWarps. Pick shape for which both conversions in
