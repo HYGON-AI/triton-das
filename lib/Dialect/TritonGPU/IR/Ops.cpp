@@ -4,6 +4,7 @@
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 #define GET_OP_CLASSES
 #include "triton/Dialect/TritonGPU/IR/Ops.cpp.inc"
@@ -25,6 +26,16 @@ bool hasDotOperandEncoding(Value value) {
   return hasEncoding<triton::gpu::DotOperandEncodingAttr>(value);
 }
 
+bool isConvertTrivial(ConvertLayoutOp op) {
+  auto srcType = op.getSrc().getType();
+  auto dstType = op.getType();
+  auto srcEncoding = srcType.getEncoding();
+  auto dstEncoding = dstType.getEncoding();
+  return cast<DialectInferLayoutInterface>(&srcEncoding.getDialect())
+      ->verifyLayoutsAreEqual(srcType.getShape(), srcEncoding, dstEncoding, {})
+      .succeeded();
+}
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -42,14 +53,46 @@ struct CanonicalizeConvertFromReshape
     auto convert = op.getSrc().getDefiningOp<ConvertLayoutOp>();
     if (!convert)
       return failure();
+    // If the layouts are structurally the same, the convert is trivial
+    if (isConvertTrivial(convert)) {
+      rewriter.replaceOpWithNewOp<triton::ReshapeOp>(
+          op, op.getType(), convert.getSrc(), op.getAllowReorder(),
+          op.getEfficientLayout());
+      return success();
+    }
+
     if (isExpensiveView(convert.getSrc().getType(), op.getType()))
       return failure();
     if (!op.getAllowReorder() || op.getEfficientLayout())
       return failure();
 
     rewriter.replaceOpWithNewOp<triton::ReshapeOp>(
-        op, op.getType(), convert.getSrc(), op.getAllowReorder());
+        op, op.getType(), convert.getSrc(), op.getAllowReorder(),
+        op.getEfficientLayout());
     return mlir::success();
+  }
+};
+
+// TODO We should do this generically for op(cvt) -> op
+// We have similar patterns for reshape and split...
+// See https://github.com/triton-lang/triton/pull/5403#discussion_r1920091671
+
+// trans(cvt) -> trans
+struct CanonicalizeConvertFromTranspose
+    : public mlir::OpRewritePattern<triton::TransOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::TransOp op,
+                  PatternRewriter &rewriter) const override {
+    // If the layouts are structurally the same, the convert is trivial
+    auto convert = op.getSrc().getDefiningOp<ConvertLayoutOp>();
+    if (!convert || !isConvertTrivial(convert))
+      return failure();
+
+    rewriter.replaceOpWithNewOp<triton::TransOp>(
+        op, op.getType(), convert.getSrc(), op.getOrder());
+    return success();
   }
 };
 
@@ -279,6 +322,7 @@ void ConvertLayoutOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *context) {
   patterns.add<CanonicalizeConvertFromConvert>(context);
   patterns.add<CanonicalizeConvertFromReshape>(context);
+  patterns.add<CanonicalizeConvertFromTranspose>(context);
   patterns.add<CanonicalizeConvertFromGatherSource>(context);
   patterns.add<CanonicalizeConvertFromHistogram>(context);
   patterns.add<CanonicalizeConvertFromAlloc>(context);
@@ -425,6 +469,7 @@ LogicalResult MemDescTransOp::inferReturnTypes(
     SmallVectorImpl<Type> &inferredReturnTypes) {
   // type is the same as the input
   auto argTy = cast<MemDescType>(operands[0].getType());
+  auto argShape = argTy.getShape();
   auto order = properties.as<Properties *>()->order.asArrayRef();
   SmallVector<int64_t> retShape = applyPermutation(argTy.getShape(), order);
 
@@ -435,7 +480,7 @@ LogicalResult MemDescTransOp::inferReturnTypes(
     Dialect &dialect = argEncoding.getDialect();
     auto inferLayoutInterface = cast<DialectInferLayoutInterface>(&dialect);
     if (inferLayoutInterface
-            ->inferTransOpEncoding(argEncoding, order, retEncoding)
+            ->inferTransOpEncoding(argEncoding, argShape, order, retEncoding)
             .failed()) {
       return failure();
     }
@@ -561,11 +606,33 @@ LogicalResult MemDescSubviewOp::verify() {
     return emitError("src and result must both have or not have an encoding");
   }
 
-  if (!isa<SharedEncodingAttr>(srcEnc)) {
+  if (!isa<SharedEncodingAttr>(srcEnc) &&
+      !isa<triton::nvidia_gpu::TensorMemoryEncodingAttr>(srcEnc)) {
     return emitError("src encoding must be SharedEncodingAttr");
   }
-  if (!isa<SharedEncodingAttr>(dstEnc)) {
+  if (!isa<SharedEncodingAttr>(dstEnc) &&
+      !isa<triton::nvidia_gpu::TensorMemoryEncodingAttr>(srcEnc)) {
     return emitError("result encoding must be SharedEncodingAttr");
+  }
+
+  if (isa<triton::nvidia_gpu::TensorMemoryEncodingAttr>(srcEnc)) {
+    // We support only 3D -> 2D subviews with only first offset being non-zero.
+    if (srcTy.getRank() != 3 || dstTy.getRank() != 2) {
+      return emitError("only 3D -> 2D subviews are supported for "
+                       "TensorMemoryEncodingAttr");
+    }
+    for (int i = 1; i < srcTy.getRank(); i++) {
+      if (auto constOp = getOffsets()[i].getDefiningOp<arith::ConstantOp>()) {
+        if (!isa<IntegerAttr>(constOp.getValue()) ||
+            cast<IntegerAttr>(constOp.getValue()).getInt() != 0) {
+          return emitError("only first offset can be non-zero for the subview"
+                           "of TensorMemoryEncodingAttr");
+        }
+      } else {
+        return emitError(
+            "offsets other than the first one must be constant zeros");
+      }
+    }
   }
 
   // TODO(jlebar): Currently we generate illegal encodings, so we can't add a
@@ -587,15 +654,8 @@ int32_t LocalAllocOp::getAlignmentOrDefault() {
   }
 
   auto ty = getType();
-  auto shapePerCTA = triton::gpu::getShapePerCTA(ty);
-  auto bytes =
-      product<int64_t>(shapePerCTA) * (ty.getElementTypeBitWidth() / 8);
-
-  // XXX(Keren): magic numbers 256 and 1024
-  // Software swizzling calculates phase based on offset, while hardware
-  // swizzling do that based on physical address. Thus only by setting the
-  // alignment to 1024 can ensure the correctness.
-  return bytes > 256 ? 1024 : 8;
+  auto enc = dyn_cast<SharedEncodingAttr>(ty.getEncoding());
+  return enc ? enc.getAlignment() : 16;
 }
 
 } // namespace mlir::triton::gpu

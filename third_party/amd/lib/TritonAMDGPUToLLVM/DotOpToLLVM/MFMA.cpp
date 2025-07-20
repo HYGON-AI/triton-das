@@ -63,19 +63,21 @@ struct DotOpMFMAConversionHelper {
 
   Value generateMFMAOp(StringRef mfmaInsnName, Value valA, Value valB,
                        Value valC, MfmaMmacLayout mfmaMmacLayout) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
+    Value zeroFlag = b.i32_val(0);
     OperationState loweredOp(loc, mfmaInsnName);
     loweredOp.addTypes(resType);
-    Value i32Flag = i32_val(0);
-    Value i1Flag = false_val();
+    Value i32Flag = b.i32_val(0);
+    Value i1Flag = b.false_val();
     bool isMmacLTS =
         mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
         mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE;
     bool isMmacLIT =
         mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE ||
         mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE;
-    Value ltsFlag = isMmacLTS ? true_val() : false_val();
-    Value litFlag = isMmacLIT ? true_val() : false_val();
+    Value ltsFlag = isMmacLTS ? b.true_val() : b.false_val();
+    Value litFlag = isMmacLIT ? b.true_val() : b.false_val();
     if (mfmaInsnName.compare("rocdl.mmac.16x16x4.f32") == 0) {
       loweredOp.addOperands({valA, valB, valC, i32Flag, ltsFlag});
     } else if (mfmaInsnName.compare("rocdl.mmac.16x16x8.f32") == 0 ||
@@ -120,6 +122,7 @@ struct DotOpMFMAConversionHelper {
 
   Value processSubBlocks(int numSubBlocks, Value acc, bool reduceSubBlocks,
                          bool zeroSubBlocks) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((numSubBlocks & (numSubBlocks - 1)) == 0 &&
            "numSubBlocks in not pow 2!");
     if (numSubBlocks == 1)
@@ -127,14 +130,14 @@ struct DotOpMFMAConversionHelper {
     constexpr int warpSize = 64;
     int subBlockSize = warpSize / numSubBlocks;
     Value laneId = getThreadId();
-    laneId = and_(laneId, i32_val(warpSize - 1));
+    laneId = b.and_(laneId, b.i32_val(warpSize - 1));
     auto vecTy = dyn_cast<VectorType>(acc.getType());
     auto elemType = vecTy.getElementType();
     assert(elemType.getIntOrFloatBitWidth() == 32);
     int numScalars = vecTy.getNumElements();
     std::vector<Value> accScalar(numScalars);
     for (int i = 0; i < numScalars; ++i)
-      accScalar[i] = extract_element(elemType, acc, i32_val(i));
+      accScalar[i] = b.extract_element(elemType, acc, b.i32_val(i));
 
     if (reduceSubBlocks) {
       while (subBlockSize < warpSize) {
@@ -142,9 +145,9 @@ struct DotOpMFMAConversionHelper {
           Value other_acc =
               shuffleXor(loc, rewriter, accScalar[i], subBlockSize);
           if (elemType.isInteger(32))
-            accScalar[i] = add(accScalar[i], other_acc);
+            accScalar[i] = b.add(accScalar[i], other_acc);
           else
-            accScalar[i] = fadd(accScalar[i], other_acc);
+            accScalar[i] = b.fadd(accScalar[i], other_acc);
         }
         subBlockSize *= 2;
       }
@@ -152,17 +155,18 @@ struct DotOpMFMAConversionHelper {
     if (zeroSubBlocks) {
       Value zero;
       if (elemType.isInteger(32))
-        zero = i32_val(0);
+        zero = b.i32_val(0);
       else
-        zero = f32_val(0.0);
-      auto cond = icmp_ult(laneId, i32_val(subBlockSize));
+        zero = b.f32_val(0.0);
+      auto cond = b.icmp_ult(laneId, b.i32_val(subBlockSize));
       for (int i = 0; i < numScalars; ++i)
-        accScalar[i] = select(cond, accScalar[i], zero);
+        accScalar[i] = b.select(cond, accScalar[i], zero);
     }
 
-    Value reducedAcc = undef(vecTy);
+    Value reducedAcc = b.undef(vecTy);
     for (int i = 0; i < numScalars; ++i)
-      reducedAcc = insert_element(vecTy, reducedAcc, accScalar[i], i32_val(i));
+      reducedAcc =
+          b.insert_element(vecTy, reducedAcc, accScalar[i], b.i32_val(i));
     return reducedAcc;
   }
 
@@ -190,6 +194,7 @@ struct DotOpMFMAConversionHelper {
 
   // Conduct the Dot conversion.
   LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor) const {
+    auto tb = TritonLLVMOpBuilder(loc, rewriter);
     // Check if this dot has come with priority set by setprio.
     auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
 
@@ -209,9 +214,11 @@ struct DotOpMFMAConversionHelper {
     auto elemTyA = aTensorTy.getElementType();
     auto elemTyB = bTensorTy.getElementType();
 
+    bool allowXF32 =
+        op.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
     StringRef mfmaInsnName;
-    auto maybeMfmaInsn =
-        MfmaInsn::selectMfma(mDim, nDim, elemTyA, elemTyB, mfmaVersion);
+    auto maybeMfmaInsn = MfmaInsn::selectMfma(mDim, nDim, elemTyA, elemTyB,
+                                              mfmaVersion, allowXF32);
     if (failed(maybeMfmaInsn))
       llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -221,6 +228,11 @@ struct DotOpMFMAConversionHelper {
     auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
     auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
     int kWidth = aEncoding.getKWidth();
+
+    // If we are using XF32, the kWidth (and kBase) is double that of F32.
+    if (aTensorTy.getElementType().isF32() && allowXF32)
+      kWidth *= 2;
+
     auto rank = aTensorTy.getShape().size();
     const auto kDimOperandSize = aTensorTy.getShape()[rank - 1];
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
@@ -244,17 +256,17 @@ struct DotOpMFMAConversionHelper {
     bool isMmacHCU = mfmaEncoding ? mfmaEncoding.isMmacHCU() : false;
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
-        aTensorTy.getElementType(), isMmacHCU);
+        aTensorTy.getElementType(), allowXF32, isMmacHCU);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
-        aTensorTy.getElementType(), isMmacHCU);
+        aTensorTy.getElementType(), allowXF32, isMmacHCU);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
 
     unsigned warpSize = triton::gpu::getWarpSize(mfmaLayout);
     // compute number of output elements that each thread holds for one MFMA
-    // instruction. subBlocks
+    // instruction.
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
@@ -269,13 +281,13 @@ struct DotOpMFMAConversionHelper {
     for (int b = 0; b < numRepB; ++b) {
       for (int m = 0; m < numRepM; ++m) {
         for (int n = 0; n < numRepN; ++n) {
-          Value acc = undef(vecTy);
+          Value acc = tb.undef(vecTy);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
-            acc = insert_element(
+            acc = tb.insert_element(
                 vecTy, acc,
                 fc[b * numRepM * numRepN * elemsPerVec +
                    m * numRepN * elemsPerVec + n * elemsPerVec + v],
-                i32_val(v));
+                tb.i32_val(v));
           }
           acc = zeroAuxiliarBlocks(subBlocks, acc);
           for (int k = 0; k < numRepK; k++) {
@@ -293,7 +305,7 @@ struct DotOpMFMAConversionHelper {
           }
           acc = reduceSubBlocks(subBlocks, acc);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
-            Value accElem = extract_element(dstElemTy, acc, i32_val(v));
+            Value accElem = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
             // Dot operand layout minimal tile is kDimInstrSize elements across
             // K dimension. If dot operand K dimension is smaller, layout
             // assigns tensor elements to multiple different hardware locations.
@@ -318,13 +330,13 @@ struct DotOpMFMAConversionHelper {
                 auto shiftSize = llvm::Log2_32(duplicationRate);
                 assert(!accElem.getType().isUnsignedInteger() &&
                        "MFMA uses signed accumulator");
-                accElem = ashr(accElem, i32_val(shiftSize));
+                accElem = tb.ashr(accElem, tb.i32_val(shiftSize));
               } else {
                 auto multiplierAttr =
                     rewriter.getFloatAttr(dstElemTy, 1.0 / duplicationRate);
                 auto multiplierVal = rewriter.create<LLVM::ConstantOp>(
                     loc, dstElemTy, multiplierAttr);
-                accElem = fmul(accElem, multiplierVal);
+                accElem = tb.fmul(accElem, multiplierVal);
               }
             }
             auto linearIdx = b * numRepM * numRepN * elemsPerVec +
@@ -366,45 +378,47 @@ struct DotOpMFMAConversionHelper {
   /// kBase elements for each mfma instruction
   SmallVector<Value> extractOperands(Value rawElems, int kWidth, int kBase,
                                      Type type, bool isMmacHCU = false) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     int kpack = kWidth / kBase;
     SmallVector<Value> results;
     auto vecTy = vec_ty(type, kBase);
     if (type.isBF16())
       vecTy = vec_ty(i16_ty, kBase);
     for (int k = 0; k < kpack; ++k) {
-      Value vec = undef(vecTy);
+      Value vec = b.undef(vecTy);
       for (int elemId = 0; elemId < kBase; ++elemId) {
-        auto val = extract_element(type, rawElems, i32_val(elemId + k * kBase));
+        auto val =
+            b.extract_element(type, rawElems, b.i32_val(elemId + k * kBase));
         if (type.isBF16()) {
           // rocdl.mfma.f32.32x32x8bf16.1k calls for input of i16 type
-          auto cast = bitcast(val, i16_ty);
-          vec = insert_element(vecTy, vec, cast, i32_val(elemId));
+          auto cast = b.bitcast(val, i16_ty);
+          vec = b.insert_element(vecTy, vec, cast, b.i32_val(elemId));
         } else {
-          vec = insert_element(vecTy, vec, val, i32_val(elemId));
+          vec = b.insert_element(vecTy, vec, val, b.i32_val(elemId));
         }
       }
       if (type.getIntOrFloatBitWidth() == 8) {
         if (4 == kBase)
           // This is for int8 on pre- MI300 GPUs
-          results.push_back(bitcast(vec, i32_ty));
+          results.push_back(b.bitcast(vec, i32_ty));
         if (8 == kBase) {
           if (isMmacHCU) {
             // Pack 8bit element to I32, e.g. 8xi8 -> 2xi32
             auto v4x8BitTy = vec_ty(type, 4);
             auto v2x32BitTy = vec_ty(i32_ty, 2);
-            Value v2x32bit = undef(v2x32BitTy);
+            Value v2x32bit = b.undef(v2x32BitTy);
             for (int i = 0; i < 2; ++i) {
-              Value v4x8bit = undef(v4x8BitTy);
+              Value v4x8bit = b.undef(v4x8BitTy);
               for (int elemId = 0; elemId < 4; ++elemId) {
-                auto val = extract_element(type, vec, i32_val(elemId + i * 4));
-                v4x8bit = insert_element(v4x8BitTy, v4x8bit, val, i32_val(elemId));
+                auto val = b.extract_element(type, vec, b.i32_val(elemId + i * 4));
+                v4x8bit = b.insert_element(v4x8BitTy, v4x8bit, val, b.i32_val(elemId));
               }
-              Value toI32 = bitcast(v4x8bit, i32_ty);
-              v2x32bit = insert_element(v2x32BitTy, v2x32bit, toI32, i32_val(i));
+              Value toI32 = b.bitcast(v4x8bit, i32_ty);
+              v2x32bit = b.insert_element(v2x32BitTy, v2x32bit, toI32, b.i32_val(i));
             }
             results.push_back(v2x32bit);
           } else {
-            results.push_back(bitcast(vec, i64_ty));
+            results.push_back(b.bitcast(vec, i64_ty));
           }
         }
       } else {
@@ -419,7 +433,8 @@ struct DotOpMFMAConversionHelper {
   SmallVector<ValueTable>
   getValuesFromDotOperandLayoutStruct(Value value, int batch, int n0, int n1,
                                       int kWidth, int kBase, Type type,
-                                      bool isMmacHCU = false) const {
+                                      bool allowXF32, bool isMmacHCU = false) const {
+    auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     int kpack = kWidth / kBase;
     SmallVector<ValueTable> dotOpVals(kpack);
@@ -428,23 +443,25 @@ struct DotOpMFMAConversionHelper {
         for (int j = 0; j < n1; j++) {
           Type elemTy = typeConverter->convertType(type);
           Type ty = vec_ty(elemTy, kWidth);
-          Value rawElems = undef(ty);
+          Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
-            rawElems = insert_element(
+            rawElems = tb.insert_element(
                 ty, rawElems,
                 elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k],
-                i32_val(k));
+                tb.i32_val(k));
           }
 
           Value convertedElems;
-          if (type.isF32()) {
-            // for (int k = 0; k < kpack; ++k)
-            //   dotOpVals[k][{b, i, j}] =
-            //       extract_element(type, rawElems, i32_val(k));
+          if (type.isF32() && !allowXF32) {
+#if 0
+            for (int k = 0; k < kpack; ++k)
+              dotOpVals[k][{b, i, j}] =
+                  tb.extract_element(type, rawElems, tb.i32_val(k));
+#endif
             /* Hygon support: add mmac_f32_m16n16k8_f32 support */
             if (kWidth == 1) {
               for (int k = 0; k < kpack; ++k)
-                dotOpVals[k][{b, i, j}] = extract_element(type, rawElems, i32_val(k));
+                dotOpVals[k][{b, i, j}] = tb.extract_element(type, rawElems, tb.i32_val(k));
             } else {
               // mmac_f32_m16n16k8_f32 support
               SmallVector<Value> vals = extractOperands(rawElems, kWidth, kBase, f32_ty);
@@ -454,7 +471,10 @@ struct DotOpMFMAConversionHelper {
             }
           } else {
             SmallVector<Value> vals;
-            if (type.getIntOrFloatBitWidth() == 8) {
+            if (type.isF32() && allowXF32) {
+              assert(!isMmacHCU && "XF32 is not supported for HCU");
+              vals = extractOperands(rawElems, kWidth, kBase, f32_ty);
+            } else if (type.getIntOrFloatBitWidth() == 8) {
               vals = extractOperands(rawElems, kWidth, kBase, i8_ty, isMmacHCU);
             } else if (type.isBF16()) {
               vals = extractOperands(rawElems, kWidth, kBase, bf16_ty);

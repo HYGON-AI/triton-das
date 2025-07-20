@@ -5,6 +5,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 #include "triton/Analysis/Utility.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
@@ -217,6 +218,8 @@ public:
 //     - Do elementwise ops over #dot_operand layout.
 //     - Do dot.
 //
+// This can also be propagated when we have a constant, instead of a load.
+//
 // Eliminating the shmem round-trip is such a big win, we're willing to do it
 // even if this duplicates work because some of the elementwise ops have uses
 // that don't flow into the dot.  On the other hand, we only want to do this if
@@ -251,38 +254,35 @@ public:
     if (!canHoistDotOpEncV2(src, dotOpEnc))
       return failure();
 
-    // Check that the conversion is transitively dependent on a load, and all
-    // operations between the load and the conversion are layout preserving.
+    // Check that the conversion is transitively dependent on a load or a
+    // constant, and all operations between it and the convert are layout
+    // preserving.
     //
     // TODO(jlebar): This is accidentally quadratic; we iterate over the whole
     // slice but then at the end we only modify one op!
     SetVector<Operation *> slice;
     BackwardSliceOptions opt;
     opt.omitBlockArguments = true;
-    // TODO(jlebar): Is this filter redundant with omitBlockArguments == true?
-    // That is, is it possible to get into a different region without going
-    // through a block argument?
-    opt.filter = [&](Operation *op) {
-      return op->getParentRegion() == cvt->getParentRegion();
-    };
     getBackwardSlice(cvt.getOperation(), &slice, opt);
 
     // TODO(jlebar): This is too conservative when there are multiple loads in
-    // the chain (e.g. cvt(load(x) + load(y))).  The intent is to check that all
-    // of the ops between the loads and the convert are elementwise.  But
-    // actually we set foundLoad = true once we see the first load, and so we
-    // will reject the chain if the *second* load we encounter uses a
-    // non-elementwise op to calculate its pointers.
-    bool foundLoad = false;
-    for (Operation *currOp : slice) {
-      if (isa<LoadOp>(currOp)) {
-        foundLoad = true;
-      } else if (foundLoad) {
-        if (!canHoistDotOpEncV2(currOp, dotOpEnc))
-          return failure();
+    // the chain. If one of the loads has a non-layout-preserving op and the
+    // other does not, then we may or may not accept the chain, depending on
+    // which load gets hit first by getBackwardSlice. For example:
+    // cvt(broadcast(load(x)) + load(y)) // accepted & load(y) will benefit.
+    // cvt(load(y) + broadcast(load(x))) // rejected & load(y) will not benefit.
+    bool foundInitializer = false;
+    // Reverse the slice so that we start directly above the convert and check
+    // that every op allows hoisting until we find a load or a constant.
+    for (Operation *currOp : llvm::reverse(slice)) {
+      if (isa<LoadOp>(currOp) || isa<arith::ConstantOp>(currOp)) {
+        foundInitializer = true;
+        break;
       }
+      if (!canHoistDotOpEncV2(currOp, dotOpEnc))
+        return failure();
     }
-    if (!foundLoad)
+    if (!foundInitializer)
       return failure();
 
     SmallVector<ConvertLayoutOp> newOperands;
@@ -310,21 +310,21 @@ public:
 //   dot(alloc(trans() #shared1) ->
 //   dot(trans(alloc() #shared2))
 //
-// if dot is an MMAv3 (because MMAv3 allows us to fold transposes).
-class FuseTransHopper : public OpRewritePattern<LocalAllocOp> {
+// if dot is an MMAv3/v5 (because MMAv3/v5 allows us to fold transposes).
+class FuseTransMMAV3Plus : public OpRewritePattern<LocalAllocOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(LocalAllocOp allocOp,
                                 PatternRewriter &rewriter) const override {
-    if (!allocOp->hasOneUse() ||
-        !allocOp->getUsers().begin()->hasTrait<OpTrait::DotLike>())
+    if (!allocOp.getSrc() || !allocOp->hasOneUse() ||
+        !isa<triton::nvidia_gpu::WarpGroupDotOp,
+             triton::nvidia_gpu::TCGen5MMAOp,
+             triton::nvidia_gpu::TCGen5MMAScaledOp>(
+            *allocOp->getUsers().begin()))
       return failure();
 
     auto dot = *allocOp->getUsers().begin();
-    if (!allocOp.getSrc())
-      return failure();
-
     // Match outerCvt(trans(innerCvt(x))).
     auto trans = allocOp.getSrc().getDefiningOp<TransOp>();
     if (!trans || trans.getOrder() != ArrayRef<int32_t>({1, 0}))
@@ -556,6 +556,126 @@ struct MMAV3HoistLayoutConversion
   }
 };
 
+// Inject TMEM copy instructions into IR to efficiently load blocked scales for
+// scaled dot
+class InjectTMemCopy
+    : public OpRewritePattern<triton::nvidia_gpu::TMEMAllocOp> {
+public:
+  using OpRewritePattern<triton::nvidia_gpu::TMEMAllocOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(triton::nvidia_gpu::TMEMAllocOp tmemAlloc,
+                                PatternRewriter &rewriter) const override {
+    auto dstType = tmemAlloc.getResult().getType();
+
+    // Only applies to TMEMAlloc with scales encoding
+    if (!isa<triton::nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+            dstType.getEncoding())) {
+      return failure();
+    }
+
+    if (!tmemAlloc.getSrc()) {
+      return failure();
+    }
+
+    // Look for a sequence
+    //    local_load
+    // -> reshape(..., (BLOCK_MN / 128, BLOCK_K / scale_vec_size / 4, 32, 4, 4)
+    // -> transpose(..., (0, 3, 2, 1, 4))
+    // -> reshape(..., (BLOCK_MN, BLOCK_K / scale_vec_size)
+    // -> tmem_alloc
+    // and replace it with tmem_alloc -> tmem_copy
+    auto scale2DShape = dstType.getShape();
+    auto blockMN = scale2DShape[0];
+    auto numScales = scale2DShape[1];
+    const SmallVector<int> transposeOrder{0, 3, 2, 1, 4};
+    const SmallVector<int64_t> reshape5DShape{blockMN / 128, numScales / 4, 32,
+                                              4, 4};
+
+    auto reshapeOp2D = getNextOp<triton::ReshapeOp>(tmemAlloc.getSrc());
+    if (!reshapeOp2D ||
+        reshapeOp2D.getResult().getType().getShape() != scale2DShape) {
+      return failure();
+    }
+
+    auto transOp = getNextOp<triton::TransOp>(reshapeOp2D.getSrc());
+    if (!transOp || transOp.getOrder() != ArrayRef<int>(transposeOrder)) {
+      return failure();
+    }
+
+    auto reshapeOp5D = getNextOp<triton::ReshapeOp>(transOp.getSrc());
+    if (!reshapeOp5D || reshapeOp5D.getResult().getType().getShape() !=
+                            ArrayRef<int64_t>(reshape5DShape)) {
+      return failure();
+    }
+
+    auto localLoad = getNextOp<triton::gpu::LocalLoadOp>(reshapeOp5D.getSrc());
+    if (!localLoad || !isTmemCopyCompatible(localLoad.getSrc().getType())) {
+      return failure();
+    }
+
+    Value newTmemAlloc = rewriter.create<triton::nvidia_gpu::TMEMAllocOp>(
+        tmemAlloc.getLoc(), dstType, Value());
+
+    // Since tcgen05.cp followed by tcgen05.mma is guaranteed to execute in that
+    // order, we do not need to wait for the completion of the copy before MMA.
+    rewriter.create<triton::nvidia_gpu::TMEMCopyOp>(
+        newTmemAlloc.getLoc(), localLoad.getSrc(), newTmemAlloc,
+        Value() /* barrier */);
+
+    rewriter.replaceOp(tmemAlloc, newTmemAlloc);
+
+    return success();
+  }
+
+private:
+  template <typename Op> Op getNextOp(Value op) const {
+    while (auto cvtOp = op.getDefiningOp<ConvertLayoutOp>()) {
+      op = cvtOp.getSrc();
+    }
+    return op.getDefiningOp<Op>();
+  }
+
+  bool isDescendingOrder(triton::gpu::MemDescType scale) const {
+    auto order = triton::gpu::getOrder(scale.getEncoding());
+    auto rank = scale.getRank();
+    for (int i = 0; i < rank; ++i) {
+      if (order[i] != rank - 1 - i)
+        return false;
+    }
+    return true;
+  }
+
+  bool isTmemCopyCompatible(triton::gpu::MemDescType scaleType) const {
+    // TMEM copy expects that blocked scale "chunks" in SMEM are stored in
+    // innermost axes contiguously.
+    if (!isDescendingOrder(scaleType))
+      return false;
+
+    auto sharedEnc =
+        cast<triton::gpu::SharedEncodingAttr>(scaleType.getEncoding());
+    if (sharedEnc.getMaxPhase() != 1 || sharedEnc.getPerPhase() != 1 ||
+        sharedEnc.getVec() != 1) {
+      // For now, we do not expect swizzling to be applied to the scale SMEM.
+      // This is currently true for non-matmul operand SMEM allocated during
+      // pipelining.
+      return false;
+    }
+
+    if (scaleType.getRank() != 2) {
+      // TODO: Add support for higher rank when 5D coalesced load is fixed
+      // or 4D TMA is supported.
+      return false;
+    }
+
+    auto elemBits = scaleType.getElementType().getIntOrFloatBitWidth();
+
+    // We assume that 32x128b chunks are flattened into the inner most axis.
+    auto innerMostBits =
+        scaleType.getDimSize(scaleType.getRank() - 1) * elemBits;
+    return innerMostBits % (32 * 128) == 0;
+  }
+};
+
 } // namespace
 
 #define GEN_PASS_DEF_TRITONGPUOPTIMIZEDOTOPERANDS
@@ -581,10 +701,11 @@ public:
     patterns.add<SwizzleShmemConvert>(context);
     if (this->hoistLayoutConversion.getValue())
       patterns.add<HoistLayoutConversion>(context);
-    patterns.add<FuseTransHopper>(context);
+    patterns.add<FuseTransMMAV3Plus>(context);
     patterns.add<MMAV3UseRegOperand>(context);
+    patterns.add<InjectTMemCopy>(context);
     ConvertLayoutOp::getCanonicalizationPatterns(patterns, context);
-    if (failed(applyPatternsAndFoldGreedily(m, std::move(patterns))))
+    if (failed(applyPatternsGreedily(m, std::move(patterns))))
       signalPassFailure();
   }
 };

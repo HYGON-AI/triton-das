@@ -19,6 +19,7 @@
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
+namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 namespace mlir {
 
@@ -44,9 +45,9 @@ SmallVector<unsigned, 3> mmaVersionToInstrShape(int version,
     SmallVector<unsigned> validN;
 
     // MMAv3 with larger instruction shape is preferred.
-    if (eltType.isFloat8E5M2() || eltType.isFloat8E4M3FN() ||
-        eltType.isFloat8E4M3FNUZ() || eltType.isF16() || eltType.isBF16() ||
-        eltType.isF32()) {
+    if (llvm::isa<Float8E5M2Type, Float8E4M3FNType, Float8E4M3FNUZType>(
+            eltType) ||
+        eltType.isF16() || eltType.isBF16() || eltType.isF32()) {
       validN.assign({256, 248, 240, 232, 224, 216, 208, 200, 192, 184, 176,
                      168, 160, 152, 144, 136, 128, 120, 112, 104, 96,  88,
                      80,  72,  64,  56,  48,  40,  32,  24,  16,  8});
@@ -69,6 +70,15 @@ SmallVector<unsigned, 3> mmaVersionToInstrShape(int version,
 
     assert(false && "type not supported");
     return {0, 0, 0};
+  } else if (version == 5) {
+    unsigned m = shape[0] >= 128 ? 128 : 64;
+    // Right now default to distributing along N. TODO: For cases where we have
+    // dot followed by reduction we need to be able to distribute along M.
+    //    if (numWarps > 4)
+    //      m = 64;
+    unsigned n = shape[1] >= 256 ? 256 : shape[1];
+    unsigned k = 256 / eltType.getIntOrFloatBitWidth();
+    return {m, n, k};
   } else {
     assert(false && "version not supported");
     return {0, 0};
@@ -368,13 +378,14 @@ static Attribute inferSrcEncoding(GatherOp op, Attribute dstEnc) {
 }
 
 static Attribute inferTransOpDstEncoding(Attribute srcEnc,
+                                         ArrayRef<int64_t> shape,
                                          ArrayRef<int32_t> order) {
   // Simply forward to the existing inferTransOpEncoding function.
   Attribute retEncoding;
   if (succeeded(
           srcEnc.getDialect()
               .getRegisteredInterface<triton::DialectInferLayoutInterface>()
-              ->inferTransOpEncoding(srcEnc, order, retEncoding))) {
+              ->inferTransOpEncoding(srcEnc, shape, order, retEncoding))) {
     return retEncoding;
   }
   return {};
@@ -382,7 +393,9 @@ static Attribute inferTransOpDstEncoding(Attribute srcEnc,
 
 static Attribute inferDstEncoding(triton::TransposeOpInterface op,
                                   Attribute encoding) {
-  return inferTransOpDstEncoding(encoding, op.getOrder());
+  return inferTransOpDstEncoding(
+      encoding, cast<RankedTensorType>(op.getSrc().getType()).getShape(),
+      op.getOrder());
 }
 
 static Attribute inferSrcEncoding(triton::TransposeOpInterface op,
@@ -393,7 +406,8 @@ static Attribute inferSrcEncoding(triton::TransposeOpInterface op,
   //   transpose(transpose(x, order), inverse(order)) == x,
   // we can see this is equivalent to
   //   transpose(dstEnc, inverse(order)) -> srcEnc.
-  return inferTransOpDstEncoding(encoding,
+  auto shape = cast<RankedTensorType>(op->getResult(0).getType()).getShape();
+  return inferTransOpDstEncoding(encoding, shape,
                                  triton::inversePermutation(op.getOrder()));
 }
 
@@ -407,14 +421,13 @@ static Attribute inferReshapeOpDstEncoding(ArrayRef<int64_t> srcShape,
     return {};
 
   Attribute dstEnc;
-  if (succeeded(
-          srcEnc.getDialect()
-              .getRegisteredInterface<triton::DialectInferLayoutInterface>()
-              ->inferReshapeOpNoReorderEncoding(
-                  srcShape, srcEnc, dstShape, dstEnc, /*loc=*/std::nullopt))) {
-    return dstEnc;
-  }
-  return {};
+  auto result =
+      srcEnc.getDialect()
+          .getRegisteredInterface<triton::DialectInferLayoutInterface>()
+          ->inferReshapeOpEncoding(srcShape, srcEnc, dstShape, dstEnc,
+                                   /*loc=*/std::nullopt);
+  assert(succeeded(result));
+  return dstEnc;
 }
 
 static Attribute inferDstEncoding(triton::ReshapeOp op, Attribute encoding) {
@@ -1190,40 +1203,52 @@ void populateForOpDeadArgumentElimination(RewritePatternSet &patterns) {
   patterns.add<ForOpDeadArgElimination>(patterns.getContext());
 }
 
-std::optional<LinearLayout>
-getRegToSharedLayout(MLIRContext *ctx, ArrayRef<int64_t> shape,
-                     Attribute srcEnc, Attribute dstEnc, int elemBitWidth) {
-  StringAttr kBlock = StringAttr::get(ctx, ("block"));
-  int rank = shape.size();
-
-  std::optional<LinearLayout> regLayout =
-      triton::gpu::toLinearLayout(shape, srcEnc);
-  std::optional<LinearLayout> sharedLayout =
-      triton::gpu::toLinearLayout(shape, dstEnc, elemBitWidth);
-  if (!regLayout.has_value() || !sharedLayout.has_value()) {
-    return std::nullopt;
+ttg::LocalAllocOp findShmemAlloc(Value operand) {
+  // If it's a shmem operand, it must either be defined outside the loop, or
+  // come from an MemDescSubview op. Only ConvertLayout and Trans ops are
+  // allowed in between.
+  Value transitiveOperand = operand;
+  while (
+      isa_and_nonnull<ttg::ConvertLayoutOp, tt::TransOp, ttg::MemDescTransOp>(
+          transitiveOperand.getDefiningOp()) ||
+      isa<BlockArgument>(transitiveOperand)) {
+    if (auto blockArg = dyn_cast<BlockArgument>(transitiveOperand)) {
+      assert(isa<scf::ForOp>(blockArg.getOwner()->getParentOp()) &&
+             "Block argument must come from a for loop");
+      transitiveOperand =
+          cast<scf::YieldOp>(blockArg.getOwner()->getTerminator())
+              .getOperand(blockArg.getArgNumber() - 1);
+    } else {
+      transitiveOperand = transitiveOperand.getDefiningOp()->getOperand(0);
+    }
   }
-  auto sharedOrder = triton::gpu::getOrder(dstEnc);
-
-  // sharedLayout's in-dims are currently (offset, block).  Reshape to
-  // (offsetX1, offsetX2, ..., block) so that we can apply the N-dimensional
-  // shmem strides.  (The offsetX's appear in minor-to-major order.)
-  auto sharedLegacy = cast<triton::gpu::SharedEncodingAttr>(dstEnc);
-  SmallVector<std::pair<StringAttr, int32_t>> multiDimSharedSize;
-  for (int i = 0; i < rank; i++) {
-    int dim = sharedOrder[i];
-    int64_t size = std::max(
-        int64_t{1},
-        shape[dim] / sharedLegacy.getCTALayout().getCTASplitNum()[dim]);
-    multiDimSharedSize.push_back(
-        {StringAttr::get(ctx, ("offset" + std::to_string(dim))), size});
+  if (auto subView =
+          dyn_cast<ttg::MemDescSubviewOp>(transitiveOperand.getDefiningOp())) {
+    // Multi-buffered operand
+    return dyn_cast<ttg::LocalAllocOp>(subView.getSrc().getDefiningOp());
+  } else {
+    // Single bufferred operand that does not require a subview (not loaded in
+    // the loop)
+    return dyn_cast<ttg::LocalAllocOp>(transitiveOperand.getDefiningOp());
   }
-  multiDimSharedSize.push_back({kBlock, sharedLayout->getInDimSize(kBlock)});
-  sharedLayout = sharedLayout->reshapeIns(multiDimSharedSize);
+  return nullptr;
+}
 
-  // regToSharedLayout maps from (register, lane, warp, block) to (offsetX1,
-  // ..., offsetXN, block), where the offsetX's are in minor-to-major order.
-  return regLayout->invertAndCompose(*sharedLayout);
+SmallVector<Operation *>
+getMMAsWithMultiBufferredOperands(scf::ForOp forOp,
+                                  SmallVector<Operation *> &mmaOps) {
+  // The A and B operands of the mmaOp should be multi-buffered
+  SmallVector<Operation *> eligible;
+  for (auto mmaOp : mmaOps) {
+    auto a = findShmemAlloc(mmaOp->getOperand(0));
+    auto b = findShmemAlloc(mmaOp->getOperand(1));
+    if (a && forOp.isDefinedOutsideOfLoop(a) && b &&
+        forOp.isDefinedOutsideOfLoop(b)) {
+      eligible.push_back(mmaOp);
+    }
+  }
+
+  return eligible;
 }
 
 } // namespace mlir

@@ -9,11 +9,12 @@ Value getWarpIdInBlock(ConversionPatternRewriter &rewriter, Location loc,
                        Value warpId, const ArrayRef<unsigned int> &wpt,
                        int elemPerInstrNonK, int tensorSizeNonK, int nonKIdx,
                        const ArrayRef<unsigned int> &order) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> multiDimWarpId =
       delinearize(rewriter, loc, warpId, wpt, order);
 
-  return urem(multiDimWarpId[nonKIdx],
-              i32_val(tensorSizeNonK / elemPerInstrNonK));
+  return b.urem(multiDimWarpId[nonKIdx],
+                b.i32_val(tensorSizeNonK / elemPerInstrNonK));
 }
 
 bool isSwizzled(SharedEncodingAttr layout) { return layout.getMaxPhase() != 1; }
@@ -21,6 +22,7 @@ bool isSwizzled(SharedEncodingAttr layout) { return layout.getMaxPhase() != 1; }
 std::pair<mlir::Value, mlir::Value>
 swizzleIndexes(ConversionPatternRewriter &rewriter, Location loc, Value row,
                Value col, SharedMemoryObject smemObj, SharedEncodingAttr attr) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   (void)smemObj; // unused in current pattern
   const auto &order = attr.getOrder();
   auto rank = order.size();
@@ -29,18 +31,18 @@ swizzleIndexes(ConversionPatternRewriter &rewriter, Location loc, Value row,
     // tensor is column-wise, so swapping col and row in computations
     std::swap(row, col);
   }
-  auto vec = i32_val(attr.getVec());
-  auto perPhase = i32_val(attr.getPerPhase());
-  auto maxPhase = i32_val(attr.getMaxPhase());
+  auto vec = b.i32_val(attr.getVec());
+  auto perPhase = b.i32_val(attr.getPerPhase());
+  auto maxPhase = b.i32_val(attr.getMaxPhase());
 
   // phase = (row // perPhase) % maxPhase
   // colOffSwizzled = ((col // vec) ^ phase) * vec
   // colOffOrdered = col % vec
   // colOff = colOffSwizzled + colOffOrdered
-  auto phase = urem(udiv(row, perPhase), maxPhase);
-  auto colOffSwizzled = mul(xor_(udiv(col, vec), phase), vec);
-  auto colOffOrdered = urem(col, vec);
-  auto colOff = add(colOffSwizzled, colOffOrdered);
+  auto phase = b.urem(b.udiv(row, perPhase), maxPhase);
+  auto colOffSwizzled = b.mul(b.xor_(b.udiv(col, vec), phase), vec);
+  auto colOffOrdered = b.urem(col, vec);
+  auto colOff = b.add(colOffSwizzled, colOffOrdered);
 
   if (transposed)
     return {colOff, row};
@@ -50,30 +52,33 @@ swizzleIndexes(ConversionPatternRewriter &rewriter, Location loc, Value row,
 
 Value computeOffset(ConversionPatternRewriter &rewriter, Location loc,
                     Value row, Value col, SharedMemoryObject smemObj,
-                    SharedEncodingAttr srcLayout) {
+                    ArrayRef<Value> smemStrides, SharedEncodingAttr srcLayout) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto [swizzledRow, swizzledCol] =
       swizzleIndexes(rewriter, loc, row, col, smemObj, srcLayout);
-  const auto &strides = smemObj.getStrides();
-  auto rank = strides.size();
+  auto rank = smemStrides.size();
   assert(rank == 2 || rank == 3);
-  Value rowOffset = mul(swizzledRow, strides[rank - 2]);
-  Value colOffset = mul(swizzledCol, strides[rank - 1]);
-  return add(rowOffset, colOffset);
+  Value rowOffset = b.mul(swizzledRow, smemStrides[rank - 2]);
+  Value colOffset = b.mul(swizzledCol, smemStrides[rank - 1]);
+  return b.add(rowOffset, colOffset);
 }
 
 Value computeBasePtr(ConversionPatternRewriter &rewriter, Location loc,
-                     const SharedMemoryObject &smemObj) {
-  Value base = smemObj.base;
+                     const SharedMemoryObject &smemObj,
+                     ArrayRef<Value> smemStrides) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Value base = smemObj.getBase();
   Type type = base.getType();
   Type elemType = smemObj.getBaseElemType();
-  for (int i = 0; i < smemObj.strides.size(); ++i) {
-    Value offset = sub(i32_val(0), mul(smemObj.offsets[i], smemObj.strides[i]));
-    base = gep(type, elemType, base, offset);
+  for (int i = 0; i < smemStrides.size(); ++i) {
+    Value offset =
+        b.sub(b.i32_val(0), b.mul(smemObj.getOffsets()[i], smemStrides[i]));
+    base = b.gep(type, elemType, base, offset);
   }
   return base;
 }
 
-bool isKMajor(llvm::ArrayRef<unsigned> order, int opIdx) {
+bool isKContig(llvm::ArrayRef<unsigned> order, int opIdx) {
   auto rank = order.size();
   int kdim = opIdx == 0 ? rank - 1 : rank - 2;
   return order[0] == kdim;
@@ -101,9 +106,9 @@ bool isSwizzlePatternFitsIntoBlock(const SharedEncodingAttr sharedLayout,
   const auto swizzleSlowDimSize =
       sharedLayout.getMaxPhase() * sharedLayout.getPerPhase();
   const auto swizzlePatternSizeK =
-      isKMajor(order, opIdx) ? swizzleFastDimSize : swizzleSlowDimSize;
+      isKContig(order, opIdx) ? swizzleFastDimSize : swizzleSlowDimSize;
   const auto swizzlePatternSizeNonK =
-      !isKMajor(order, opIdx) ? swizzleFastDimSize : swizzleSlowDimSize;
+      !isKContig(order, opIdx) ? swizzleFastDimSize : swizzleSlowDimSize;
 
   const auto blockSizeK = mfmaInstrK * reps[reps.size() - 1];
   const auto blockSizeNonK = mfmaInstrNonK * warpsPerBlockNonK;
@@ -111,13 +116,15 @@ bool isSwizzlePatternFitsIntoBlock(const SharedEncodingAttr sharedLayout,
          blockSizeNonK % swizzlePatternSizeNonK == 0;
 }
 
-llvm::SmallVector<Value> computeOffsetsAType(
-    ConversionPatternRewriter &rewriter, Location loc,
-    computeTensorElemMappingInBlockT fn, const ArrayRef<int64_t> &elemsPerInstr,
-    Value warpId, Value laneId, int warpsPerBlock, int numOfElems,
-    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
-    SharedEncodingAttr srcLayout, unsigned nonKDim, unsigned kDim) {
-  SmallVector<Value> strides = smemObj.getStrides();
+llvm::SmallVector<Value>
+computeOffsetsAType(ConversionPatternRewriter &rewriter, Location loc,
+                    computeTensorElemMappingInBlockT fn,
+                    const ArrayRef<int64_t> &elemsPerInstr, Value warpId,
+                    Value laneId, int warpsPerBlock, int numOfElems,
+                    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
+                    ArrayRef<Value> smemStrides, SharedEncodingAttr srcLayout,
+                    unsigned nonKDim, unsigned kDim) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> offsets = smemObj.getOffsets();
   auto order = srcLayout.getOrder();
   auto rank = offsets.size();
@@ -141,24 +148,25 @@ llvm::SmallVector<Value> computeOffsetsAType(
     /* Hygon modify: adjust the offset add location to easy match ds_read2st_xxx inst
      * which OFFSET1 require OFFSET1 * 4|8 * 64 and can decrease register pressuer.
     **/
-    // for (int block = 0; block < numBlocks; ++block) {
-    //   int blockNonKOffset = block * nonKDim * warpsPerBlock;
-    //   for (int i = 0; i < blockSize; ++i) {
-    //     Value row = add(mapping[i][0], i32_val(blockNonKOffset));
-    //     Value col = mapping[i][1];
-    //     aOffsets[block * blockSize + i] =
-    //         computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
-    //   }
-    // }
+#if 0
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
-      Value offAdjust = mul(i32_val(blockNonKOffset), strides[rank - 2]);
+      for (int i = 0; i < blockSize; ++i) {
+        Value row = b.add(mapping[i][0], b.i32_val(blockNonKOffset));
+        Value col = mapping[i][1];
+        aOffsets[block * blockSize + i] = computeOffset(
+            rewriter, loc, row, col, smemObj, smemStrides, srcLayout);
+      }
+    }
+#endif
+    for (int block = 0; block < numBlocks; ++block) {
+      int blockNonKOffset = block * nonKDim * warpsPerBlock;
+      Value offAdjust = b.mul(b.i32_val(blockNonKOffset), smemStrides[rank - 2]);
       for (int i = 0; i < mapping.size(); ++i) {
         Value row = mapping[i][0];
         Value col = mapping[i][1];
         aOffsets[block * blockSize + i] =
-            add(offAdjust,
-                computeOffset(rewriter, loc, row, col, smemObj, srcLayout));
+          b.add(offAdjust, computeOffset(rewriter, loc, row, col, smemObj, smemStrides, srcLayout));
       }
     }
   } else {
@@ -167,14 +175,15 @@ llvm::SmallVector<Value> computeOffsetsAType(
     for (int i = 0; i < mapping.size(); ++i) {
       Value row = mapping[i][0];
       Value col = mapping[i][1];
-      inblockOffset[i] =
-          computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+      inblockOffset[i] = computeOffset(rewriter, loc, row, col, smemObj,
+                                       smemStrides, srcLayout);
     }
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
-      Value offAdjust = mul(i32_val(blockNonKOffset), strides[rank - 2]);
+      Value offAdjust =
+          b.mul(b.i32_val(blockNonKOffset), smemStrides[rank - 2]);
       for (int i = 0; i < blockSize; ++i)
-        aOffsets[block * blockSize + i] = add(offAdjust, inblockOffset[i]);
+        aOffsets[block * blockSize + i] = b.add(offAdjust, inblockOffset[i]);
     }
   }
   return aOffsets;
@@ -191,12 +200,15 @@ transposeSpatialDims(const Container &vec) {
   return res;
 }
 
-llvm::SmallVector<Value> computeOffsetsBType(
-    ConversionPatternRewriter &rewriter, Location loc,
-    computeTensorElemMappingInBlockT fn, const ArrayRef<int64_t> &elemsPerInstr,
-    Value warpId, Value laneId, int warpsPerBlock, int numOfElems,
-    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
-    SharedEncodingAttr srcLayout, unsigned nonKDim, unsigned kDim) {
+llvm::SmallVector<Value>
+computeOffsetsBType(ConversionPatternRewriter &rewriter, Location loc,
+                    computeTensorElemMappingInBlockT fn,
+                    const ArrayRef<int64_t> &elemsPerInstr, Value warpId,
+                    Value laneId, int warpsPerBlock, int numOfElems,
+                    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
+                    ArrayRef<Value> smemStrides, SharedEncodingAttr srcLayout,
+                    unsigned nonKDim, unsigned kDim) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   // transpose reps and offsets, because operand B has layout equal to
   // transposed operand A layout
   // this unifies axis order, so non-K dim is 0, k dim is 1
@@ -205,7 +217,7 @@ llvm::SmallVector<Value> computeOffsetsBType(
   SmallVector<int64_t> tElemsPerInstr{elemsPerInstr[1], elemsPerInstr[0]};
   SmallVector<int64_t> tReps = transposeSpatialDims(reps);
   SmallVector<Value> tOffsets = transposeSpatialDims(smemObj.getOffsets());
-  SmallVector<Value> tStrides = transposeSpatialDims(smemObj.getStrides());
+  SmallVector<Value> tStrides = transposeSpatialDims(smemStrides);
 
   int vectorSize = 1;
   if (order[0] == rank - 2) {
@@ -226,28 +238,29 @@ llvm::SmallVector<Value> computeOffsetsBType(
     /* Hygon modify: adjust the offset add location to easy match ds_read2st_xxx inst
      * which OFFSET1 require OFFSET1 * 4|8 * 64 and can decrease register pressuer.
     **/
-    // for (int block = 0; block < numBlocks; ++block) {
-    //   int blockNonKOffset = block * nonKDim * warpsPerBlock;
-    //   for (int i = 0; i < mapping.size(); ++i) {
-    //     // swap row and col, because operand B layout is
-    //     // a transposed operand A layout
-    //     Value row = mapping[i][1];
-    //     Value col = add(mapping[i][0], i32_val(blockNonKOffset));
-    //     bOffsets[block * blockSize + i] =
-    //         computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
-    //   }
-    // }
+#if 0
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
-      Value offAdjust = mul(i32_val(blockNonKOffset), tStrides[rank - 2]);
+      for (int i = 0; i < mapping.size(); ++i) {
+        // swap row and col, because operand B layout is
+        // a transposed operand A layout
+        Value row = mapping[i][1];
+        Value col = b.add(mapping[i][0], b.i32_val(blockNonKOffset));
+        bOffsets[block * blockSize + i] = computeOffset(
+            rewriter, loc, row, col, smemObj, smemStrides, srcLayout);
+      }
+    }
+#endif
+    for (int block = 0; block < numBlocks; ++block) {
+      int blockNonKOffset = block * nonKDim * warpsPerBlock;
+      Value offAdjust = b.mul(b.i32_val(blockNonKOffset), tStrides[rank - 2]);
       for (int i = 0; i < mapping.size(); ++i) {
         // swap row and col, because operand B layout is
         // a transposed operand A layout
         Value row = mapping[i][1];
         Value col = mapping[i][0];
         bOffsets[block * blockSize + i] =
-            add(offAdjust,
-                computeOffset(rewriter, loc, row, col, smemObj, srcLayout));
+          b.add(offAdjust, computeOffset(rewriter, loc, row, col, smemObj, smemStrides, srcLayout));
       }
     }
   } else {
@@ -258,14 +271,14 @@ llvm::SmallVector<Value> computeOffsetsBType(
       // layout
       Value row = mapping[i][1];
       Value col = mapping[i][0];
-      inblockOffset[i] =
-          computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+      inblockOffset[i] = computeOffset(rewriter, loc, row, col, smemObj,
+                                       smemStrides, srcLayout);
     }
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
-      Value offAdjust = mul(i32_val(blockNonKOffset), tStrides[rank - 2]);
+      Value offAdjust = b.mul(b.i32_val(blockNonKOffset), tStrides[rank - 2]);
       for (int i = 0; i < mapping.size(); ++i)
-        bOffsets[block * blockSize + i] = add(offAdjust, inblockOffset[i]);
+        bOffsets[block * blockSize + i] = b.add(offAdjust, inblockOffset[i]);
     }
   }
   return bOffsets;

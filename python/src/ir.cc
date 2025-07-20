@@ -1,4 +1,4 @@
-#include <optional>
+﻿#include <optional>
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -1033,16 +1033,6 @@ void init_triton_ir(py::module &&m) {
              else
                return self.create<arith::ExtUIOp>(dstType, src);
            })
-      .def("create_to_index",
-           [](TritonOpBuilder &self, Value &input) -> Value {
-             return self.create<arith::IndexCastOp>(
-                 self.getBuilder().getIndexType(), input);
-           })
-      .def("create_index_to_si",
-           [](TritonOpBuilder &self, Value &input) -> Value {
-             return self.create<arith::IndexCastOp>(
-                 self.getBuilder().getI64Type(), input);
-           })
       .def("create_fmul",
            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
              return self.create<arith::MulFOp>(lhs, rhs);
@@ -1355,10 +1345,22 @@ void init_triton_ir(py::module &&m) {
              return self.create<ExperimentalDescriptorLoadOp>(
                  resTy, desc, indices, cacheModifier, evictionPolicy);
            })
+      .def("create_descriptor_gather",
+           [](TritonOpBuilder &self, Value desc, Value x_indices, Value y_index,
+              Type type) -> Value {
+             return self.create<ExperimentalDescriptorGatherOp>(
+                 type, desc, x_indices, y_index);
+           })
       .def("create_descriptor_store",
            [](TritonOpBuilder &self, Value desc, Value value,
               std::vector<Value> &indices) -> void {
              self.create<ExperimentalDescriptorStoreOp>(desc, value, indices);
+           })
+      .def("create_descriptor_scatter",
+           [](TritonOpBuilder &self, Value desc, Value value, Value x_indices,
+              Value y_index) -> void {
+             self.create<ExperimentalDescriptorScatterOp>(desc, x_indices,
+                                                          y_index, value);
            })
       .def("create_tensormap_create",
            [](TritonOpBuilder &self, Value desc_ptr, Value global_address,

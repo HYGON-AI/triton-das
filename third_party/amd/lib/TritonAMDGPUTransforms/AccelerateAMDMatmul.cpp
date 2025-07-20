@@ -155,7 +155,7 @@ warpsPerTileWMMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps) {
 FailureOr<MfmaInsn> chooseMfmaInstruction(RankedTensorType cType,
                                           Type aElemType, Type bElemType,
                                           int inputKSize, int mfmaVersion,
-                                          int enforcedNonKDim) {
+                                          bool allowXF32, int enforcedNonKDim) {
   // number of matrix elements along k dim per one MFMA intruction
   unsigned kDim = 0;
 
@@ -189,8 +189,8 @@ FailureOr<MfmaInsn> chooseMfmaInstruction(RankedTensorType cType,
   if (mDim == 0 || nDim == 0)
     return failure();
 
-  auto maybeMfmaInsn =
-      MfmaInsn::selectMfma(mDim, nDim, aElemType, bElemType, mfmaVersion);
+  auto maybeMfmaInsn = MfmaInsn::selectMfma(mDim, nDim, aElemType, bElemType,
+                                            mfmaVersion, allowXF32);
   if (failed(maybeMfmaInsn))
     llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -207,9 +207,12 @@ FailureOr<MfmaInsn> chooseMfmaInstruction(RankedTensorType cType,
 FailureOr<MfmaInsn> chooseMfmaInstruction(tt::DotOp dot, int mfmaVersion,
                                           int nonKDim) {
   RankedTensorType aType = dot.getA().getType();
+  bool allowXF32 =
+      dot.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
   return chooseMfmaInstruction(dot.getC().getType(), aType.getElementType(),
                                dot.getB().getType().getElementType(),
-                               aType.getShape().back(), mfmaVersion, nonKDim);
+                               aType.getShape().back(), mfmaVersion, allowXF32,
+                               nonKDim);
 }
 
 FailureOr<MfmaInsn> chooseMfmaInstruction(tt::DotScaledOp dot, int mfmaVersion,
@@ -217,9 +220,10 @@ FailureOr<MfmaInsn> chooseMfmaInstruction(tt::DotScaledOp dot, int mfmaVersion,
   // For scaled dot, we handle it with fp16 or bf16 emulation for now.
   Builder b(dot.getContext());
   Type elemType = useFp16 ? b.getF16Type() : b.getBF16Type();
-  return chooseMfmaInstruction(
-      dot.getC().getType(), /*aElemType=*/elemType, /*bElemType=*/elemType,
-      dot.getLhs().getType().getShape().back(), mfmaVersion, nonKDim);
+  return chooseMfmaInstruction(dot.getC().getType(), /*aElemType=*/elemType,
+                               /*bElemType=*/elemType,
+                               dot.getLhs().getType().getShape().back(),
+                               mfmaVersion, /*allowXF32=*/false, nonKDim);
 }
 
 using OperandTypesVector = SmallVector<Type, 4>;
@@ -473,8 +477,9 @@ public:
     // store instructions, except for fp8 matmul kernels due to regression
     // TODO (lixun): investigate the regression and enable this feature again
     auto aElemTy = mfmaInstr.getElementTypeA();
-    bool isFP8 = aElemTy.isFloat8E5M2FNUZ() || aElemTy.isFloat8E4M3FNUZ();
+    bool isFP8 = llvm::isa<Float8E5M2FNUZType, Float8E4M3FNUZType>(aElemTy);
     // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
+    // bool isTransposed = isChainDot(dotOp) || !isFP8;
     bool isTransposed = !isMfmaMmacHCU(mfmaMmacVersion) && (isChainDot(dotOp) || !isFP8);
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
@@ -973,7 +978,7 @@ public:
     default:
       break;
     }
-    if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
+    if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
     decomposeMixedModeDotOp(m);

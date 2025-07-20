@@ -53,8 +53,6 @@ class HIPOptions:
     default_dot_input_precision: str = "ieee"
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     enable_fp_fusion: bool = True
-    # TODO: Implement cooperative grid launch for AMD:
-    # See: https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Driver_API_functions_supported_by_HIP.html
     launch_cooperative_grid: bool = False
     matrix_instr_nonkdim: int = 0
     kpack: int = 1
@@ -122,6 +120,12 @@ class HIPBackend(BaseBackend):
 
     def parse_options(self, opts) -> Any:
         args = {'arch': os.getenv("TRITON_OVERRIDE_ARCH", self.target.arch)}
+
+        # Enable XF32 (TF32) for CDNA3 GPUs
+        if self.target.arch in ('gfx940', 'gfx941', 'gfx942'):
+            allowed_dot_input_precisions = set(HIPOptions.allowed_dot_input_precisions)
+            allowed_dot_input_precisions.update({'tf32'})
+            args["allowed_dot_input_precisions"] = tuple(sorted(allowed_dot_input_precisions))
 
         if "supported_fp8_dtypes" not in opts:
             supported_fp8_dtypes = set(HIPOptions.supported_fp8_dtypes)
@@ -305,6 +309,7 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
 
         stream_prefetch = os.getenv("TRITON_HIP_STREAM_PREFETCH", "0") == "1"
+        use_buffer_ops = os.environ.get("AMDGCN_USE_BUFFER_OPS", "0") == "1"
 
         # The `local-prefetch` scheduling variant requires turning on buffer ops.
         if options.instruction_sched_variant == "local-prefetch":
@@ -333,7 +338,7 @@ class HIPBackend(BaseBackend):
         if use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
             passes.common.add_canonicalizer(pm)
-            amd.passes.ttgpuir.add_convert_to_buffer_ops(pm)
+            amd.passes.ttgpuir.add_convert_to_buffer_ops(pm, options.arch)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)

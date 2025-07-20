@@ -22,7 +22,6 @@ void lowerDistributedToShared(
     std::pair<size_t, Type> *const llvmOpCount = nullptr) {
   auto srcTy = cast<RankedTensorType>(src.getType());
   auto dstTy = cast<MemDescType>(dst.getType());
-  auto outOrd = mlir::cast<SharedEncodingAttr>(dstTy.getEncoding()).getOrder();
   auto elemTy = typeConverter->convertType(srcTy.getElementType());
 
   auto inVals = unpackLLElements(loc, adaptorSrc, rewriter);
@@ -40,6 +39,7 @@ struct GlobalScratchAllocOpConversion
   matchAndRewrite(triton::gpu::GlobalScratchAllocOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
 
     auto opOffsetAttr = op->getAttrOfType<mlir::IntegerAttr>(
         "ttg.global_scratch_memory_offset");
@@ -51,7 +51,7 @@ struct GlobalScratchAllocOpConversion
       return failure();
     }
     Value ptr =
-        LLVM::getGlobalScratchPtr(loc, rewriter, funcOp, i32_val(opOffset));
+        LLVM::getGlobalScratchPtr(loc, rewriter, funcOp, b.i32_val(opOffset));
 
     rewriter.replaceOp(op, ptr);
     return success();
@@ -80,9 +80,8 @@ struct LocalAllocOpConversion
         cast<triton::gpu::SharedEncodingAttr>(resultTy.getEncoding());
 
     auto llvmElemTy = typeConverter->convertType(resultTy.getElementType());
-    auto shapePerCTA = getShapePerCTA(sharedLayout, resultTy.getShape());
-    auto smemObj = SharedMemoryObject(smemBase, llvmElemTy, shapePerCTA,
-                                      sharedLayout, loc, rewriter);
+    auto smemObj = SharedMemoryObject(smemBase, llvmElemTy, resultTy.getRank(),
+                                      loc, rewriter);
     // If there is an initial tensor, store it into the shared memory.
     if (op.getSrc()) {
       lowerDistributedToShared(loc, op.getSrc(), op.getResult(),

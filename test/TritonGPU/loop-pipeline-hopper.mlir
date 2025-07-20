@@ -719,6 +719,28 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 }
 
 // -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>
+#blocked1 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tma_store_pipeline
+  tt.func public @tma_store_pipeline(%arg0: tensor<8x128xf32, #blocked>, %arg1: !tt.tensordesc<tensor<1x128xf32>>, %arg2: i32, %arg3: i32) attributes {noinline = false} {
+    %c0_i32 = arith.constant 0 : i32
+    scf.for %arg4 = %c0_i32 to %arg3 step %arg2  : i32 {
+      %1 = arith.divsi %arg4, %arg2 : i32
+      %2 = tt.splat %1 : i32 -> tensor<8xi32, #blocked1>
+      // CHECK: ttng.async_tma_store_wait {pendings = 0 : i32}
+      // CHECK-NEXT: ttg.local_store
+      // CHECK-NEXT: ttng.fence_async_shared
+      // CHECK-NEXT: ttng.tensor_desc_to_tma_ptr
+      // CHECK-NEXT: ttng.async_tma_scatter
+      tt.experimental_descriptor_scatter %arg1[%2, %1], %arg0 : !tt.tensordesc<tensor<1x128xf32>>, tensor<8xi32, #blocked1>, i32, tensor<8x128xf32, #blocked>
+    }
+    tt.return
+  }
+}
+
+// -----
 #blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
@@ -1005,5 +1027,54 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
       scf.yield %21, %25, %26 : tensor<128x16xf32, #mma>, tensor<128x64x!tt.ptr<f16>, #blocked1>, tensor<64x16x!tt.ptr<f16>, #blocked>
     }
     tt.return %17#0 : tensor<128x16xf32, #mma>
+  }
+}
+
+// -----
+
+#shared = #ttg.shared<{vec = 16, perPhase = 2, maxPhase = 4, order = [1, 0], hasLeadingOffset = true}>
+#shared1 = #ttg.shared<{vec = 16, perPhase = 2, maxPhase = 4, order = [0, 1], hasLeadingOffset = true}>
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 2], order = [1, 0]}>
+#mma = #ttg.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [8, 1], instrShape = [16, 64, 32]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @mmav3_fp8_row_major_rhs(%arg0: !tt.ptr<i8, 0> {tt.nv_tma_desc = 1 : i32}, %arg1: !tt.ptr<i8, 0> {tt.nv_tma_desc = 1 : i32}, %arg2: !tt.ptr<i8, 0> {tt.nv_tma_desc = 1 : i32}, %arg3: i32 {tt.divisibility = 16 : i32}, %arg4: i32 {tt.divisibility = 16 : i32}, %arg5: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    // CHECK-LABEL: mmav3_fp8_row_major_rhs
+    // The col-major RHS SMEM encoding in the input, created by accelerate-matmul, should be overwritten by the row-major TMA layout.
+    // Note that this "overwriting" makes the program invalid after SWP, since warp_group_dot does not support row-major fp8 RHS.
+    // In this case, the TMA load on B should not be pipelined. When this bug is fixed, this test should be rewritten to verify that.
+    // CHECK-NOT: order = [0, 1]
+    %c128_i32 = arith.constant 128 : i32
+    %c64_i32 = arith.constant 64 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c127_i32 = arith.constant 127 : i32
+    %c63_i32 = arith.constant 63 : i32
+    %cst = arith.constant dense<0.000000e+00> : tensor<128x64xf32, #mma>
+    %0 = tt.get_program_id x : i32
+    %1 = arith.addi %arg3, %c127_i32 : i32
+    %2 = arith.divsi %1, %c128_i32 : i32
+    %3 = arith.remsi %0, %2 : i32
+    %4 = arith.divsi %0, %2 : i32
+    %5 = arith.muli %3, %c128_i32 : i32
+    %6 = arith.muli %4, %c64_i32 : i32
+    %7 = arith.addi %arg5, %c63_i32 : i32
+    %8 = arith.divsi %7, %c64_i32 : i32
+    %9 = tt.reinterpret_tensor_descriptor %arg0 : !tt.ptr<i8, 0> to !tt.tensordesc<tensor<128x64xf8E4M3FN>>
+    %10 = tt.reinterpret_tensor_descriptor %arg1 : !tt.ptr<i8, 0> to !tt.tensordesc<tensor<64x64xf8E4M3FN>>
+    %true = arith.constant true
+    %false = arith.constant false
+    %11:2 = scf.for %arg6 = %c0_i32 to %8 step %c1_i32 iter_args(%arg7 = %cst, %arg8 = %c0_i32) -> (tensor<128x64xf32, #ttg.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [8, 1], instrShape = [16, 64, 32]}>>, i32)  : i32 {
+      %14 = tt.experimental_descriptor_load %9[%5, %arg8] : !tt.tensordesc<tensor<128x64xf8E4M3FN>> -> tensor<128x64xf8E4M3FN, #blocked>
+      %15 = ttg.local_alloc %14 : (tensor<128x64xf8E4M3FN, #blocked>) -> !ttg.memdesc<128x64xf8E4M3FN, #shared, #ttg.shared_memory>
+      %16 = tt.experimental_descriptor_load %10[%arg8, %6] : !tt.tensordesc<tensor<64x64xf8E4M3FN>> -> tensor<64x64xf8E4M3FN, #blocked>
+      %17 = ttg.local_alloc %16 : (tensor<64x64xf8E4M3FN, #blocked>) -> !ttg.memdesc<64x64xf8E4M3FN, #shared1, #ttg.shared_memory>
+      %18 = ttng.warp_group_dot %15, %17, %arg7 {inputPrecision = 0 : i32, maxNumImpreciseAcc = 1073741824 : i32} : !ttg.memdesc<128x64xf8E4M3FN, #shared, #ttg.shared_memory> * !ttg.memdesc<64x64xf8E4M3FN, #shared1, #ttg.shared_memory> -> tensor<128x64xf32, #mma>
+      %19 = arith.addi %arg8, %c64_i32 : i32
+      scf.yield %18, %19 : tensor<128x64xf32, #mma>, i32
+    }
+    %12 = ttg.convert_layout %11#0 : tensor<128x64xf32, #mma> -> tensor<128x64xf32, #blocked>
+    %13 = tt.reinterpret_tensor_descriptor %arg2 : !tt.ptr<i8, 0> to !tt.tensordesc<tensor<128x64xf32>>
+    tt.experimental_descriptor_store %13[%5, %6], %12 : !tt.tensordesc<tensor<128x64xf32>>, tensor<128x64xf32, #blocked>
+    tt.return
   }
 }

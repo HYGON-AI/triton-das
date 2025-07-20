@@ -37,15 +37,16 @@ bool isSwizzled(SharedEncodingAttr layout) { return layout.getMaxPhase() != 1; }
 SmallVector<Value> swizzleIndices(ConversionPatternRewriter &rewriter,
                                   Location loc, SmallVector<Value> rawIndices,
                                   SharedEncodingAttr layout) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   const auto &order = layout.getOrder();
   auto rank = order.size();
 
   if (!isSwizzled(layout))
     return rawIndices;
 
-  auto vec = i32_val(layout.getVec());
-  auto perPhase = i32_val(layout.getPerPhase());
-  auto maxPhase = i32_val(layout.getMaxPhase());
+  auto vec = b.i32_val(layout.getVec());
+  auto perPhase = b.i32_val(layout.getPerPhase());
+  auto maxPhase = b.i32_val(layout.getMaxPhase());
 
   auto fastIdx = rawIndices[order[0]];
   auto secondIdx = rawIndices[order[1]];
@@ -53,10 +54,10 @@ SmallVector<Value> swizzleIndices(ConversionPatternRewriter &rewriter,
   // swizzledGroup = ((fastIdx // vec) ^ phase) * vec
   // groupRemainder = fastIdx % vec
   // colOff = swizzledGroup + groupRemainder
-  auto phase = urem(udiv(secondIdx, perPhase), maxPhase);
-  auto swizzledGroup = mul(xor_(udiv(fastIdx, vec), phase), vec);
-  auto groupRemainder = urem(fastIdx, vec);
-  auto colOff = add(swizzledGroup, groupRemainder);
+  auto phase = b.urem(b.udiv(secondIdx, perPhase), maxPhase);
+  auto swizzledGroup = b.mul(b.xor_(b.udiv(fastIdx, vec), phase), vec);
+  auto groupRemainder = b.urem(fastIdx, vec);
+  auto colOff = b.add(swizzledGroup, groupRemainder);
 
   SmallVector<Value> swizzledIndices = rawIndices;
   swizzledIndices[order[0]] = colOff;
@@ -80,6 +81,7 @@ void storeValuesInLinearVector(PatternRewriter &rewriter, Location loc,
                                unsigned kIdx, unsigned nonKIdx, unsigned bIdx,
                                const DimIdx &dim, int vecDim,
                                ArrayRef<unsigned> opOrder) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto vecTy = cast<VectorType>(vec.getType());
   auto vectorSize = vecTy.getNumElements();
   auto elemTy = vecTy.getElementType();
@@ -91,7 +93,7 @@ void storeValuesInLinearVector(PatternRewriter &rewriter, Location loc,
     spatialIdx[vecDim] += elem;
 
     unsigned linearIdx = linearize(spatialIdx, perThreadTileShape, opOrder);
-    opValues[linearIdx] = extract_element(elemTy, vec, i32_val(elem));
+    opValues[linearIdx] = b.extract_element(elemTy, vec, b.i32_val(elem));
   }
 }
 
@@ -116,9 +118,10 @@ Value getUnswizzledFirstElemOffset(ConversionPatternRewriter &rewriter,
                                    Location loc, unsigned B, unsigned NonK,
                                    Value bTileOffset, Value nonKTileOffset,
                                    Value bStride, Value nonKStride) {
-  auto bOffset = mul(urem(bTileOffset, i32_val(B)), bStride);
-  auto nonKOffset = mul(urem(nonKTileOffset, i32_val(NonK)), nonKStride);
-  Value threadIdDependantOffset = add(bOffset, nonKOffset);
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto bOffset = b.mul(b.urem(bTileOffset, b.i32_val(B)), bStride);
+  auto nonKOffset = b.mul(b.urem(nonKTileOffset, b.i32_val(NonK)), nonKStride);
+  Value threadIdDependantOffset = b.add(bOffset, nonKOffset);
   return threadIdDependantOffset;
 }
 
@@ -154,14 +157,15 @@ Value computeSwizzledOffset(ConversionPatternRewriter &rewriter, Location loc,
                             SharedEncodingAttr sharedLayout,
                             ArrayRef<int64_t> opTensorShape,
                             ArrayRef<Value> strides) {
-  Value offset = i32_val(0);
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Value offset = b.i32_val(0);
   // Compute unswizzled multi dim coordinates in shared memory object
   SmallVector<Value> elemMultiDimIndices(3);
   elemMultiDimIndices[dim.batch] =
-      add(bTileOffset, i32_val(i.bTile * shapePerCTABTile + i.b));
-  elemMultiDimIndices[dim.nonK] =
-      add(nonKTileOffset, i32_val(i.nonKTile * shapePerCTANonKTile + i.nonK));
-  elemMultiDimIndices[dim.k] = i32_val(i.k);
+      b.add(bTileOffset, b.i32_val(i.bTile * shapePerCTABTile + i.b));
+  elemMultiDimIndices[dim.nonK] = b.add(
+      nonKTileOffset, b.i32_val(i.nonKTile * shapePerCTANonKTile + i.nonK));
+  elemMultiDimIndices[dim.k] = b.i32_val(i.k);
 
   // Apply swizzling pattern to fastest dimension
   SmallVector<Value> swizzledIndices =
@@ -170,9 +174,10 @@ Value computeSwizzledOffset(ConversionPatternRewriter &rewriter, Location loc,
   // Linearize shared mem object dimensions into flat offset
   for (int d = 0; d < 3; ++d) {
     // wrap index if it is larger than tensor
-    auto wrappedDimIndex = urem(swizzledIndices[d], i32_val(opTensorShape[d]));
-    auto dimOffset = mul(wrappedDimIndex, strides[d]);
-    offset = add(offset, dimOffset);
+    auto wrappedDimIndex =
+        b.urem(swizzledIndices[d], b.i32_val(opTensorShape[d]));
+    auto dimOffset = b.mul(wrappedDimIndex, strides[d]);
+    offset = b.add(offset, dimOffset);
   }
   return offset;
 }
@@ -185,16 +190,17 @@ Value computeNonSwizzledOffset(ConversionPatternRewriter &rewriter,
                                unsigned shapePerCTABTile,
                                unsigned shapePerCTANonKTile,
                                ArrayRef<Value> strides) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> offsetIndices(3);
   offsetIndices[dim.batch] =
-      i32_val((i.bTile * shapePerCTABTile + i.b) % tensorShape[dim.batch]);
-  offsetIndices[dim.nonK] = i32_val(
+      b.i32_val((i.bTile * shapePerCTABTile + i.b) % tensorShape[dim.batch]);
+  offsetIndices[dim.nonK] = b.i32_val(
       (i.nonKTile * shapePerCTANonKTile + i.nonK) % tensorShape[dim.nonK]);
-  offsetIndices[dim.k] = i32_val(i.k);
+  offsetIndices[dim.k] = b.i32_val(i.k);
 
-  Value offset = i32_val(0);
+  Value offset = b.i32_val(0);
   for (int d = 0; d < 3; ++d)
-    offset = add(offset, mul(offsetIndices[d], strides[d]));
+    offset = b.add(offset, b.mul(offsetIndices[d], strides[d]));
   return offset;
 }
 
@@ -213,6 +219,7 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
                 Value thread, Location loc,
                 const LLVMTypeConverter *typeConverter,
                 ConversionPatternRewriter &rewriter, const int dotOpNo) {
+  auto tb = TritonLLVMOpBuilder(loc, rewriter);
   if (!verifyCTALayout(dLayout.getCTALayout()))
     return Value();
 
@@ -231,7 +238,7 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
       rewriter);
   auto smem = getExpandedSharedMemoryObject(rewriter, loc, origSmem,
                                             opTensorTy.getShape());
-  auto strides = smem.strides;
+  auto smemStrides = origSmem.getStrides(opTensorTy, loc, rewriter);
   int B = opTensorShape[dim.batch];
   int K = opTensorShape[dim.k];
   int NonK = opTensorShape[dim.nonK];
@@ -247,9 +254,9 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
   auto warpsPerCTA =
       expandMatrixShapeWithBatch(ArrayRef(dLayout.getWarpsPerCTA()));
 
-  auto warpSize = i32_val(triton::gpu::getWarpSize(dLayout));
-  auto laneId = urem(thread, warpSize);
-  auto warpId = udiv(thread, warpSize);
+  auto warpSize = tb.i32_val(triton::gpu::getWarpSize(dLayout));
+  auto laneId = tb.urem(thread, warpSize);
+  auto warpId = tb.udiv(thread, warpSize);
   auto laneIds =
       mlir::LLVM::delinearize(rewriter, loc, laneId, threadsPerWarp, opOrder);
   auto warpIds =
@@ -258,16 +265,16 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
   auto sizePerWarpNonK = sizePerThread[dim.nonK] * threadsPerWarp[dim.nonK];
 
   Value bTileOffset =
-      mul(laneIds[dim.batch], i32_val(sizePerThread[dim.batch]));
+      tb.mul(laneIds[dim.batch], tb.i32_val(sizePerThread[dim.batch]));
   bTileOffset =
-      add(bTileOffset, mul(warpIds[dim.batch], i32_val(sizePerWarpB)));
+      tb.add(bTileOffset, tb.mul(warpIds[dim.batch], tb.i32_val(sizePerWarpB)));
   Value nonKTileOffset =
-      mul(laneIds[dim.nonK], i32_val(sizePerThread[dim.nonK]));
-  nonKTileOffset =
-      add(nonKTileOffset, mul(warpIds[dim.nonK], i32_val(sizePerWarpNonK)));
+      tb.mul(laneIds[dim.nonK], tb.i32_val(sizePerThread[dim.nonK]));
+  nonKTileOffset = tb.add(
+      nonKTileOffset, tb.mul(warpIds[dim.nonK], tb.i32_val(sizePerWarpNonK)));
 
   auto elemTy = typeConverter->convertType(opTensorTy.getElementType());
-  Type ptrTy = smem.base.getType();
+  Type ptrTy = smem.getBase().getType();
 
   auto sharedOrder = expandMatrixOrderWithBatch(sharedLayout.getOrder());
   // compute contiguity of fastest dimension in shared layout.
@@ -315,12 +322,12 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
   // non-constant part
   Value basePtr;
   if (swizzlePath) {
-    basePtr = smem.base;
+    basePtr = smem.getBase();
   } else {
     auto laneOffset = getUnswizzledFirstElemOffset(
-        rewriter, loc, B, NonK, bTileOffset, nonKTileOffset, strides[dim.batch],
-        strides[dim.nonK]);
-    basePtr = gep(ptrTy, elemTy, smem.base, laneOffset);
+        rewriter, loc, B, NonK, bTileOffset, nonKTileOffset,
+        smemStrides[dim.batch], smemStrides[dim.nonK]);
+    basePtr = tb.gep(ptrTy, elemTy, smem.getBase(), laneOffset);
   }
 
   // This loop nest iterates over all values loaded in one thread across batch,
@@ -335,7 +342,7 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
         for (unsigned nonKTile = 0; nonKTile < numNonKTiles; ++nonKTile)
           for (unsigned nonK = 0; nonK < sizeNonKPerThread;
                nonK += dimStep[dim.nonK]) {
-            Value offset = i32_val(0);
+            Value offset = tb.i32_val(0);
             Indexes idx = {bTile, b, k, nonKTile, nonK};
 
             // swizzled variant is more general, but it limits optimization of
@@ -344,15 +351,15 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
               offset = computeSwizzledOffset(
                   rewriter, loc, idx, dim, bTileOffset, nonKTileOffset,
                   shapePerCTABTile, shapePerCTANonKTile, sharedLayout,
-                  opTensorShape, strides);
+                  opTensorShape, smemStrides);
             } else {
-              offset = computeNonSwizzledOffset(rewriter, loc, idx, dim,
-                                                opTensorShape, shapePerCTABTile,
-                                                shapePerCTANonKTile, strides);
+              offset = computeNonSwizzledOffset(
+                  rewriter, loc, idx, dim, opTensorShape, shapePerCTABTile,
+                  shapePerCTANonKTile, smemStrides);
             }
 
-            Value elemAddr = gep(ptrTy, elemTy, basePtr, offset);
-            Value vec = load(vecTy, elemAddr);
+            Value elemAddr = tb.gep(ptrTy, elemTy, basePtr, offset);
+            Value vec = tb.load(vecTy, elemAddr);
             storeValuesInLinearVector(
                 rewriter, loc, opValues, vec, perThreadShape, /*kIdx*/ k,
                 /*nonKIdx*/ nonKTile * sizeNonKPerThread + nonK,
