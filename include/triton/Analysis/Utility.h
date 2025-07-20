@@ -161,6 +161,8 @@ public:
 
   // Get the shared memory scratch size required by this op.
   unsigned getScratchSizeInBytes();
+  // Determine if the gather can be performed completely within a warp.
+  bool isWarpLocal();
 
 private:
   triton::GatherOp gatherOp;
@@ -194,8 +196,6 @@ getReshapeDecomposition(ArrayRef<int64_t> srcShape, ArrayRef<int64_t> dstShape);
 // Returns the number of elements in the scratch space needed.
 // If shape is empty, it means no shared memory is needed.
 unsigned getNumScratchElements(ArrayRef<unsigned> shape);
-
-bool supportMFMA(triton::DotOp op);
 
 bool supportWMMA(triton::DotOp op);
 
@@ -232,6 +232,11 @@ bool isMmacV1ToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
 // Return true if the src and dst layout match.
 bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
                                    RankedTensorType dstTy);
+
+// Check if MFMA layout can be converted to the dot operand
+// layout using warp shuffle.
+bool matchMFMAAndDotOperandShuffleCase(RankedTensorType srcTy,
+                                       RankedTensorType dstTy);
 
 // TODO: Move utility functions that belong to ConvertLayoutOp to class
 // ConvertLayoutOpHelper in the future

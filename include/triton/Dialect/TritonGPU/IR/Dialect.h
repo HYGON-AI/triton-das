@@ -11,14 +11,60 @@
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 
+// LinearLayoutCache Utils
+using CacheKey =
+    std::tuple<std::vector<int64_t>, mlir::Attribute, std::optional<int32_t>>;
+
+namespace llvm {
+template <typename T> size_t hash_value(const std::vector<T> &vec) {
+  return hash_combine_range(vec.begin(), vec.end());
+}
+} // namespace llvm
+
+namespace std {
+template <> struct hash<CacheKey> {
+  size_t operator()(const CacheKey &key) const noexcept {
+    using llvm::hash_value;
+    size_t seed = 0;
+    std::apply(
+        [&seed](const auto &...elems) {
+          ((seed = llvm::hash_combine(seed, hash_value(elems))), ...);
+        },
+        key);
+    return seed;
+  }
+};
+} // namespace std
+
+namespace mlir::triton::gpu {
+
+class LinearLayoutCache {
+public:
+  std::optional<LinearLayout> get(const CacheKey &key) {
+    std::shared_lock lock(mutex);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  void set(CacheKey key, LinearLayout result) {
+    std::scoped_lock lock(mutex);
+    cache.emplace(std::move(key), std::move(result));
+  }
+
+private:
+  std::unordered_map<CacheKey, LinearLayout> cache;
+  llvm::sys::SmartRWMutex<true> mutex;
+};
+} // namespace mlir::triton::gpu
+
 #define GET_OP_CLASSES
 #include "triton/Dialect/TritonGPU/IR/Dialect.h.inc"
 #include "triton/Dialect/TritonGPU/IR/Ops.h.inc"
 
-namespace mlir {
-namespace triton {
-namespace gpu {
-
+namespace mlir::triton::gpu {
 struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
   StringRef getName() final { return "<SharedMemory>"; }
 };
@@ -214,7 +260,12 @@ LinearLayout ensureLayoutNotSmallerThan(
     const LinearLayout &layout,
     const llvm::SmallDenseMap<StringAttr, int64_t> &shape);
 
+// Return a vector of the standard out dimension names for tensor layouts. These
+// are "dim0", "dim1", etc.
 SmallVector<StringAttr> standardOutDimNames(MLIRContext *ctx, int rank);
+// Return an identity mapping from `inDimName` to the standard out dimensions,
+// with the dimensions sized according to the shape. The bases are sorted
+// according to `order`, with the most minor dimension first.
 LinearLayout identityStandardND(StringAttr inDimName, ArrayRef<unsigned> shape,
                                 ArrayRef<unsigned> order);
 
@@ -229,8 +280,12 @@ void dumpHWLayout(RankedTensorType tensorType);
 // Return a string representation of the layout of the tensor.
 std::string getLayoutStr(RankedTensorType tensorType, bool useHWPointOfView);
 
-} // namespace gpu
-} // namespace triton
-} // namespace mlir
+template <typename T>
+llvm::SmallVector<T> expandMatrixShapeWithBatch(llvm::ArrayRef<T> s);
+
+llvm::SmallVector<unsigned>
+expandMatrixOrderWithBatch(llvm::ArrayRef<unsigned> o);
+
+} // namespace mlir::triton::gpu
 
 #endif // TRITON_DIALECT_TRITONGPU_IR_DIALECT_H_

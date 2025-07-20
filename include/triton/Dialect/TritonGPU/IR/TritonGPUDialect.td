@@ -17,7 +17,6 @@ def TritonGPU_Dialect : Dialect {
   let dependentDialects = [
     "triton::TritonDialect",
     "mlir::gpu::GPUDialect",
-    "tensor::TensorDialect",
   ];
 
   let extraClassDeclaration = [{
@@ -44,6 +43,13 @@ def TritonGPU_Dialect : Dialect {
       }
       return cast<IntegerAttr>(threadsPerWarp).getInt();
     }
+
+    std::optional<LinearLayout>
+    toLinearLayout(ArrayRef<int64_t> shape, Attribute layout,
+                   std::optional<int32_t> elemBitWidth);
+
+    private:
+      LinearLayoutCache llCache;
   }];
 
   let useDefaultTypePrinterParser = 1;

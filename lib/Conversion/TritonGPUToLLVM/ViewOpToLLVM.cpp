@@ -173,7 +173,7 @@ struct SplitOpConversion : public ConvertOpToLLVMPattern<SplitOp> {
     // verifier):
     //
     // - The op has a blocked encoding.
-    // - The last dimension (the one we're spliting) has sizePerThread=2,
+    // - The last dimension (the one we're splitting) has sizePerThread=2,
     // threadPerWarp=1 and warpPerBlock=1.
     //
     // With these invariants, split is trivial: We can count how many contiguous
@@ -394,7 +394,7 @@ struct MemDescSubviewOpConversion
     int rankReduced = srcTy.getRank() - destRank;
     for (int i = rankReduced; i < opOffsetVals.size(); i++) {
       strides.push_back(smemObj.strides[i]);
-      offsetVals.push_back(opOffsetVals[i]);
+      offsetVals.push_back(add(opOffsetVals[i], smemObj.offsets[i]));
     }
     // Compute the offset based on the original strides of the shared memory
     // object
