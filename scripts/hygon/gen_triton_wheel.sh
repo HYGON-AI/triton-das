@@ -5,10 +5,13 @@ cd $CUR_PATH/../../python
 export DEBUG=OFF
 
 source ${CUR_PATH}/launch.sh
-build_llvm
 
 function usage() {
-  echo "--release - To Specify release the triton wheel package"
+  echo "--release - To specify release the triton wheel package"
+  echo "--llvm_repo - To specify the triton-llvm repo, such as ssh://git@10.65.42.70:8022/buhui/llvm-project.git"
+  echo "--file_server_ip - To specify the ip of file server, such as 10.65.42.71"
+  echo "--file_server_user - To specify the user of file server"
+  echo "--file_server_pwd - To specify the password of file server user"
 }
 
 BRANCH_TAG=$(git rev-parse --abbrev-ref HEAD | sed 's/\//./g')
@@ -19,6 +22,18 @@ while [ $# -gt 0 ]; do
   if [ "$1" == "--release" ]; then
     RELEASE="true"
     shift 1
+  elif [ "$1" == "--llvm_repo" ]; then
+    LLVM_REPO=$2
+    shift 2
+  elif [ "$1" == "--file_server_ip" ]; then
+    SERVER_IP=$2
+    shift 2
+  elif [ "$1" == "--file_server_user" ]; then
+    SERVER_USER=$2
+    shift 2
+  elif [ "$1" == "--file_server_pwd" ]; then
+    SERVER_PWD=$2
+    shift 2
   else
     echo -e "\nArgument Error!!!\n"
     usage
@@ -26,6 +41,8 @@ while [ $# -gt 0 ]; do
     return
   fi
 done
+
+build_llvm "${LLVM_REPO}" "${SERVER_IP}" "${SERVER_USER}" "${SERVER_PWD}"
 
 if [[ ${RELEASE} == "true" ]]; then
   PYTHON_LIST=(

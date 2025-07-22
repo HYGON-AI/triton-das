@@ -176,12 +176,17 @@ function clean_cache() {
 }
 
 function build_llvm() {
+  if [ $# -ne 4 ]; then
+    echo "Error: 4 arguments required"
+    return -1
+  fi
+  # Use default value for function arguments
+  repo=${1:-"ssh://git@10.65.42.70:8022/buhui/llvm-project.git"}
+  package_server=${2:-"10.65.42.71"}
+  package_user=${3:-"sw-builder"}
+  password=${4:-"swadmin"}
   pushd ${SRC_HOME}
-  repo="ssh://git@192.168.140.75:8022/buhui/llvm-project.git"
-  package_server="192.168.162.66"
   package_path="/builds/ai_compiler/llvm4triton"
-  package_user="sw-builder"
-  password="swadmin"
   hash=`grep -m 1 -v '^$' cmake/llvm-hash.txt`
   hash=${hash:0:8}
   platform=$(cat /etc/*release | grep '^ID=' | awk -F '=' '{print $2}' | tr -d '"')

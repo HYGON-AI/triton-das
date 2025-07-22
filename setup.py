@@ -236,7 +236,7 @@ def get_llvm_package_info():
     # Create a stable symlink that doesn't include revision
     sym_name = f"llvm-{system_suffix}"
     # url = f"https://oaitriton.blob.core.windows.net/public/llvm-builds/{name}.tar.gz"
-    url = f"http://192.168.162.66/builds/ai_compiler/llvm4triton/{name}.tar.gz"
+    url = f"http://10.65.42.71/builds/ai_compiler/llvm4triton/{name}.tar.gz"
     return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH", sym_name=sym_name)
 
 
