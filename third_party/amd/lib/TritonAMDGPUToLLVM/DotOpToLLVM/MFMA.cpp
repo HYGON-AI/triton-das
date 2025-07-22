@@ -335,10 +335,12 @@ struct DotOpMFMAConversionHelper {
     bool preserveBF16 = intrinsicName.contains(".bf16") && mfmaVersion >= 4;
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
-        aTensorTy.getElementType(), allowXF32, preserveBF16, isMmacHCU);
+        aTensorTy.getElementType(), allowXF32, preserveBF16, /*isConstantScale=*/false,
+        isMmacHCU);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
-        aTensorTy.getElementType(), allowXF32, preserveBF16, isMmacHCU);
+        aTensorTy.getElementType(), allowXF32, preserveBF16, /*isConstantScale=*/false,
+        isMmacHCU);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -484,7 +486,7 @@ struct DotOpMFMAConversionHelper {
   /// appropriate for mfma instructions
   virtual SmallVector<ValueTable> getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int n0, int n1, int kWidth, int kBase, Type type,
-      bool allowXF32, bool preserveBF16, bool isMmacHCU = false, bool isConstantScale = false) const {
+      bool allowXF32, bool preserveBF16, bool isConstantScale = false, bool isMmacHCU = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     int kpack = kWidth / kBase;

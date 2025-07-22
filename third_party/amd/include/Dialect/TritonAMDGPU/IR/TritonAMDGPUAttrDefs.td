@@ -73,9 +73,8 @@ class TritonAMDGPU_I32EnumAttr<string mnemonic, TritonAMDGPU_I32Enum enumInfo> :
 }
 
 def SchedHintCaseNone : I32EnumAttrCase<"none", 0>;
-def SchedHintCaseLLVMIglp0 : I32EnumAttrCase<"llvm_iglp_0", 1>;
-def SchedHintCaseLLVMIglp1 : I32EnumAttrCase<"llvm_iglp_1", 2>;
-def SchedHintCaseLocalPrefetch : I32EnumAttrCase<"local_prefetch", 3>;
+def SchedHintCaseLocalPrefetch : I32EnumAttrCase<"local_prefetch", 1>;
+def SchedHintCaseAttention : I32EnumAttrCase<"attention", 2>;
 // TODO: This is an iglp extension for HCUs and should be moved to the hcu-specific file
 //       when hcu backend is ready.
 def SchedHintCaseLLVMIglp8: I32EnumAttrCase<"llvm_iglp_8", 8>;
@@ -83,9 +82,8 @@ def SchedHintCaseLLVMIglp8: I32EnumAttrCase<"llvm_iglp_8", 8>;
 def TritonAMDGPU_SchedHintsEnum : TritonAMDGPU_I32Enum<
   "SchedHint", "Instruction Scheduling Hints for AMD GPUs", [
     SchedHintCaseNone,
-    SchedHintCaseLLVMIglp0,
-    SchedHintCaseLLVMIglp1,
     SchedHintCaseLocalPrefetch,
+    SchedHintCaseAttention,
     SchedHintCaseLLVMIglp8,     // TODO: Move to HCU-specific file.
   ]>;
 

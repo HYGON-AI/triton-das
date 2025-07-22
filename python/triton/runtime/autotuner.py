@@ -4,6 +4,8 @@ import builtins
 import os
 import time
 import inspect
+import hashlib
+import json
 from typing import Dict, Tuple, List, Optional
 
 from .jit import KernelInterface
@@ -13,24 +15,9 @@ from .driver import driver
 
 class Autotuner(KernelInterface):
 
-    def __init__(
-        self,
-        fn,
-        arg_names,
-        configs,
-        key,
-        reset_to_zero,
-        restore_value,
-        pre_hook=None,
-        post_hook=None,
-        prune_configs_by: Optional[Dict] = None,
-        warmup=None,
-        rep=None,
-        use_cuda_graph=False,
-        do_bench=None,
-        perf_debug=False,
-        perf_profiling=False,
-    ):
+    def __init__(self, fn, arg_names, configs, key, reset_to_zero, restore_value, pre_hook=None, post_hook=None,
+                 prune_configs_by: Optional[Dict] = None, warmup=None, rep=None, use_cuda_graph=False, do_bench=None,
+                 cache_results=False, perf_debug=False, perf_profiling=False):
         """
         :param prune_configs_by: a dict of functions that are used to prune configs, fields:
             'perf_model': performance model used to predicate running time with different configs, returns running time
@@ -44,6 +31,7 @@ class Autotuner(KernelInterface):
         self.keys = key
         self.cache: Dict[Tuple, Config] = {}
         self.arg_names = arg_names
+        self.cache_results = cache_results or os.getenv("TRITON_CACHE_AUTOTUNING", None) == "1"
 
         # Reset to zero or restore values
         self.reset_to_zero = []
@@ -178,6 +166,50 @@ class Autotuner(KernelInterface):
                 print(f"Autotuning failed with {e}")
             return [float("inf"), float("inf"), float("inf")]
 
+    def check_disk_cache(self, tuning_key, configs, bench_fn):
+        # We can't serialize prehooks, so just give up and run the benchmarks.
+        if not tuning_key or any(cfg.pre_hook for cfg in configs):
+            bench_fn()
+            return
+
+        from triton._C.libtriton import get_cache_invalidating_env_vars
+        from triton.compiler.compiler import make_backend, triton_key
+        from triton.runtime.cache import get_cache_manager
+        from triton.runtime.jit import JITFunction
+
+        fn = self.fn
+        while not isinstance(fn, JITFunction):
+            fn = fn.fn
+
+        env_vars = get_cache_invalidating_env_vars()
+        cache_key = [
+            triton_key(),
+            make_backend(driver.active.get_current_target()).hash(),
+            fn.cache_key,
+            str(sorted(env_vars.items())),
+            str(tuning_key),
+        ] + [str(c) for c in configs]
+        cache_key = hashlib.sha256("-".join(cache_key).encode("utf-8")).hexdigest()
+        cache = get_cache_manager(cache_key)
+        file_name = f"{fn.__name__[:150]}.autotune.json"
+        path = cache.get_file(file_name)
+        if path:
+            with open(path, "r") as cached_configs:
+                timings = json.load(cached_configs)["configs_timings"]
+                timings = {Config(**config): timing for config, timing in timings}
+                self.cache[tuning_key] = builtins.min(timings, key=timings.get)
+                self.configs_timings = timings
+            return
+
+        bench_fn()
+        cache.put(
+            json.dumps({
+                "key":
+                tuning_key,
+                "configs_timings":
+                [(config.__dict__, timings) for config, timings in self.configs_timings.items() if not config.pre_hook],
+            }), file_name, binary=False)
+
     def run(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
         used_cached_result = True
@@ -190,35 +222,40 @@ class Autotuner(KernelInterface):
                     key.append(str(arg.dtype))
             key = tuple(key)
             if key not in self.cache:
-                # prune configs
                 used_cached_result = False
                 pruned_configs = self.prune_configs(kwargs)
-                bench_start = time.time()
-                timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
 
-                bench_end = time.time()
-                self.bench_time = bench_end - bench_start
-                self.cache[key] = builtins.min(timings, key=timings.get)
-                full_nargs = {**self.nargs, **kwargs, **self.cache[key].all_kwargs()}
-                self.pre_hook(full_nargs, reset_only=True)
-                self.configs_timings = timings
+                def benchmark():
+                    bench_start = time.time()
+                    timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
+                    bench_end = time.time()
+                    self.bench_time = bench_end - bench_start
+                    self.cache[key] = builtins.min(timings, key=timings.get)
+                    full_nargs = {**self.nargs, **kwargs, **self.cache[key].all_kwargs()}
+                    self.pre_hook(full_nargs, reset_only=True)
+                    self.configs_timings = timings
 
-                if self.perf_debug:
-                   print(f"\n{self.base_fn.__name__}:\n" + str(key) + " Configs:\n")
-                   sorted_configs = sorted(self.perf_dict.items(), key=lambda x: timings[x[0]][0])
-                   for index, (key_config, compiled_kernel) in enumerate(sorted_configs, 0):
-                       perf_time = timings[key_config][0]
-                       perf_best = "*" if key_config == self.cache[key] else " "
-                       num_warmup=self.warmup if self.warmup is not None else 25
-                       num_reps=self.num_reps if self.num_reps is not None else 100
-                       profiling_cnt = 1 if self.perf_profiling == True else max(1, int(num_reps / perf_time))
-                       n_spill_bytes = compiled_kernel.n_spills * 4
-                       print(f"{perf_best}{index:2d}  : " + str(key_config) + f", waves_per_eu: {compiled_kernel.metadata.waves_per_eu} " +
-                             "\n\t : " + f"times({profiling_cnt} statics, rep:{num_reps} ms): {perf_time} ms" +
-                             "\n\t : " + f"share_mem: {compiled_kernel.metadata.shared}, n_regs: {compiled_kernel.n_regs}, n_spill_bytes: {n_spill_bytes} +-4" +
-                             "\n\t : " + f"cache_ir_path: {compiled_kernel.perf_ir_path}\n")
+                    if self.perf_debug:
+                        print(f"\n{self.base_fn.__name__}:\n" + str(key) + " Configs:\n")
+                        sorted_configs = sorted(self.perf_dict.items(), key=lambda x: timings[x[0]][0])
+                        for index, (key_config, compiled_kernel) in enumerate(sorted_configs, 0):
+                            perf_time = timings[key_config][0]
+                            perf_best = "*" if key_config == self.cache[key] else " "
+                            num_warmup = self.warmup if self.warmup is not None else 25
+                            num_reps = self.num_reps if self.num_reps is not None else 100
+                            profiling_cnt = 1 if self.perf_profiling == True else max(1, int(num_reps / perf_time))
+                            n_spill_bytes = compiled_kernel.n_spills * 4
+                            print(f"{perf_best}{index:2d}  : " + str(key_config) + f", waves_per_eu: {compiled_kernel.metadata.waves_per_eu} " +
+                                  "\n\t : " + f"times({profiling_cnt} statics, rep:{num_reps} ms): {perf_time} ms" +
+                                  "\n\t : " + f"share_mem: {compiled_kernel.metadata.shared}, n_regs: {compiled_kernel.n_regs}, n_spill_bytes: {n_spill_bytes} +-4" +
+                                  "\n\t : " + f"cache_ir_path: {compiled_kernel.perf_ir_path}\n")
 
-                   self.perf_dict = {}
+                        self.perf_dict = {}
+
+                if self.cache_results:
+                    self.check_disk_cache(key, pruned_configs, benchmark)
+                else:
+                    benchmark()
 
             config = self.cache[key]
         else:
@@ -327,9 +364,24 @@ class Config:
         res.append(f"maxnreg: {self.maxnreg}")
         return ", ".join(res)
 
+    def __hash__(self):
+        return hash((*self.all_kwargs().items(), self.pre_hook))
+
+    def __eq__(self, other):
+        self_tuple = tuple((
+            *self.all_kwargs().items(),
+            self.pre_hook,
+        ))
+        other_tuple = tuple((
+            *other.all_kwargs().items(),
+            other.pre_hook,
+        ))
+        return self_tuple == other_tuple
+
 
 def autotune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_value=None, pre_hook=None, post_hook=None,
-             warmup=None, rep=None, use_cuda_graph=False, do_bench=None, perf_debug=False, perf_profiling=False):
+             warmup=None, rep=None, use_cuda_graph=False, do_bench=None, cache_results=False,
+             perf_debug=False, perf_profiling=False):
     """
     Decorator for auto-tuning a :code:`triton.jit`'d function.
 
@@ -383,12 +435,15 @@ def autotune(configs, key, prune_configs_by=None, reset_to_zero=None, restore_va
     :type rep: int
     :param do_bench: a benchmark function to measure the time of each run.
     :type do_bench: lambda fn, quantiles
+    :param cache_results: whether to cache autotune timings to disk.  Defaults to False.
+    "type cache_results: bool
     """
 
     def decorator(fn):
         return Autotuner(fn, fn.arg_names, configs, key, reset_to_zero, restore_value, pre_hook=pre_hook,
                          post_hook=post_hook, prune_configs_by=prune_configs_by, warmup=warmup, rep=rep,
-                         use_cuda_graph=use_cuda_graph, do_bench=do_bench, perf_debug=perf_debug, perf_profiling=perf_profiling)
+                         use_cuda_graph=use_cuda_graph, do_bench=do_bench, cache_results=cache_results,
+                         perf_debug=perf_debug, perf_profiling=perf_profiling)
 
     return decorator
 

@@ -86,18 +86,8 @@ SmallVector<unsigned> getThreadsPerWarp(Attribute layout,
   return toLinearEncoding(layout, shape).getThreadsPerWarp();
 }
 
-SmallVector<unsigned> getWarpsPerCTA(Attribute layout) {
-  if (auto distributedLayout =
-          mlir::dyn_cast<DistributedEncodingTrait>(layout)) {
-    return distributedLayout.getWarpsPerCTA();
-  }
-
-  llvm::report_fatal_error("getWarpsPerCTA not implemented");
-  return SmallVector<unsigned>();
-}
-
-SmallVector<unsigned> getWarpsPerCTAWithUniqueData(Attribute layout,
-                                                   ArrayRef<int64_t> shape) {
+SmallVector<unsigned> getWarpsPerCTA(Attribute layout,
+                                     ArrayRef<int64_t> shape) {
   return toLinearEncoding(layout, shape).getWarpsPerCTA();
 }
 
@@ -199,61 +189,39 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
   return {};
 }
 
-// Convenience functions
-SmallVector<unsigned> getOrder(TensorOrMemDesc type) {
-  if (auto memDesc = dyn_cast<MemDescType>(type)) {
-    return getOrder(memDesc);
-  } else {
-    auto tensorTy = cast<RankedTensorType>(type);
-    return getOrder(tensorTy);
-  }
-}
-
-SmallVector<unsigned> getOrder(MemDescType type) {
-  return getOrder(cast<SharedEncodingTrait>(type.getEncoding()),
-                  type.getShape());
-}
-
-// Legacy impl for now
 SmallVector<unsigned> getOrder(DistributedEncodingTrait layout,
                                ArrayRef<int64_t> shape) {
-  return layout.getDefaultOrder();
+  return toLinearEncoding(layout, shape).getOrder();
 }
 
-// Convenience function
-SmallVector<unsigned> getOrder(RankedTensorType type) {
-  return getOrder(cast<DistributedEncodingTrait>(type.getEncoding()),
-                  type.getShape());
+SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
+                                        ArrayRef<int64_t> shape) {
+  auto linear = toLinearEncoding(layout, shape);
+  auto order = linear.getOrder();
+  auto threadOrder = linear.getThreadOrder();
+  if (order == threadOrder) {
+    return order;
+  }
+  // Heuristic:
+  // If the element contiguity does not align with the thread order
+  // because the thread order dimension has contiguity of 1---meaning that
+  // the order position of this dimension is irrelevant---we prefer
+  // to use the thread order for the memory layout
+  auto contig = linear.getElemsPerThread(shape);
+  if (contig[threadOrder[0]] == 1) {
+    return threadOrder;
+  }
+  return order;
 }
 
-SmallVector<unsigned> getDefaultMmaOrder(MmaEncodingTrait layout) {
-  auto distributedLayout = cast<DistributedEncodingTrait>(layout);
-  auto rank = distributedLayout.getWarpsPerCTA().size();
-  return getMatrixOrder(rank, /*rowMajor*/ true);
-}
-
-// Legacy impl for now
 SmallVector<unsigned> getThreadOrder(DistributedEncodingTrait layout,
                                      ArrayRef<int64_t> shape) {
-  return layout.getDefaultThreadOrder();
+  return toLinearEncoding(layout, shape).getThreadOrder();
 }
 
-// Convenience function
-SmallVector<unsigned> getThreadOrder(RankedTensorType type) {
-  return getThreadOrder(cast<DistributedEncodingTrait>(type.getEncoding()),
-                        type.getShape());
-}
-
-// Legacy impl for now
 SmallVector<unsigned> getWarpOrder(DistributedEncodingTrait layout,
                                    ArrayRef<int64_t> shape) {
-  return layout.getDefaultWarpOrder();
-}
-
-// Convenience function
-SmallVector<unsigned> getWarpOrder(RankedTensorType type) {
-  return getWarpOrder(cast<DistributedEncodingTrait>(type.getEncoding()),
-                      type.getShape());
+  return toLinearEncoding(layout, shape).getWarpOrder();
 }
 
 CTALayoutAttr getCTALayout(Attribute layout) {
@@ -590,7 +558,7 @@ static void maybePrintCTALayout(mlir::MLIRContext *context,
 // But we need to have a consistent interface with e.g. SliceEncodingAttr, which
 // computes some of these fields.
 SmallVector<unsigned> BlockedEncodingAttr::getRepOrder() const {
-  return SmallVector<unsigned>(getDefaultOrder());
+  return SmallVector<unsigned>(getOrder());
 }
 SmallVector<unsigned> BlockedEncodingAttr::getCTAsPerCGA() const {
   return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
@@ -600,18 +568,6 @@ SmallVector<unsigned> BlockedEncodingAttr::getCTAOrder() const {
 }
 SmallVector<unsigned> BlockedEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
-}
-SmallVector<unsigned> BlockedEncodingAttr::getDefaultOrder() const {
-  return SmallVector<unsigned>(getOrder());
-}
-SmallVector<unsigned> BlockedEncodingAttr::getWarpsPerCTA() const {
-  return SmallVector<unsigned>(getWarpsPerCTA__());
-}
-SmallVector<unsigned> BlockedEncodingAttr::getDefaultWarpOrder() const {
-  return SmallVector<unsigned>(getDefaultOrder());
-}
-SmallVector<unsigned> BlockedEncodingAttr::getDefaultThreadOrder() const {
-  return SmallVector<unsigned>(getDefaultOrder());
 }
 
 template <class T>
@@ -669,35 +625,6 @@ SmallVector<unsigned> SliceEncodingAttr::getCTAsPerCGA() const {
   llvm::report_fatal_error(
       "getCTAsPerCGA for SliceEncodingAttr is not well-defined");
 }
-SmallVector<unsigned> SliceEncodingAttr::getWarpsPerCTA() const {
-  auto parent = getParent();
-  auto parentWarpsPerCTA = ::getWarpsPerCTA(parent);
-  SmallVector<unsigned> warpsPerCTA = parentWarpsPerCTA;
-  warpsPerCTA.erase(warpsPerCTA.begin() + getDim());
-  int32_t nextDim = getDim() < warpsPerCTA.size() ? getDim() : getDim() - 1;
-  warpsPerCTA[nextDim] *= parentWarpsPerCTA[getDim()];
-  return warpsPerCTA;
-}
-SmallVector<unsigned> SliceEncodingAttr::getDefaultWarpOrder() const {
-  auto parentWarpOrder = getParent().getDefaultWarpOrder();
-  return eraseOrder(parentWarpOrder, getDim());
-}
-SmallVector<unsigned> SliceEncodingAttr::getDefaultThreadOrder() const {
-  auto parentThreadOrder = getParent().getDefaultThreadOrder();
-  return eraseOrder(parentThreadOrder, getDim());
-}
-SmallVector<unsigned> SliceEncodingAttr::getDefaultOrder() const {
-  SmallVector<unsigned> parentOrder = getParent().getDefaultOrder();
-  unsigned dim = getDim();
-  SmallVector<unsigned> order;
-  for (unsigned d : parentOrder) {
-    if (d != dim)
-      order.push_back(d > dim ? d - 1 : d);
-  }
-  return order;
-}
-
-//
 
 // Wmma encoding
 
@@ -752,32 +679,6 @@ SmallVector<unsigned> DotOperandEncodingAttr::getCTASplitNum() const {
   auto kDim = getOpIdx() == 0 ? rank - 1 : rank - 2;
   res[kDim] = 1;
   return res;
-}
-SmallVector<unsigned> DotOperandEncodingAttr::getWarpsPerCTA() const {
-  auto distributedLayout = mlir::cast<DistributedEncodingTrait>(getParent());
-  auto warps = distributedLayout.getWarpsPerCTA();
-  auto rank = warps.size();
-  auto kDim = getOpIdx() == 0 ? rank - 1 : rank - 2;
-  warps[kDim] = 1;
-  return warps;
-}
-SmallVector<unsigned> DotOperandEncodingAttr::getDefaultOrder() const {
-  auto rank = getWarpsPerCTA().size();
-  return getOrderForDotOperand(getOpIdx(), rank, /*kContig*/ true);
-}
-SmallVector<unsigned> DotOperandEncodingAttr::getDefaultWarpOrder() const {
-  // FIXME(Lezcano): Preexisting. Do we want to have this path at all?
-  if (mlir::isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(getParent())) {
-    return mlir::cast<DistributedEncodingTrait>(getParent())
-        .getDefaultWarpOrder();
-  }
-  llvm::report_fatal_error(
-      "DotOperandEncoding::getDefaultWarpOrder not implemented");
-  return {};
-}
-SmallVector<unsigned> DotOperandEncodingAttr::getDefaultThreadOrder() const {
-  return getOrderForDotOperand(getOpIdx(), getWarpsPerCTA().size(),
-                               /*kContig*/ true);
 }
 
 LogicalResult DotOperandEncodingAttr::verify(
@@ -1142,7 +1043,7 @@ LinearEncodingAttr::orderPerDim(StringAttr dimName,
 // [Note. Divergence of methods wrt. legacy layouts]
 // For smaller shapes where the CTATile is larger than the output
 // tensor, some methods return different values than the legacy layouts. I think
-// this is benign tho. An example: what is the the vector of `warpsPerCTA` if
+// this is benign tho. An example: what is the vector of `warpsPerCTA` if
 // all the warps hold the same data? I think it should be [1, 1], even if we
 // have 4 warps. But perhaps for this we have to add some masking in some
 // places... We'll see
@@ -1167,20 +1068,14 @@ SmallVector<unsigned> LinearEncodingAttr::getCTASplitNum() const {
 SmallVector<unsigned> LinearEncodingAttr::getWarpsPerCTA() const {
   return basesPerDim(StringAttr::get(getContext(), "warp"));
 }
-SmallVector<unsigned> LinearEncodingAttr::getDefaultWarpOrder() const {
-  return getWarpOrder();
-}
 SmallVector<unsigned> LinearEncodingAttr::getWarpOrder() const {
   return orderPerDim(StringAttr::get(getContext(), "warp"), getOrder());
 }
 SmallVector<unsigned> LinearEncodingAttr::getThreadsPerWarp() const {
   return basesPerDim(StringAttr::get(getContext(), "lane"));
 }
-SmallVector<unsigned> LinearEncodingAttr::getDefaultThreadOrder() const {
-  return getThreadOrder();
-}
 SmallVector<unsigned> LinearEncodingAttr::getThreadOrder() const {
-  return orderPerDim(StringAttr::get(getContext(), "lane"), getDefaultOrder());
+  return orderPerDim(StringAttr::get(getContext(), "lane"), getOrder());
 }
 SmallVector<unsigned> LinearEncodingAttr::getSizePerThread() const {
   auto rank = getOrder().size();
@@ -1230,10 +1125,6 @@ SmallVector<unsigned> LinearEncodingAttr::getShapePerCTATile() const {
     shape.push_back(size * thread * warp);
   }
   return shape;
-}
-
-SmallVector<unsigned> LinearEncodingAttr::getDefaultOrder() const {
-  return getOrder();
 }
 
 SmallVector<unsigned> LinearEncodingAttr::getOrder() const {
@@ -1386,7 +1277,7 @@ void NvidiaMmaEncodingAttr::print(AsmPrinter &printer) const {
           << ", warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]";
 
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
-                      /*rank=*/getWarpsPerCTA().size());
+                      /*rank=*/getRank());
 
   printer << ", instrShape = [" << getInstrShape() << "]}>";
 }
@@ -1472,12 +1363,12 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "versionMajor = " << getVersionMajor()                      //
           << ", versionMinor = " << getVersionMinor()                    //
-          << ", warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]"    //
+          << ", warpsPerCTA = [" << getWarpsPerCTA() << "]"              //
           << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
           << ", isTransposed = " << getIsTransposed()
           << ", mfmaMmacLayout = " << (uint32_t)getMfmaMmacLayout();
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
-                      /*rank=*/getWarpsPerCTA().size());
+                      /*rank=*/getRank());
   printer << "}>";
 }
 
@@ -1777,7 +1668,7 @@ void NVMMASharedEncodingAttr::print(AsmPrinter &printer) const {
 }
 
 //===----------------------------------------------------------------------===//
-// SwizzledBlocksShared encoding
+// AMDRotatingShared encoding
 //===----------------------------------------------------------------------===//
 
 Attribute AMDRotatingSharedEncodingAttr::parse(AsmParser &parser, Type type) {
@@ -1815,32 +1706,6 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getCTAOrder() const {
 SmallVector<unsigned> AMDMfmaEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
 }
-SmallVector<unsigned> AMDMfmaEncodingAttr::getWarpsPerCTA() const {
-  return SmallVector<unsigned>(getWarpsPerCTA__());
-}
-SmallVector<unsigned> AMDMfmaEncodingAttr::getDefaultOrder() const {
-  return getDefaultMmaOrder(*this);
-}
-SmallVector<unsigned> AMDMfmaEncodingAttr::getDefaultWarpOrder() const {
-  return getDefaultOrder();
-}
-SmallVector<unsigned> AMDMfmaEncodingAttr::getDefaultThreadOrder() const {
-  // Hygon mmac layout always distributes threads to tensor values in
-  // column-major order if LTS is flase, else in row-major order.
-  if (isMmacHCU()) {
-    auto mfmaMmacLayout = getMfmaMmacLayout();
-    if (mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
-        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE)
-      return {1, 0};
-    else
-      return {0, 1};
-  }
-
-  auto order = getDefaultOrder();
-  if (getIsTransposed())
-    std::swap(order[0], order[1]);
-  return order;
-}
 
 SmallVector<int64_t>
 AMDMfmaEncodingAttr::getInstrShapeForOperand(int kWidth, int opIdx) const {
@@ -1863,14 +1728,12 @@ AMDMfmaEncodingAttr::getInstrShapeForOperand(int kWidth, int opIdx) const {
 }
 
 SmallVector<unsigned> AMDMfmaEncodingAttr::getRepOrder() const {
-  auto rank = getDefaultOrder().size();
-  return getMatrixOrder(rank, /*rowMajor*/ true);
+  return getMatrixOrder(getRank(), /*rowMajor*/ true);
 }
 
 SmallVector<unsigned>
 AMDMfmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
-  auto rank = getDefaultOrder().size();
-  return getOrderForDotOperand(opIdx, rank, /*kContig*/ true);
+  return getOrderForDotOperand(opIdx, getRank(), /*kContig*/ true);
 }
 
 SmallVector<int64_t>
@@ -1944,14 +1807,12 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
 //===----------------------------------------------------------------------===//
 
 SmallVector<unsigned> AMDWmmaEncodingAttr::getRepOrder() const {
-  auto rank = getWarpsPerCTA().size();
-  return getMatrixOrder(rank, /*rowMajor*/ true);
+  return getMatrixOrder(getRank(), /*rowMajor*/ true);
 }
 
 SmallVector<unsigned>
 AMDWmmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
-  auto rank = getDefaultOrder().size();
-  return getOrderForDotOperand(opIdx, rank, /*kContig*/ true);
+  return getOrderForDotOperand(opIdx, getRank(), /*kContig*/ true);
 }
 
 SmallVector<unsigned> AMDWmmaEncodingAttr::getCTAsPerCGA() const {
@@ -1962,21 +1823,6 @@ SmallVector<unsigned> AMDWmmaEncodingAttr::getCTAOrder() const {
 }
 SmallVector<unsigned> AMDWmmaEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
-}
-SmallVector<unsigned> AMDWmmaEncodingAttr::getWarpsPerCTA() const {
-  return SmallVector<unsigned>(getWarpsPerCTA__());
-}
-SmallVector<unsigned> AMDWmmaEncodingAttr::getDefaultOrder() const {
-  return getDefaultMmaOrder(*this);
-}
-SmallVector<unsigned> AMDWmmaEncodingAttr::getDefaultWarpOrder() const {
-  return getDefaultOrder();
-}
-SmallVector<unsigned> AMDWmmaEncodingAttr::getDefaultThreadOrder() const {
-  auto order = getDefaultOrder();
-  if (getIsTransposed())
-    std::swap(order[0], order[1]);
-  return order;
 }
 
 SmallVector<int64_t> AMDWmmaEncodingAttr::getElemsPerInstrForOperands() const {
@@ -2016,8 +1862,7 @@ SmallVector<unsigned> AMDWmmaEncodingAttr::getMNKDimPerInstr() {
 }
 
 unsigned AMDWmmaEncodingAttr::getKWidthForOperands() const {
-  auto rank = getWarpsPerCTA().size();
-  SmallVector<unsigned> sizePerThread(rank, 1);
+  SmallVector<unsigned> sizePerThread(getRank(), 1);
   auto numReplicated = getVersion() == 1 ? 2 : 1;
   auto elemsPerInstr =
       numReplicated * product(getElemsPerInstrForOperands()) / 32;
@@ -2039,8 +1884,7 @@ bool NvidiaMmaEncodingAttr::isAmpere() const { return getVersionMajor() == 2; }
 bool NvidiaMmaEncodingAttr::isHopper() const { return getVersionMajor() == 3; }
 
 SmallVector<unsigned> NvidiaMmaEncodingAttr::getRepOrder() const {
-  auto rank = getDefaultOrder().size();
-  return getMatrixOrder(rank, /*rowMajor*/ true);
+  return getMatrixOrder(getRank(), /*rowMajor*/ true);
 }
 SmallVector<unsigned> NvidiaMmaEncodingAttr::getCTAsPerCGA() const {
   return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
@@ -2051,28 +1895,10 @@ SmallVector<unsigned> NvidiaMmaEncodingAttr::getCTAOrder() const {
 SmallVector<unsigned> NvidiaMmaEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
 }
-SmallVector<unsigned> NvidiaMmaEncodingAttr::getWarpsPerCTA() const {
-  return SmallVector<unsigned>(getWarpsPerCTA__());
-}
-SmallVector<unsigned> NvidiaMmaEncodingAttr::getDefaultOrder() const {
-  return getDefaultMmaOrder(*this);
-}
-SmallVector<unsigned> NvidiaMmaEncodingAttr::getDefaultWarpOrder() const {
-  auto rank = getDefaultOrder().size();
-  // Hopper (wgmma) uses column-major as this is embedded in the instruction
-  // For Ampere we can choose either row-major or column-major.
-  // We choose row-major as the legacy path did so
-  return getMatrixOrder(rank, /*rowMajor*/ !isHopper());
-}
-SmallVector<unsigned> NvidiaMmaEncodingAttr::getDefaultThreadOrder() const {
-  auto rank = getDefaultOrder().size();
-  return getMatrixOrder(rank, /*rowMajor*/ true);
-}
 
 SmallVector<unsigned>
 NvidiaMmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
-  auto rank = getDefaultOrder().size();
-  return getOrderForDotOperand(opIdx, rank, /*kContig*/ true);
+  return getOrderForDotOperand(opIdx, getRank(), /*kContig*/ true);
 }
 
 SmallVector<int64_t>
@@ -2083,7 +1909,7 @@ NvidiaMmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> shape, int bitwidth,
       "kWidth must be >= 32 / bitwidth for this function to be well-defined");
   auto rank = shape.size();
   // Broadcast long K
-  auto warpsPerCTA = getWarpsPerCTA();
+  auto warpsPerCTA = to_vector(getWarpsPerCTA());
   auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
   warpsPerCTA[kDim] = 1;
 
@@ -2789,12 +2615,11 @@ struct TritonGPUInferLayoutInterface
     // We implement two legacy layout propagations
     // Once we fully migrate to LinearLayouts, we can remove these.
     auto *ctx = getContext();
-    auto rank = shape.size();
     // The output encoding will only be a legacy encoding if the axis is the
     // fastest running dimension.
     // FIXME: We should make sure that there are enough elements along the axis
     // axis whenever fwdInference is false
-    if (cast<DistributedEncodingTrait>(inEnc).getDefaultOrder()[axis] == 0) {
+    if (getOrder(cast<DistributedEncodingTrait>(inEnc), shape)[axis] == 0) {
       // Dot operand: double kWidth if kDim == axis.
       if (auto dotEnc = mlir::dyn_cast<DotOperandEncodingAttr>(inEnc)) {
         auto kWidth = dotEnc.getKWidth();
@@ -2866,9 +2691,8 @@ struct TritonGPUVerifyTensorLayoutInterface
       // A different verifier should have checked that the layout itself is
       // valid, including that threads-per-warp has the same rank as
       // warps-per-block etc.
-      auto layoutRank = blocked.getThreadsPerWarp().size();
-      if (layoutRank != rankedTy.getRank()) {
-        return makeErr() << layout << ".\nLayout has rank " << layoutRank
+      if (blocked.getRank() != rankedTy.getRank()) {
+        return makeErr() << layout << ".\nLayout has rank " << blocked.getRank()
                          << ", but the tensor it's attached to has rank "
                          << rankedTy.getRank() << ".";
       }
