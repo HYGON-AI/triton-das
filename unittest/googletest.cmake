@@ -11,15 +11,14 @@ FetchContent_Declare(
   # Use repo hosted on gitee instead for a better network connection.
   # GIT_REPOSITORY https://github.com/google/googletest.git
   GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
-  GIT_TAG release-1.12.1
+  GIT_TAG v1.17.0
   )
 
 FetchContent_GetProperties(googletest)
 
 if(NOT googletest_POPULATED)
-  FetchContent_Populate(googletest)
+  FetchContent_MakeAvailable(googletest)
   if (MSVC)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   endif()
-  add_subdirectory(${googletest_SOURCE_DIR} ${googletest_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()

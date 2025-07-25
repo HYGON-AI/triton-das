@@ -99,7 +99,9 @@ int TargetInfo::getSharedMemorySize() const {
   return kbytes * 1024;
 }
 
-bool TargetInfo::supportMaximumMinimum() const { return false; }
+bool TargetInfo::supportMaximumMinimum() const {
+  return getISAFamily() == ISAFamily::CDNA4;
+}
 
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   // On AMD hardware we don't have CTA clusters like NVIDIA. So this will always
@@ -110,9 +112,7 @@ Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
 
 Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
                          Value cmp) const {
-  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, "llvm.amdgcn.ballot",
-                                         type, cmp)
-      ->getResult(0);
+  return rewriter.create<ROCDL::BallotOp>(loc, type, cmp);
 }
 
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
@@ -366,12 +366,10 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     // Similarly, we need to cast data types for readlane instruction.
     Type actualType = castToAndSExtInt(rewriter, loc, buf, valType, 16);
 
-    // Get reduction result from lane 63/31
-    std::string intrinsic = "llvm.amdgcn.readlane";
-    Value result = LLVM::createLLVMIntrinsicCallOp(
-                       rewriter, loc, intrinsic, actualType,
-                       ValueRange{buf, b.i32_val(isCDNA() ? 63 : 31)})
-                       ->getResult(0);
+    // Get reduction result from the last lane of the warp
+    Value lastLaneId = b.i32_val(gpu::lookupThreadsPerWarp(rewriter) - 1);
+    Value result =
+        rewriter.create<ROCDL::ReadlaneOp>(loc, actualType, buf, lastLaneId);
 
     result = truncAndCastFromInt(rewriter, loc, result, valType, 16);
 
@@ -514,8 +512,9 @@ bool TargetInfo::supportVectorizedAtomics() const {
   return true;
 }
 
-void TargetInfo::storeOpAnnotation(triton::gpu::LocalStoreOp op,
-                                   size_t localStoreOpCount, Type type) const {
+void TargetInfo::localStoreOpAnnotation(triton::gpu::LocalStoreOp op,
+                                        size_t localStoreOpCount,
+                                        Type type) const {
   storeOpSchedAnnotations(op, localStoreOpCount, type);
 }
 
@@ -524,15 +523,22 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
   case ISAFamily::CDNA1:
   case ISAFamily::CDNA2:
   case ISAFamily::CDNA3:
-    return llvm::is_contained({32, 16, 8}, bitWidth);
+    // Disable 8 and 16 bits because they get extended to 32 bit.
+    return llvm::is_contained({32, /*16, 8*/}, bitWidth);
   case ISAFamily::CDNA4:
-    // Disable 96 bits as it uses 128bit strides between threads in a warp
-    return llvm::is_contained({128, /*96, */ 32, 16, 8}, bitWidth);
+    // Disable 8, 16, 96 bits because they get extended to 32/128 bit.
+    return llvm::is_contained({128, /*96, */ 32, /*16, 8*/}, bitWidth);
   default:
     break;
   }
 
   return false;
+}
+
+void TargetInfo::localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
+                                       Operation *llLoadOp) const {
+  LLVM::AMD::addLocalLoadNoAliasScope(localLoadOp,
+                                      cast<LLVM::LoadOp>(llLoadOp));
 }
 
 } // namespace mlir::triton::AMD

@@ -10,7 +10,7 @@ import uuid
 import hashlib
 import triton
 from collections import defaultdict
-from triton.runtime.cache import default_cache_dir, default_dump_dir, default_override_dir
+from triton.knobs import cache as cache_knob
 
 from typing import Dict, Union, Generic
 from distutils.util import strtobool
@@ -448,16 +448,16 @@ class ConfigCacheManager(FileCacheManager):
         self.key = key
         self.lock_path = None
         if dump:
-            self.cache_dir = os.getenv("TRITON_DUMP_DIR", "").strip() or default_dump_dir()
+            self.cache_dir = cache_knob.dump_dir
             self.cache_dir = os.path.join(self.cache_dir, self.key)
             self.lock_path = os.path.join(self.cache_dir, "lock")
             os.makedirs(self.cache_dir, exist_ok=True)
         elif override:
-            self.cache_dir = os.getenv("TRITON_OVERRIDE_DIR", "").strip() or default_override_dir()
+            self.cache_dir = cache_knob.override_dir
             self.cache_dir = os.path.join(self.cache_dir, self.key)
         else:
             # create cache directory if it doesn't exist
-            self.cache_dir = os.getenv("TRITON_CACHE_DIR", "").strip() or default_cache_dir()
+            self.cache_dir = cache_knob.dir
             if self.cache_dir:
                 # random run_id for multiprocessing
                 run_id = str(uuid.uuid4())

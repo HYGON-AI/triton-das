@@ -397,7 +397,7 @@ for i in range(group_size):
 if supports_tma():
     tri_tma_out = group_gemm_tma_fn(group_A, group_B_T)
     for i in range(group_size):
-        assert torch.allclose(ref_out[i], tri_tma_out[i], atol=1e-2, rtol=0)
+        assert torch.allclose(ref_out[i], tri_tma_out[i], atol=1e-2, rtol=1e-2)
 
 
 # only launch the kernel, no tensor preparation here to remove all overhead

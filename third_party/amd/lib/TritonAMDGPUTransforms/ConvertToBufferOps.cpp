@@ -1,3 +1,4 @@
+#include "TritonAMDGPUTransforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -17,89 +18,141 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/ADT/TypeSwitch.h"
 
-#define GEN_PASS_CLASSES
-#include "TritonAMDGPUTransforms/Passes.h"
-
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-convert-buffer-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
-using namespace mlir;
 using ::mlir::LLVM::AMD::getVectorSize;
 using mlir::triton::AMD::ISAFamily;
 
 namespace ttg = mlir::triton::gpu;
 namespace tt = mlir::triton;
 
+namespace mlir {
+
+#define GEN_PASS_DEF_TRITONAMDGPUCONVERTTOBUFFEROPS
+#include "TritonAMDGPUTransforms/Passes.h.inc"
+
 namespace {
 
-bool verifyNonSmallerByAssumption(
-    Value expr, const DenseSet<Value> &assumptions,
-    const std::function<bool(Value)> &matchesOther) {
-  for (Value assume : assumptions) {
-    if (auto cmpOp = assume.getDefiningOp<arith::CmpIOp>()) {
-      switch (cmpOp.getPredicate()) {
-      case arith::CmpIPredicate::eq:
-      case arith::CmpIPredicate::sge:
-      case arith::CmpIPredicate::sgt: {
-        if (cmpOp.getLhs() == expr && matchesOther(cmpOp.getRhs())) {
-          LDBG("  " << expr << " non-neg by assumption " << cmpOp);
-          return true;
+// ========================== HYGON Utility Functions ==========================
+void collectAssumptionsForLoad(ModuleOp mod, DenseMap<Value, SetVector<Operation *>> &assumptions) {
+  mod.walk([&](LLVM::AssumeOp op) {
+    if (auto cmpIOp = op.getCond().getDefiningOp<arith::CmpIOp>()) {
+      /*  HGCG: add ConvertToBufferOp with data from memory assumptions support.
+       *  This is a trick method to support addPtr with offset from memory load.
+       *        In triton kernel if user write below code, it means that the
+       *  sorted_token_ids_ptr is a pointer to the memory, and all value in the
+       *  memory(like offs_token) is assumed to be non-negative.
+       *        Due to the propagation of assume, the a_ptrs is fit for using
+       *  buffer load ops.
+       *
+       *  Eg:
+       *    tl.assume(sorted_token_ids_ptr.to(tl.int64) >= 0)
+       *    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+       *    .....
+       *    a_ptrs = a_ptr + (offs_token[:, None]
+       *
+       *  The pattern in triton ir is(%arg6 is the sorted_token_ids_ptr):
+       *
+       *    %1 = tt.ptr_to_int %arg6 : !tt.ptr<i32> -> i64
+       *    %2 = arith.cmpi sge, %1, %c0_i64 : i64
+       *    llvm.intr.assume %2 : i1
+       *
+       *  Here we detect the pattern and add the %arg6(sorted_token_ids_ptr) to the assumption.
+      **/
+      bool isGe = (cmpIOp.getPredicate() == arith::CmpIPredicate::sge);
+      if (isGe && cmpIOp->getOperand(0).getDefiningOp<triton::PtrToIntOp>()) {
+        auto ptrToIntOp = cmpIOp->getOperand(0).getDefiningOp<triton::PtrToIntOp>();
+        if (isa<BlockArgument>(ptrToIntOp->getOperand(0))
+            && ptrToIntOp->getBlock()->isEntryBlock()) {
+          assumptions[ptrToIntOp->getOperand(0)].insert(ptrToIntOp);
         }
-        break;
-      }
-      case arith::CmpIPredicate::sle:
-      case arith::CmpIPredicate::slt: {
-        if (cmpOp.getRhs() == expr && matchesOther(cmpOp.getLhs())) {
-          LDBG("  " << expr << " non-neg by assumption " << cmpOp);
-          return true;
-        }
-        break;
-      }
-      default:
-        break;
       }
     }
-    // HGCG: add ConvertToBufferOp with data from memory assumptions support.
-    else if (auto blockArg= mlir::dyn_cast<BlockArgument>(assume)) {
-      if (blockArg.getOwner()->isEntryBlock() && isa<tt::PointerType>(blockArg.getType())) {
+  });
+}
+
+// Utility function to verify if an expression is non-negative by checking annotated hints.
+bool verifyNonNegativeByHint(
+  Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions) {
+  if (!assumptions.contains(expr))
+    return false;
+  // FIXME: This is a dirty and moe-specific hack to load sorted tokens using buffer ops.
+  //        Refactored to use hint annotation instead in the future.
+  if (auto blockArg = mlir::dyn_cast<BlockArgument>(expr)) {
+    if (blockArg.getOwner()->isEntryBlock() && isa<tt::PointerType>(blockArg.getType())) {
+      return true;
+    }
+  }
+
+  return false;
+}
+// ========================== HYGON Utility Functions ==========================
+
+bool verifyNonSmallerByAssumption(
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
+    const std::function<bool(Value)> &matchesOther) {
+  if (!assumptions.contains(expr))
+    return false;
+  for (Operation *assume : assumptions.at(expr)) {
+    auto cmpOp = llvm::dyn_cast<arith::CmpIOp>(assume);
+    if (!cmpOp)
+      continue;
+    switch (cmpOp.getPredicate()) {
+    case arith::CmpIPredicate::eq:
+    case arith::CmpIPredicate::sge:
+    case arith::CmpIPredicate::sgt: {
+      if (cmpOp.getLhs() == expr && matchesOther(cmpOp.getRhs())) {
+        LDBG("  " << expr << " non-neg by assumption " << cmpOp);
         return true;
       }
+      break;
     }
-
+    case arith::CmpIPredicate::sle:
+    case arith::CmpIPredicate::slt: {
+      if (cmpOp.getRhs() == expr && matchesOther(cmpOp.getLhs())) {
+        LDBG("  " << expr << " non-neg by assumption " << cmpOp);
+        return true;
+      }
+      break;
+    }
+    default:
+      break;
+    }
   }
   return false;
 }
 
-bool verifyNonNegativeByAssumption(Value expr,
-                                   const DenseSet<Value> &assumptions) {
-  return verifyNonSmallerByAssumption(expr, assumptions, [](auto otherExpr) {
-    APInt cst;
-    return matchPattern(otherExpr, m_ConstantInt(&cst)) && cst.isNonNegative();
-  });
-}
-
-bool verifyNonSmallerByAssumption(Value expr,
-                                  const DenseSet<Value> &assumptions,
-                                  Value other) {
+bool verifyNonSmallerByAssumption(
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
+    Value other) {
   return verifyNonSmallerByAssumption(
       expr, assumptions, [&](auto otherAssum) { return otherAssum == other; });
 }
 
-bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions,
-                           std::shared_ptr<DataFlowSolver> solver) {
+bool verifyNonNegativeExpr(
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
+    std::shared_ptr<DataFlowSolver> solver) {
   LDBG("Determing if non-negative: " << expr);
 
-  if (!llvm::isa<mlir::BlockArgument>(expr) &&
-      succeeded(dataflow::staticallyNonNegative(*solver, expr))) {
-    return true;
-  }
+  auto nonNegativePred = [&solver](Value v) -> bool {
+    if (const auto *r =
+            solver->lookupState<dataflow::IntegerValueRangeLattice>(v)) {
+      if (r->getValue().isUninitialized())
+        return false;
+      if (AMD::isEmptyInitializedRange(r->getValue().getValue()))
+        return false;
+    }
+    return succeeded(dataflow::staticallyNonNegative(*solver, v));
+  };
 
-  // Check if the expression is contained in any assumption
-  if (verifyNonNegativeByAssumption(expr, assumptions)) {
+  if (nonNegativePred(expr))
     return true;
-  }
+
+  if (verifyNonNegativeByHint(expr, assumptions))
+    return true;
 
   // Recurse if the operation is defined
   Operation *op = expr.getDefiningOp();
@@ -127,7 +180,7 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions,
                                          solver) &&
                    verifyNonNegativeExpr(joinOp.getRhs(), assumptions, solver);
           })
-          // Returns a tensor representing histogram: historgrams only contain
+          // Returns a tensor representing histogram: histograms only contain
           // buckets of non-negative values.
           .Case<triton::HistogramOp>([&](auto) { return true; })
           .Case<triton::MakeRangeOp>([&](auto makeRangeOp) {
@@ -221,7 +274,8 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions,
 
 // Quick analysis on the Triton IR to decide if we can safely use
 // buffer operations
-bool canUseBufferOps(Value ptr, const DenseSet<Value> &assumptions,
+bool canUseBufferOps(Value ptr,
+                     const DenseMap<Value, SetVector<Operation *>> &assumptions,
                      std::shared_ptr<DataFlowSolver> solver) {
   // 1. Check if the pointer is uniform: i.e., if it comes from a uniform
   // pointer(splatted) and non-uniform offset addition
@@ -262,14 +316,13 @@ Value getBlockStride(Location loc, Value offset, PatternRewriter &rewriter) {
   return nullptr;
 }
 
-} // namespace
-
 struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     : public mlir::OpRewritePattern<triton::AtomicRMWOp> {
   using OpRewritePattern::OpRewritePattern;
 
   ConvertTritonAtomicRMWOpToBufferAtomicRMW(
-      mlir::MLIRContext *context, DenseSet<Value> &assumptions,
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
       std::shared_ptr<DataFlowSolver> solver)
       : mlir::OpRewritePattern<triton::AtomicRMWOp>(context),
@@ -393,7 +446,7 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
 
 private:
   // Assumptions collected through the function
-  DenseSet<Value> assumptions;
+  DenseMap<Value, SetVector<Operation *>> assumptions;
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
 };
@@ -407,9 +460,10 @@ template <typename SourceOp>
 struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
   using OpRewritePattern<SourceOp>::OpRewritePattern;
 
-  ConvertTritonLoadToBufferLoad(mlir::MLIRContext *context,
-                                DenseSet<Value> &assumptions,
-                                std::shared_ptr<DataFlowSolver> solver)
+  ConvertTritonLoadToBufferLoad(
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
+      std::shared_ptr<DataFlowSolver> solver)
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
         solver(std::move(solver)) {}
 
@@ -470,7 +524,7 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
 
 private:
   // Assumptions collected through the function
-  DenseSet<Value> assumptions;
+  DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
 };
 
@@ -478,9 +532,10 @@ struct ConvertTritonStoreToBufferStore
     : public mlir::OpRewritePattern<triton::StoreOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  ConvertTritonStoreToBufferStore(mlir::MLIRContext *context,
-                                  DenseSet<Value> &assumptions,
-                                  std::shared_ptr<DataFlowSolver> solver)
+  ConvertTritonStoreToBufferStore(
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
+      std::shared_ptr<DataFlowSolver> solver)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
         assumptions(assumptions), solver(std::move(solver)) {}
 
@@ -511,75 +566,41 @@ struct ConvertTritonStoreToBufferStore
 
 private:
   // Assumptions collected through the function
-  DenseSet<Value> assumptions;
+  DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
 };
 
+} // anonymous namespace
+
 class TritonAMDGPUConvertToBufferOpsPass
-    : public TritonAMDGPUConvertToBufferOpsBase<
+    : public impl::TritonAMDGPUConvertToBufferOpsBase<
           TritonAMDGPUConvertToBufferOpsPass> {
 
 public:
-  TritonAMDGPUConvertToBufferOpsPass() = default;
-  TritonAMDGPUConvertToBufferOpsPass(StringRef archGen) {
-    this->archGenerationName = archGen.data();
-  };
+  using impl::TritonAMDGPUConvertToBufferOpsBase<
+      TritonAMDGPUConvertToBufferOpsPass>::TritonAMDGPUConvertToBufferOpsBase;
+
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
     ModuleOp mod = getOperation();
 
     // Collect assumptions in the function
-    DenseSet<Value> assumptions;
-    mod.walk([&](LLVM::AssumeOp op) {
-      auto oper = op->getOperand(0);
-      if (oper.getDefiningOp<arith::CmpIOp>()) {
-        assumptions.insert(oper);
-
-        /*  HGCG: add ConvertToBufferOp with data from memory assumptions support.
-         *  This is a trick method to support addPtr with offset from memory load.
-         *        In triton kernel if user write below code, it means that the
-         *  sorted_token_ids_ptr is a pointer to the memory, and all value in the
-         *  memory(like offs_token) is assumed to be non-negative.
-         *        Due to the propagation of assume, the a_ptrs is fit for using
-         *  buffer load ops.
-         *
-         *  Eg:
-         *    tl.assume(sorted_token_ids_ptr.to(tl.int64) >= 0)
-         *    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
-         *    .....
-         *    a_ptrs = a_ptr + (offs_token[:, None]
-         *
-         *  The pattern in triton ir is(%arg6 is the sorted_token_ids_ptr):
-         *
-         *    %1 = tt.ptr_to_int %arg6 : !tt.ptr<i32> -> i64
-         *    %2 = arith.cmpi sge, %1, %c0_i64 : i64
-         *    llvm.intr.assume %2 : i1
-         *
-         *  Here we detect the pattern and add the %arg6(sorted_token_ids_ptr) to the assumption.
-        **/
-        auto cmpIOp = op->getOperand(0).getDefiningOp<arith::CmpIOp>();
-        bool isGe = (cmpIOp.getPredicate() == arith::CmpIPredicate::sge);
-        if (isGe && cmpIOp->getOperand(0).getDefiningOp<triton::PtrToIntOp>()) {
-          auto ptrToIntOp = cmpIOp->getOperand(0).getDefiningOp<triton::PtrToIntOp>();
-          if (isa<BlockArgument>(ptrToIntOp->getOperand(0))
-              && ptrToIntOp->getBlock()->isEntryBlock()) {
-              assumptions.insert(ptrToIntOp->getOperand(0));
-          }
-        }
-      }
-    });
-    LLVM_DEBUG({
-      DBGS() << "Number of assumptions found: " << assumptions.size() << "\n";
-      for (Value assume : assumptions) {
-        DBGS() << "Assumption:" << assume << "\n";
-      }
-    });
-
+    DenseMap<Value, SetVector<Operation *>> assumptions =
+        AMD::TritonIntegerRangeAnalysis::collectAssumptions(getOperation());
     std::shared_ptr<DataFlowSolver> solver = createDataFlowSolver();
-    solver->load<AMD::TritonIntegerRangeAnalysis>();
+    AMD::TritonIntegerRangeAnalysis *rangeAnalysis =
+        solver->load<AMD::TritonIntegerRangeAnalysis>(assumptions);
+    AMD::initializeFuncOps(mod, rangeAnalysis);
     if (failed(solver->initializeAndRun(getOperation())))
       return signalPassFailure();
+
+    // HYGON: Collect assumptions for loads.
+    // This is a moe-specific hack to support loading sorted tokens using buffer ops.
+    // The sorted tokens are assumed to be non-negative, so we collect the assumptions for loads
+    // to ensure that the buffer ops can be used. This is a temporary solution and should be
+    // replaced with a more robust solution in the future.
+    collectAssumptionsForLoad(mod, assumptions);
 
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
@@ -598,7 +619,4 @@ public:
   }
 };
 
-std::unique_ptr<Pass>
-mlir::createTritonAMDGPUConvertToBufferOpsPass(std::string archGen) {
-  return std::make_unique<TritonAMDGPUConvertToBufferOpsPass>(archGen);
-}
+} // namespace mlir

@@ -14,8 +14,8 @@ def get_optimal_config(op_name: str, key: Union[list, dict, tuple, str], device_
             return res
         else:
             import os
-            from triton.runtime.cache import default_cache_dir
-            cache_dir = os.getenv("TRITON_CACHE_DIR", "").strip() or default_cache_dir()
+            from .. import knobs
+            cache_dir = knobs.cache.dir
             print(
                 f"[hcutuner] WARNING: Not found optimal config for {op_name} !!! cache dir: {cache_dir},\t"
                 f"device name: {device_name},\tconfig key: {key}"
