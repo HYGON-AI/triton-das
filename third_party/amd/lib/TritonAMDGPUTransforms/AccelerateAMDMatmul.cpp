@@ -17,22 +17,26 @@ using ::mlir::LLVM::AMD::isChainDotHead;
 using ::mlir::LLVM::AMD::isChainDotTail;
 using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
 using mlir::triton::gpu::chooseScaledMfmaScaleLayout;
+using mlir::triton::gpu::MmacLayout;
 
 namespace mlir {
 
 namespace {
 using triton::AMD::ISAFamily;
 
-bool isMfmaMmacHCU(int mfmaMmacVersion) {
-  return mfmaMmacVersion >= (int)ttg::MfmaMmacLayout::MMAC_DEFAULT;
-}
-
-int getMfmaMmacVersion(StringRef archGen) {
-  if (archGen.contains("gfx926") ||
-      archGen.contains("gfx928") ||
-      archGen.contains("gfx936"))
-      return (int)(ttg::MfmaMmacLayout::MMAC_DEFAULT);
-  return (int)(ttg::MfmaMmacLayout::MFMA);
+MmacLayout getDefaultMmacLayout(StringRef archGen) {
+  // FIXME: Default MMAC layout for Hygon DCUs, not the final version, modify and adjust as needed.
+  static DenseMap<StringRef, MmacLayout> defaultLayoutMap = {
+      {"gfx926", MmacLayout::LEGACY},
+      {"gfx928", MmacLayout::LEGACY},
+      {"gfx92a", MmacLayout::LEGACY},
+      {"gfx936", MmacLayout::LEGACY},
+      {"gfx938", MmacLayout::INTERLEAVE},
+      {"gfx946", MmacLayout::INTERLEAVE},
+      {"gfx948", MmacLayout::INTERLEAVE},
+  };
+  // We treat all other architectures as AMD GPUs.
+  return defaultLayoutMap.contains(archGen) ? defaultLayoutMap[archGen] : MmacLayout::MFMA;
 }
 
 /* Hygon support: mmac v1 dont have chaindot or has special accel mode */
@@ -107,7 +111,7 @@ FailureOr<ScaleDotElemType> mlirTypeToScaledElemType(Type type) {
 
 SmallVector<unsigned, 3>
 warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
-             std::pair<int64_t, int64_t> shapePerWarp, int mfmaMmacVersion = 0) {
+             std::pair<int64_t, int64_t> shapePerWarp) {
   auto rank = shape.size();
   // Case 1: Early exit for batched matmul
   if (rank == 3)
@@ -177,8 +181,8 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
 
 SmallVector<unsigned, 3>
 warpsPerTileMFMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
-                 std::pair<int64_t, int64_t> shapePerWarp, int mfmaMmacVersion = 0) {
-  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp, mfmaMmacVersion);
+                 std::pair<int64_t, int64_t> shapePerWarp) {
+  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp);
 }
 
 SmallVector<unsigned, 3>
@@ -450,13 +454,13 @@ class BlockedToMFMA : public OpRewritePattern<tt::DotOp> {
   int mfmaVersion;
   int nonKDim;
   int kPack;
-  int mfmaMmacVersion;  // Hygon support: mmac has special C/D layout
+  MmacLayout mmacLayout;  // Added for Hygon DCUs
 
 public:
-  BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack, int mfmaMmacVersion,
+  BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack, MmacLayout mmacLayout,
                 PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
-        nonKDim(nonKDim), kPack(kPack), mfmaMmacVersion(mfmaMmacVersion) {}
+        nonKDim(nonKDim), kPack(kPack), mmacLayout(mmacLayout) {}
 
   LogicalResult matchAndRewrite(tt::DotOp dotOp,
                                 PatternRewriter &rewriter) const override {
@@ -508,7 +512,7 @@ public:
     auto kDim = mfmaInstr->kDim;
     auto kBase = mfmaInstr->kBase;
 
-    auto warpsPerTile = warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim}, mfmaMmacVersion);
+    auto warpsPerTile = warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
     // Use transposed mfma layout to enable larger vectorization for global
     // store instructions, except for fp8 matmul kernels due to regression
@@ -525,8 +529,7 @@ public:
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
-        /*instrShape*/ mDim, nDim, isTransposed, CTALayout,
-        *ttg::symbolizeMfmaMmacLayout(mfmaMmacVersion));
+        /*instrShape*/ mDim, nDim, isTransposed, CTALayout, mmacLayout);
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -635,13 +638,13 @@ class ScaledBlockedToMFMA final : public OpRewritePattern<triton::DotScaledOp> {
   int mfmaVersion;
   int nonKDim;
   int kPack;
-  int mfmaMmacVersion;  // Hygon support: mmac has special C/D layout
+  MmacLayout mmacLayout;  // Added for Hygon DCUs
 
 public:
   ScaledBlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim,
-                      int kPack, int mfmaMmacVersion, PatternBenefit benefit = 1)
+                      int kPack, MmacLayout mmacLayout, PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
-        nonKDim(nonKDim), kPack(kPack), mfmaMmacVersion(mfmaMmacVersion) {}
+        nonKDim(nonKDim), kPack(kPack), mmacLayout(mmacLayout) {}
 
   LogicalResult matchAndRewrite(triton::DotScaledOp dotOp,
                                 PatternRewriter &rewriter) const override {
@@ -729,16 +732,14 @@ public:
     // for global store instructions.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
-        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout,
-        ttg::MfmaMmacLayout::MFMA);
+        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
     #endif
 
     // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
         /*instrShape=*/mDim, nDim,
-        /*isTransposed=*/!isMfmaMmacHCU(mfmaMmacVersion), ctaLayout,
-        *ttg::symbolizeMfmaMmacLayout(mfmaMmacVersion));
+        /*isTransposed=*/mmacLayout == MmacLayout::MFMA, ctaLayout, mmacLayout);
     auto newRetType = RankedTensorType::get(
         oldRetType.getShape(), oldRetType.getElementType(), mfmaEnc);
 
@@ -891,13 +892,16 @@ public:
     auto warpsPerTile =
         warpsPerTileMFMA(dotOp, oldShape, numWarps, {mDim, nDim});
 
+#if 0
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
-        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout,
-        MfmaMmacLayout::MFMA);
-
+        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
+#endif
+    auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
+        ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
+        /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout, MmacLayout::MFMA);
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), mfmaEnc);
 
@@ -1318,7 +1322,7 @@ public:
     RewritePatternSet patterns(context);
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
     case ISAFamily::CDNA4:
-      // FIXME: CDNAx are AMD-specific and not available for HYGON DCUs. We should eliminate
+      // FIXME: CDNAx are AMD-specific and not available to HYGON DCUs. We should eliminate
       //        this special handling and separate the mmac logic from the mfma patterns.
       assert(0 && "CDNA4 is not supported yet");
       patterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
@@ -1330,7 +1334,7 @@ public:
     case ISAFamily::CDNA3:
       patterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
-          getMfmaMmacVersion(archGenerationName),
+          getDefaultMmacLayout(archGenerationName),
           /*benefit=*/2);
       break;
     case ISAFamily::RDNA3:

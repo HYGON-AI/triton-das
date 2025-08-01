@@ -695,7 +695,7 @@ bool supportMMA(Value value, int version) {
          (elemTy.isInteger(8) && version >= 2);
 }
 
-bool isMmacV1ToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
+bool isMmacToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
   if (!triton::tools::getBoolEnv("CHAINED_DOT_SHORTCUT"))
     return false;
   auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(srcTy.getEncoding());
@@ -807,14 +807,14 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy) {
   // TODO(jlebar): Remove these special cases `isMfmaToDotShortcut` once
   // they're fully subsumed by the linear-layout checks.
 
-  // TODO(xukang): For isMmacV1ToDotShortcut, since the interleave action is
+  // TODO(xukang): For isMmacToDotShortcut, since the interleave action is
   // taken on the kernel algorithm side, we are not aware of the REAL cvt
   // needed here. So we are depenedent on the environment variable to know if
   // shortcut is enabled.
   return !cvtReordersRegisters(srcTy, dstTy) &&
          !(cvtNeedsWarpShuffle(srcTy, dstTy) &&
            getWarpLayoutConvertDecomposition(srcTy, dstTy)) &&
-         !isMmacV1ToDotShortcut(srcTy, dstTy) &&
+         !isMmacToDotShortcut(srcTy, dstTy) &&
          !matchMmaV3AndDotOperandLayout(srcTy, dstTy) &&
          // to be removed when generalized warp shuffle conversions
          // are ready:

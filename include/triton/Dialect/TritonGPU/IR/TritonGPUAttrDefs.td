@@ -50,15 +50,15 @@ Right now, Triton implements two main classes of layouts: shared, and distribute
   }];
 }
 
-// Enum for MMA layout attribute
-def TTG_MfmaMmacLayoutEnum : I32EnumAttr<
-    "MfmaMmacLayout", "",
+// Enum for HCU MMAC layout attribute
+def TTG_MmacLayoutEnum : I32EnumAttr<
+    "MmacLayout", "",
     [
-        I32EnumAttrCase<"MFMA", 0, "mfma">,  // for AMD layout
-        I32EnumAttrCase<"MMAC_DEFAULT", 10, "mmac_default">,
-        I32EnumAttrCase<"MMAC_4INTERLEAVE", 11, "mmac_4interleave">,
-        I32EnumAttrCase<"MMAC_TRANSPOSE", 12, "mmac_transpose">,
-        I32EnumAttrCase<"MMAC_4INTERLEAVE_TRANSPOSE", 13, "mmac_4interleave_transpose">
+        I32EnumAttrCase<"MFMA", 0, "mfma">,     // for compatibility with traditional AMD layout
+        I32EnumAttrCase<"LEGACY", 1, "legacy">, // no interleaving, no transpose
+        I32EnumAttrCase<"INTERLEAVE", 2, "interleave">,
+        I32EnumAttrCase<"TRANSPOSE", 3, "transpose">,
+        I32EnumAttrCase<"INTERLEAVE_TRANSPOSE", 4, "interleave_transpose">
     ]> {
     let cppNamespace = "::mlir::triton::gpu";
 }
@@ -1038,11 +1038,11 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
     "unsigned":$NDim,
     "bool":$isTransposed,
     "CTALayoutAttr":$CTALayout,
-    DefaultValuedParameter<"MfmaMmacLayout", "MfmaMmacLayout::MMAC_DEFAULT">:$mfmaMmacLayout
+    DefaultValuedParameter<"MmacLayout", "MmacLayout::LEGACY">:$mmacLayout
   );
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
-    bool isMmacHCU() const;
+    bool isHCUMmac() const;
     SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
     SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;

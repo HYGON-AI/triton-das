@@ -38,7 +38,7 @@ using ::mlir::LLVM::AMD::shuffleXor;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::LinearEncodingAttr;
-using ::mlir::triton::gpu::MfmaMmacLayout;
+using ::mlir::triton::gpu::MmacLayout;
 
 using ValueTable = std::map<std::array<int, 3>, Value>;
 
@@ -79,7 +79,7 @@ struct DotOpMFMAConversionHelper {
         typeConverter(typeConverter), loc(loc), ctx(mfmaLayout.getContext()) {}
 
   Value generateMFMAOp(StringRef intrinsicName, Value valA, Value valB,
-                       Value valC, MfmaMmacLayout mfmaMmacLayout) const {
+                       Value valC, MmacLayout mmacLayout) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
     Value zeroFlag = b.i32_val(0);
@@ -88,11 +88,11 @@ struct DotOpMFMAConversionHelper {
     Value i32Flag = b.i32_val(0);
     Value i1Flag = b.false_val();
     bool isMmacLTS =
-        mfmaMmacLayout == MfmaMmacLayout::MMAC_TRANSPOSE ||
-        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE;
+        mmacLayout == MmacLayout::TRANSPOSE ||
+        mmacLayout == MmacLayout::INTERLEAVE_TRANSPOSE;
     bool isMmacLIT =
-        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE ||
-        mfmaMmacLayout == MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE;
+        mmacLayout == MmacLayout::INTERLEAVE ||
+        mmacLayout == MmacLayout::INTERLEAVE_TRANSPOSE;
     Value ltsFlag = isMmacLTS ? b.true_val() : b.false_val();
     Value litFlag = isMmacLIT ? b.true_val() : b.false_val();
     if (intrinsicName.compare("rocdl.mmac.16x16x4.f32") == 0) {
@@ -332,17 +332,17 @@ struct DotOpMFMAConversionHelper {
     auto numRepK = repA[2];
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
-    auto mfmaMmacLayout = mfmaLayout.getMfmaMmacLayout();
-    bool isMmacHCU = mfmaLayout.isMmacHCU();
+    auto mmacLayout = mfmaLayout.getMmacLayout();
+    bool isHCUMmac = mfmaLayout.isHCUMmac();
     bool preserveBF16 = intrinsicName.contains(".bf16") && mfmaVersion >= 4;
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
         aTensorTy.getElementType(), allowXF32, preserveBF16, /*isConstantScale=*/false,
-        isMmacHCU);
+        isHCUMmac);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
         aTensorTy.getElementType(), allowXF32, preserveBF16, /*isConstantScale=*/false,
-        isMmacHCU);
+        isHCUMmac);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -373,10 +373,10 @@ struct DotOpMFMAConversionHelper {
             acc = mfmaLayout.getIsTransposed()
                       ? generateMFMAOp(intrinsicName, operandB[{b, n, k}],
                                        operandA[{b, m, k}], acc,
-                                       mfmaMmacLayout)
+                                       mmacLayout)
                       : generateMFMAOp(intrinsicName, operandA[{b, m, k}],
                                        operandB[{b, n, k}], acc,
-                                       mfmaMmacLayout);
+                                       mmacLayout);
             if (!firstMfma)
               firstMfma = acc;
           }
@@ -408,9 +408,9 @@ struct DotOpMFMAConversionHelper {
   /// rawElems is a vector of kBase elements. Each element is of the raw
   /// element type from the input. We need to prepare a vector of kBase
   /// elements of appropriate element type required by mfma instructions.
-  /// FIXME: isMmacHCU is a special handling for Hygon DCUs and should be eliminated
+  /// FIXME: isHCUMmac is a special handling for Hygon DCUs and should be eliminated
   ///        once Hygon DCU backend is implemented in Triton.
-  Value prepareOperands(Value rawElems, int kBase, Type type, bool preserveBF16, bool isMmacHCU,
+  Value prepareOperands(Value rawElems, int kBase, Type type, bool preserveBF16, bool isHCUMmac,
                         bool isConstantScale = false) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     Value results;
@@ -473,7 +473,7 @@ struct DotOpMFMAConversionHelper {
         // This is for int8 on pre- CDNA3 GPUs
         results = b.bitcast(vec, i32_ty);
       if (8 == kBase)
-        results = isMmacHCU ? pack8BitToI32(vec, 8) : b.bitcast(vec, i64_ty);
+        results = isHCUMmac ? pack8BitToI32(vec, 8) : b.bitcast(vec, i64_ty);
       if (16 == kBase)
         // This is only for the operands of scaled mfma on CDNA4
         results = b.bitcast(vec, vec_ty(i32_ty, 4));
@@ -490,7 +490,7 @@ struct DotOpMFMAConversionHelper {
   virtual ValueTable getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int nonKRep, int kRepInKWidth, int kWidth,
       int kBase, Type type, bool allowXF32, bool preserveBF16,
-      bool isConstantScale = false, bool isMmacHCU = false) const {
+      bool isConstantScale = false, bool isHCUMmac = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     // number of kBase-element vectors
@@ -531,21 +531,21 @@ struct DotOpMFMAConversionHelper {
             } else {
               // mmac_f32_m16n16k8_f32 support
               dotOpVals[{b, nonK, kBaseVec}] =
-                prepareOperands(rawElems, kBase, f32_ty, preserveBF16, isMmacHCU);
+                prepareOperands(rawElems, kBase, f32_ty, preserveBF16, isHCUMmac);
             }
           } else {
             Value vals;
             if (type.isF32() && allowXF32) {
-              assert(!isMmacHCU && "XF32 is not supported for HCU");
-              vals = prepareOperands(rawElems, kBase, f32_ty, preserveBF16, isMmacHCU);
+              assert(!isHCUMmac && "XF32 is not supported for HCU");
+              vals = prepareOperands(rawElems, kBase, f32_ty, preserveBF16, isHCUMmac);
             } else if (type.getIntOrFloatBitWidth() == 8) {
-              vals = prepareOperands(rawElems, kBase, i8_ty, preserveBF16, isMmacHCU,
+              vals = prepareOperands(rawElems, kBase, i8_ty, preserveBF16, isHCUMmac,
                                      isConstantScale);
             } else if (type.isBF16()) {
-              vals = prepareOperands(rawElems, kBase, bf16_ty, preserveBF16, isMmacHCU);
+              vals = prepareOperands(rawElems, kBase, bf16_ty, preserveBF16, isHCUMmac);
             } else {
               assert(type.isF16() && "Unsupported data type");
-              vals = prepareOperands(rawElems, kBase, f16_ty, preserveBF16, isMmacHCU);
+              vals = prepareOperands(rawElems, kBase, f16_ty, preserveBF16, isHCUMmac);
             }
 
             // Step 3: Insert the processed vals into the ValueTable

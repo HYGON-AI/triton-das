@@ -476,7 +476,7 @@ using ::mlir::triton::gpu::CTALayoutAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
 using ::mlir::triton::gpu::SliceEncodingAttr;
-using ::mlir::triton::gpu::MfmaMmacLayout;
+using ::mlir::triton::gpu::MmacLayout;
 
 Value dot(RewriterBase &rewriter, Location loc, ArrayRef<Value> offsets,
           ArrayRef<Value> strides);

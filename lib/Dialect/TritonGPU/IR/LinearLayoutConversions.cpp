@@ -392,32 +392,32 @@ static LinearLayout broadcastedDotOperandLayout(MLIRContext *ctx,
 }
 
 inline LinearLayout
-getLinearLayoutForMmacLayout(MLIRContext *ctx, MfmaMmacLayout mfmaMmacLayout,
+getLinearLayoutForMmacLayout(MLIRContext *ctx, MmacLayout mmacLayout,
                              ArrayRef<StringAttr> outDimNames) {
   StringAttr kRegister = S("register");
   StringAttr kLane = S("lane");
-  switch (mfmaMmacLayout) {
-  case MfmaMmacLayout::MMAC_DEFAULT:
+  switch (mmacLayout) {
+  case MmacLayout::LEGACY:
     return LinearLayout(
         {{kRegister, {{4, 0}, {8, 0}}},
          {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}}}},
         outDimNames);
-  case MfmaMmacLayout::MMAC_4INTERLEAVE:
+  case MmacLayout::INTERLEAVE:
     return LinearLayout(
         {{kRegister, {{1, 0}, {2, 0}}},
          {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {4, 0}, {8, 0}}}},
         outDimNames);
-  case MfmaMmacLayout::MMAC_TRANSPOSE:
+  case MmacLayout::TRANSPOSE:
     return LinearLayout(
         {{kRegister, {{0, 4}, {0, 8}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 1}, {0, 2}}}},
         outDimNames);
-  case MfmaMmacLayout::MMAC_4INTERLEAVE_TRANSPOSE:
+  case MmacLayout::INTERLEAVE_TRANSPOSE:
     return LinearLayout(
         {{kRegister, {{0, 1}, {0, 2}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 4}, {0, 8}}}},
         outDimNames);
-  case MfmaMmacLayout::MFMA:
+  case MmacLayout::MFMA:
     assert(false && "This function is only used for mmac layout");
   default:
     assert(false && "Unsupported layout");
@@ -475,7 +475,7 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
           {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
-    assert(isMmacHCU());
+    assert(isHCUMmac());
     // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
     //
     // For the register (i.e., element) dimension, these 4 elements are along
@@ -485,7 +485,7 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     // matrix C's N dimension, with 16 consecutive threads covering a whole
     // row and the next 16 threads start after a gap spanning 4 rows.
     tileLayout = getLinearLayoutForMmacLayout(
-        ctx, getMfmaMmacLayout(),
+        ctx, getMmacLayout(),
         {outDimNames[order[0]], outDimNames[order[1]]});
 
     // For mfma.transposed layout, the element ownership among threads are

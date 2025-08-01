@@ -241,7 +241,7 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy);
 
 bool atomicNeedsSharedMemory(Value result);
 
-bool isMmacV1ToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
+bool isMmacToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
 
 // Return true if the src and dst layout match.
 bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,

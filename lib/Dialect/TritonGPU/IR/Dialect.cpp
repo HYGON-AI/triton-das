@@ -1290,7 +1290,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
   SmallVector<unsigned> warpsPerCTA;
   SmallVector<unsigned> instrShape;
   bool isTransposed;
-  unsigned mfmaMmacLayout;
+  unsigned mmacLayout;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
   std::optional<SmallVector<unsigned>> CTASplitNum;
   std::optional<SmallVector<unsigned>> CTAOrder;
@@ -1332,8 +1332,8 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
               .failed())
         return {};
     }
-    if (attr.getName() == "mfmaMmacLayout") {
-      if (parseUInt(parser, attr, mfmaMmacLayout, "mfmaMmacLayout").failed())
+    if (attr.getName() == "mmacLayout") {
+      if (parseUInt(parser, attr, mmacLayout, "mmacLayout").failed())
         return {};
     }
   }
@@ -1346,7 +1346,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
   return parser.getChecked<AMDMfmaEncodingAttr>(
       parser.getContext(), versionMajor, versionMinor, warpsPerCTA,
       instrShape[0], instrShape[1], isTransposed, *CTALayout,
-      *symbolizeMfmaMmacLayout(mfmaMmacLayout));
+      *symbolizeMmacLayout(mmacLayout));
 }
 
 void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
@@ -1356,7 +1356,7 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
           << ", warpsPerCTA = [" << getWarpsPerCTA() << "]"              //
           << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
           << ", isTransposed = " << getIsTransposed()
-          << ", mfmaMmacLayout = " << (uint32_t)getMfmaMmacLayout();
+          << ", mmacLayout = " << (uint32_t)getMmacLayout();
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getRank());
   printer << "}>";
@@ -1368,7 +1368,7 @@ AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
                             llvm::ArrayRef<unsigned int> warpsPerCTA,
                             unsigned mDim, unsigned nDim, bool isTransposed,
                             mlir::triton::gpu::CTALayoutAttr,
-                            mlir::triton::gpu::MfmaMmacLayout mfmaMmacLayout) {
+                            mlir::triton::gpu::MmacLayout mmacLayout) {
   if (!(versionMajor >= 0 && versionMajor <= 4)) {
     return emitError() << "major version must be in the [0, 4] range";
   }
@@ -1714,9 +1714,8 @@ void AMDRotatingSharedEncodingAttr::print(AsmPrinter &printer) const {
 // TODO: there is a lot of common code with MmaEncoding here
 
 /* Hygon support: mmac has special C/D layout */
-bool AMDMfmaEncodingAttr::isMmacHCU() const {
-  return (uint32_t)getMfmaMmacLayout() >=
-         (uint32_t)mlir::triton::gpu::MfmaMmacLayout::MMAC_DEFAULT;
+bool AMDMfmaEncodingAttr::isHCUMmac() const {
+  return getMmacLayout() != MmacLayout::MFMA;
 }
 
 SmallVector<unsigned> AMDMfmaEncodingAttr::getCTAsPerCGA() const {
