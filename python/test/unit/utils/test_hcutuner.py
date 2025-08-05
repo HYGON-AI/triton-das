@@ -6,7 +6,7 @@ import tempfile
 import triton
 import triton.language as tl
 import pytest
-from triton.runtime.cache import default_cache_dir
+from triton.knobs import cache as cache_knob
 import subprocess
 from triton.utils.hcutuner import get_config_key, get_gpu_label
 
@@ -16,8 +16,7 @@ def do_bench(kernel_call, quantiles):
 
 
 def get_save_config_root_dir():
-    cache_dir = os.getenv("TRITON_CACHE_DIR", "").strip() or default_cache_dir()
-    return f"{cache_dir}/configs"
+    return f"{cache_knob.dir}/configs"
 
 
 def get_gpu_label():

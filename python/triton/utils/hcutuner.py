@@ -36,8 +36,7 @@ def _get_result_template(key: list):
 
 
 def get_config_cache_dir():
-    cache_dir = os.getenv("TRITON_CACHE_DIR", "").strip() or default_cache_dir()
-    return os.path.join(cache_dir, "configs")
+    return os.path.join(cache_knob.dir, "configs")
 
 
 def _split_list_balanced(m, n):
@@ -537,12 +536,14 @@ def _get_cache_hash(fn, autotune_param_hash, key_hash, kernel_config_hash, *args
 
     nargs = dict(zip(fn.arg_names, args))
     all_args = {**nargs, **kwargs}
-    sigkeys = [fn.params[i].name for i in fn.non_constexpr_indices]
+    constexpr_indices = [i for (i, p) in enumerate(fn.params) if p.is_constexpr]
+    non_constexpr_indices = [i for (i, p) in enumerate(fn.params) if not p.is_constexpr]
+    sigkeys = [fn.params[i].name for i in non_constexpr_indices]
     signature = {k: mangle_type(all_args[k]) for k in sigkeys}
     options = backend.parse_options(kwargs).__dict__
 
     constants = {}
-    for i in fn.constexpr_indices:
+    for i in constexpr_indices:
         if (name := fn.arg_names[i]) in all_args:
             constants[name] = all_args[name]
 
