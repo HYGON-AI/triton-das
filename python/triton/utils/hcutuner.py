@@ -90,6 +90,9 @@ class Hcutuner(triton.runtime.Autotuner):
         self.autotune_key_hash = get_list_hash(self.keys)
         self.kernel_config_hash = get_config_list_hash(self.configs)
 
+        # dict(<key: best config's timings>)
+        self._configs_timings = {}
+
     def warmup(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
         ret = []
@@ -175,6 +178,8 @@ class Hcutuner(triton.runtime.Autotuner):
                    self.perf_dict = {}
 
             config = self.cache[key]
+            if self.configs_timings:
+                self._configs_timings[key] = self.configs_timings[config]
         else:
             config = self.configs[0]
         self.best_config = config
@@ -209,11 +214,11 @@ class Hcutuner(triton.runtime.Autotuner):
                 new_key.append(k)
                 indices.append(i)
         key_name = [key_name[i] for i in indices]
-        key = str(new_key[0] if len(new_key) == 1 else tuple(new_key))
+        new_key = str(new_key[0] if len(new_key) == 1 else tuple(new_key))
         configs = file_cache[fname] if fname in file_cache else _get_result_template(key_name)
-        if key not in configs['configs']:
-            configs['configs'][key] = self.best_config.all_kwargs()
-            configs['timings'][key] = self.configs_timings[self.best_config]
+        if new_key not in configs['configs']:
+            configs['configs'][new_key] = self.best_config.all_kwargs()
+            configs['timings'][new_key] = self._configs_timings[key]
             with open(fname, "w") as f:
                 json.dump(configs, f, indent=4)
             file_cache[fname] = configs
@@ -229,11 +234,11 @@ class Hcutuner(triton.runtime.Autotuner):
         cache_manager = self.get_config_cache_manager(*args, **kwargs)
         key = cache_manager.key
         config_key_name, config_key = get_config_key(arg_names, keys, *args, **kwargs)
-        config_key = str(config_key)
+        _config_key = str(config_key)
         cache_json = config_cache[key] if key in config_cache else _get_result_template(config_key_name)
-        if config_key not in cache_json:
-            cache_json['configs'][config_key] = self.best_config.all_kwargs()
-            cache_json['timings'][config_key] = self.configs_timings[self.best_config]
+        if _config_key not in cache_json:
+            cache_json['configs'][_config_key] = self.best_config.all_kwargs()
+            cache_json['timings'][_config_key] = self._configs_timings[config_key]
             # print(f"[hcutuner] added best config to {cache_manager.cache_dir}")
             cache_manager.put(cache_json, "config.json", False)
             config_cache[key] = cache_json
@@ -249,7 +254,7 @@ class Hcutuner(triton.runtime.Autotuner):
                 kv = _create_config_args(v)
                 config = triton.Config(**kv)
                 self.cache[kt] = config
-                self.configs_timings[config] = data['timings'][str(kt)]
+                self._configs_timings[kt] = data['timings'][str(kt)]
 
     def get_config_cache_manager(self, *args, **kwargs):
         key = _base32(_get_cache_hash(self.fn, self.autotune_param_hash, self.autotune_key_hash,

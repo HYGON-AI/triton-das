@@ -271,9 +271,9 @@ def test_restore_cache(device: str, always_tuning: bool):
     files = get_config_cache_files(fn, src[0], M[0], N[0])
     assert len(files) == 1
     fn.restore_tuned_cache(src[0], M[0], N[0])
-    assert len(fn.cache) == len(fn.configs_timings) == SIZE
-    for _, v in fn.cache.items():
-        assert v in fn.configs_timings
+    assert len(fn.cache) == len(fn._configs_timings) == SIZE
+    for k, _ in fn.cache.items():
+        assert k in fn._configs_timings
 
     # cache hit
     keys = [str(o) for o in fn.cache.keys()]
