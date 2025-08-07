@@ -11,6 +11,7 @@ queried using the show command.
 
 import os
 import json
+import torch
 from collections import defaultdict
 from absl import app  # pylint: disable=unused-import
 from absl import flags
@@ -141,8 +142,9 @@ def _hoist_key(data, keys, hoisted):
   grouped = defaultdict(dict)
   for k, v in parsed.items():
     gk = tuple([k[i] for i in hoisted_ids])
-    kk = [k[i] for i in keep_ids]
-    kk = tuple(kk) if len(kk) > 1 else kk[0]
+    kk = [eval(k[i]) if not isinstance(eval(k[i]), str) else k[i][1:-1] \
+          for i in keep_ids]
+    kk = str(tuple(kk)) if len(kk) > 1 else str(kk[0])
     grouped[gk][kk] = v
 
   res, group_names = [], []
@@ -178,14 +180,15 @@ def _get_filename(output_dir, group_name=''):
 def export():
   """Function triggered by export command."""
   loader = ConfigLoader(_OCCLI_DIR.value)
-  cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value).cache
+  cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value)
 
   configs, group_names = [], []
+  _cache = cache.cache
   if _OCCLI_HOIST_KEY.value:
-    configs, group_names = _hoist_key(cache['configs'], cache['key'],
+    configs, group_names = _hoist_key(_cache['configs'], _cache['key'],
                                       _OCCLI_HOIST_KEY.value.split(','))
   else:
-    configs = [cache['configs']]
+    configs = [_cache['configs']]
 
   if len(group_names) == 0:
     assert len(configs) == 1

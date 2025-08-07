@@ -323,7 +323,7 @@ def test_dist_launch(world_size, sharding):
 
     global_config_loader.load_all()
     config_cache = global_config_loader.get_tuned_cache(filename, get_gpu_label()).cache
-    assert config_cache['key'] == ['M']
+    assert config_cache['key'] == ['M', 'dst', 'src']
     # M = [256, 512, 1024, 1536, 2048, 3072, 4096], len(M) == 7
     assert len(config_cache['configs']) == len(config_cache['timings']) == 7
 

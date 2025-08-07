@@ -207,18 +207,11 @@ class Hcutuner(triton.runtime.Autotuner):
         """
         fname = os.path.join(self.save_config_dir, "config.json")
         key_name, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
-        # simplify key, remove dtypes
-        indices, new_key = [], []
-        for i, k in enumerate(key):
-            if not isinstance(k, str):
-                new_key.append(k)
-                indices.append(i)
-        key_name = [key_name[i] for i in indices]
-        new_key = str(new_key[0] if len(new_key) == 1 else tuple(new_key))
+        _key = str(key)
         configs = file_cache[fname] if fname in file_cache else _get_result_template(key_name)
-        if new_key not in configs['configs']:
-            configs['configs'][new_key] = self.best_config.all_kwargs()
-            configs['timings'][new_key] = self._configs_timings[key]
+        if _key not in configs['configs']:
+            configs['configs'][_key] = self.best_config.all_kwargs()
+            configs['timings'][_key] = self._configs_timings[key]
             with open(fname, "w") as f:
                 json.dump(configs, f, indent=4)
             file_cache[fname] = configs
@@ -393,11 +386,20 @@ class TunedConfig:
         self.cache = cache
 
     def get_optimal_config(self, key: Union[list, dict, tuple, str]):
-        if isinstance(key, dict):
-            key = [key[n] for n in self.cache['key']]
+        def handle(value):
+            if hasattr(value, "dtype"): # torch tensor
+                return str(value.dtype)
+            elif isinstance(value, torch.dtype):
+                return str(value)
+            else: # int, float, bool, str
+                return value
 
-        if isinstance(key, (list, tuple)):
-            key = str(key[0] if len(key) == 1 else tuple(key))
+        if not isinstance(key, str):
+            keys = self.cache['key']
+            if isinstance(key, (list, tuple)):
+                key = dict(zip(keys, key))
+            _key = [handle(key[n]) for n in keys]
+            key = str(_key[0] if len(_key) == 1 else tuple(_key))
 
         if key in self.cache['configs']:
             return self.cache['configs'][key]
@@ -697,7 +699,6 @@ class JITFunctionWithConfig(KernelWithConfigInterface[T]):
                     key = self.get_key_fn(tuned.cache['configs'], nargs)
                 else:
                     key = [nargs[k] for k in tuned.cache['key']]
-                    key = str(key[0]) if len(key) == 1 else str(tuple(key))
                 config = tuned.get_optimal_config(key)
                 if not config:
                     print(

@@ -1,11 +1,8 @@
 import os
 import json
-import torch
 import tempfile
 
-import triton
 import triton.language as tl
-import pytest
 import subprocess
 from triton.utils.hcutuner import get_gpu_label
 from pathlib import Path
@@ -74,7 +71,7 @@ def test_export():
 
         with open(f"{tmp_dir}/test.json") as f:
             data = json.load(f)
-        list(data.keys())[0] == '(256, 16, 512)'
+        list(data.keys())[0] == '(256, 16, 512, torch.float32)'
 
 
 def test_export_hoist():
@@ -95,4 +92,4 @@ def test_export_hoist():
         with open(f"{tmp_dir}/test-N=16,K=512-fp32.json") as f:
             data = json.load(f)
         assert len(data) == 2
-        assert list(data.keys())[0] == '256'
+        assert list(data.keys())[0] == "(256, 'torch.float32')"

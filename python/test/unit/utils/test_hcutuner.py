@@ -82,8 +82,8 @@ def test_save_config(device: str):
         for k in ["key", "configs", "timings"]:
             assert k in data
         assert len(data['configs']) == len(data['timings']) == 1
-        assert list(data['configs'].keys())[0] == "1024"
-        assert list(data['timings'].keys())[0] == "1024"
+        assert list(data['configs'].keys())[0] == "(1024, 'torch.float32')"
+        assert list(data['timings'].keys())[0] == "(1024, 'torch.float32')"
         assert (value := list(data['configs'].values())[0])['BLOCK_SIZE'] == 32 or \
                 value['BLOCK_SIZE'] == 128
 
@@ -149,13 +149,13 @@ def test_restore_config(pass_kwargs_to_kernel, device):
     triton.utils.global_config_loader.load_all()
     key_dict = {
         'N': N,
+        'src': src.dtype,
     }
     config = triton.utils.get_optimal_config("_kernel", key_dict)
     _kernel[grid](*args, **kwargs, **config)
     triton.testing.assert_close(src, torch.ones_like(src))
-    config2 = triton.utils.get_optimal_config("_kernel", [N])
-    config3 = triton.utils.get_optimal_config("_kernel", str(N))
-    assert config == config2 == config3
+    config2 = triton.utils.get_optimal_config("_kernel", [N, src.dtype])
+    assert config == config2
 
 
 @pytest.mark.parametrize('device', ['cuda'])
@@ -237,6 +237,7 @@ def test_mp_restore_config(device, world_size):
     triton.utils.global_config_loader.load_all()
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     key_dict = {
+        'src': src,
         'N': N,
     }
     config = triton.utils.get_optimal_config("_kernel_mp", key_dict)
@@ -455,9 +456,9 @@ def test_hcutune_configured(device: str = "cuda"):
 
     # test get_key_fn
     def get_key_fn(data, META):
-        total_N = [eval(o) for o in data.keys()]
-        n = min(total_N, key=lambda x: abs(x - META['N']))
-        return str(n)
+        assert len(data.keys()) == 1
+        key = list(data.keys())[0]
+        return key
 
     src = torch.zeros(N, device=device)
     fn_infer = triton.utils.hcutune_configured(get_key_fn=get_key_fn)(_kernel_hcutune_configured)
