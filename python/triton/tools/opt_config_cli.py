@@ -16,6 +16,7 @@ from collections import defaultdict
 from absl import app  # pylint: disable=unused-import
 from absl import flags
 from absl.flags import argparse_flags
+from pathlib import Path
 
 import argparse
 from triton.utils.hcutuner import get_config_cache_dir, ConfigLoader
@@ -58,10 +59,37 @@ _OCCLI_DELIMITER = flags.DEFINE_string(
     name='delimiter', default='-',
     help='The delimiter for the field in the file name.')
 
+_OCCLI_HOIST_DTYPE = flags.DEFINE_bool(
+    name='hoist_dtype', default=False,
+    help='The dtype keyset are hoisted to filename.')
+
+_OCCLI_KEEP_KEY = flags.DEFINE_string(
+    name='keep_key', default=None,
+    help='As opposed to --hoist_key')
+
 command_required_flags = {
     'show': [],
     'export': ['kernel', 'device', 'output'],
 }
+
+
+def to_type(t):
+  if t == "'torch.float32'":
+    return 'fp32'
+  elif t == "'torch.float16'":
+    return 'fp16'
+  elif t == "'torch.bfloat16'":
+    return 'bf16'
+  elif t == "'torch.int32'":
+    return 'i32'
+  elif t == "'torch.int8'":
+    return 'i8'
+  elif t == "'torch.'":
+    return 'bf16'
+  elif t.startswith("'torch.float8_'"):
+    return 'fp8'
+  else:
+    return t
 
 
 def _show_config(loader, kernel, device_name, indent=""):
@@ -150,7 +178,20 @@ def _hoist_key(data, keys, hoisted):
   res, group_names = [], []
   for k, v in grouped.items():
     res.append(v)
-    group_names.append(_OCCLI_DELIMITER.value.join([f"{n}={_v}" for n, _v in zip(hoisted, k)]))
+    kv, dtypes = [], []
+    for n, _v in zip(hoisted, k):
+      if isinstance(eval(_v), bool):
+        kv.append(f"{n}={eval(_v)}")
+      elif isinstance(eval(_v), str) and _v.startswith("'torch."):
+        dtypes.append(f"{to_type(_v)}")
+      else:
+        kv.append(f"{n}={_v}")
+    if dtypes:
+      if len(set(dtypes)) == 1:
+        kv.append(f"dtype={dtypes[0]}")
+      else:
+        kv.append(f"dtype={'_'.join(dtypes)}")
+    group_names.append(_OCCLI_DELIMITER.value.join(kv))
 
   return res, group_names
 
@@ -172,7 +213,8 @@ def _get_filename(output_dir, group_name=''):
   else:
     if group_name != '':
       # add group_name at the head of filename
-      filename = group_name + _OCCLI_DELIMITER.value + filename
+      filename = Path(filename)
+      filename = filename.with_stem(f'{filename.stem}{_OCCLI_DELIMITER.value}{group_name}')
 
   return os.path.join(output_dir, filename)
 
@@ -180,27 +222,38 @@ def _get_filename(output_dir, group_name=''):
 def export():
   """Function triggered by export command."""
   loader = ConfigLoader(_OCCLI_DIR.value)
-  cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value)
-
-  configs, group_names = [], []
-  _cache = cache.cache
-  if _OCCLI_HOIST_KEY.value:
-    configs, group_names = _hoist_key(_cache['configs'], _cache['key'],
-                                      _OCCLI_HOIST_KEY.value.split(','))
-  else:
-    configs = [_cache['configs']]
-
-  if len(group_names) == 0:
-    assert len(configs) == 1
-    group_names = ['']
+  _cache = loader.get_tuned_cache(_OCCLI_KERNEL.value, _OCCLI_DEVICE_NAME.value).cache
 
   output_dir = _OCCLI_OUTPUT_DIR.value if _OCCLI_OUTPUT_DIR.value else os.getcwd()
   os.makedirs(output_dir, exist_ok=True)
 
-  for i, config in enumerate(configs):
-    output_file = _get_filename(output_dir, group_names[i])
-    if config:
-      with open(output_file, "w") as f:
+  change_key = True if _OCCLI_HOIST_DTYPE.value or _OCCLI_HOIST_KEY.value \
+                        or _OCCLI_KEEP_KEY.value else False
+
+  if not change_key:
+    with open(_get_filename(output_dir), "w") as f:
+      json.dump(_cache['configs'], f, indent=4)
+  else:
+    if _OCCLI_KEEP_KEY.value:
+      keep_keys = _OCCLI_KEEP_KEY.value.split(',')
+      hoisted_keys = [k for k in _cache['key'] if k not in keep_keys]
+    else:
+      hoisted_keys = set()
+      if _OCCLI_HOIST_KEY.value:
+        for k in _OCCLI_HOIST_KEY.value.split(','):
+          hoisted_keys.add(k)
+
+      if _OCCLI_HOIST_DTYPE.value:
+        keys = _cache['key']
+        vals = list(_cache['configs'].keys())[0][1:-1].split(', ')
+        for k, v in zip(keys, vals):
+          if isinstance(v, str) and v.startswith("'torch."):
+            hoisted_keys.add(k)
+      hoisted_keys = list(hoisted_keys)
+
+    configs, group_names = _hoist_key(_cache['configs'], _cache['key'], hoisted_keys)
+    for g, config in zip(group_names, configs):
+      with open(_get_filename(output_dir, g), "w") as f:
         json.dump(config, f, indent=4)
 
 
@@ -231,6 +284,8 @@ def add_export_subparser(subparsers):
       'To export the specfied kernel\'s optimal configs to JSON file:\n'
       '$opt_config_cli export --kernel _layernorm_kernel --device DCU_K100_AI'
       ' --output _layernorm_kernel-DCU_K100_AI-fp32.json'
+      ' [--hoist_dtype]'
+      ' [--keep_dtype key,...]'
       ' [--hoist_key key,...]'
       ' [--output_dir /path/to/save/output/file]'
       ' [--dir /path/to/triton/config/cache/dir]\n\n')

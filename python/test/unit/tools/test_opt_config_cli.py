@@ -93,3 +93,45 @@ def test_export_hoist():
             data = json.load(f)
         assert len(data) == 2
         assert list(data.keys())[0] == "(256, 'torch.float32')"
+
+
+def test_export_hoist_dtype():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cmd = ["opt_config_cli", "export", "--kernel", "_kernel_opt_config_cli",
+            "--device", get_gpu_label(), "--output", "test-%G.json",
+            "--output_dir", tmp_dir, "--hoist_key", "N,K", "--hoist_dtype"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE)
+        assert res.returncode == 0
+
+        files = os.listdir(tmp_dir)
+        assert len(files) == 3
+        for f in files:
+            assert f in ["test-N=16-K=512-dtype=fp32.json",
+                         "test-N=32-K=1024-dtype=fp32.json",
+                         "test-N=8-K=2048-dtype=fp32.json",]
+
+        with open(f"{tmp_dir}/test-N=16-K=512-dtype=fp32.json") as f:
+            data = json.load(f)
+        assert len(data) == 2
+        assert list(data.keys())[0] == "256"
+
+
+def test_export_keep_key():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cmd = ["opt_config_cli", "export", "--kernel", "_kernel_opt_config_cli",
+            "--device", get_gpu_label(), "--output", "test.json",
+            "--output_dir", tmp_dir, "--keep_key", "M"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE)
+        assert res.returncode == 0
+
+        files = os.listdir(tmp_dir)
+        assert len(files) == 3
+        for f in files:
+            assert f in ["test-N=16-K=512-dtype=fp32.json",
+                         "test-N=32-K=1024-dtype=fp32.json",
+                         "test-N=8-K=2048-dtype=fp32.json",]
+
+        with open(f"{tmp_dir}/test-N=32-K=1024-dtype=fp32.json") as f:
+            data = json.load(f)
+        assert len(data) == 1
+        assert list(data.keys())[0] == "512"
