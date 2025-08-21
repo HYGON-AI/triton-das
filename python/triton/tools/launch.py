@@ -51,7 +51,10 @@ def parse_args():
                              "It is in conflict with triton.utils.dist_perf_report, and enable it on means that "
                              "triton.utils.dist_perf_report(x_vals/cases sharding) is disabled and replaced by "
                              "triton.testing.perf_report")
-
+    parser.add_argument("--perf", action="store_true",
+                        help="Use the tuned best config in the cache for benchmarking. "
+                             "If config does not exist, Hcutuner is equivalent to Autotuner, "
+                             "no caching and restoring of best config is performed.")
     # positional
     parser.add_argument("src", type=str,
                         help="The full path to the single-process "
@@ -80,6 +83,9 @@ def main():
 
     if args.configs_sharding:
         current_env["TRITON_HCUTUNE_CONFIGS_SHARDING"] = "1"
+
+    if args.perf:
+        current_env["TRITON_HCUTUNE_PERF_MODE"] = "1"
 
     processes = []
     for local_rank in range(0, args.nproc):

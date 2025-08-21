@@ -503,3 +503,25 @@ def test_hcutune_configured_warmup(monkeypatch, device: str = "cuda"):
 
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     _kernel_hcutune_configured_tuning[grid](src, N)
+
+
+@pytest.mark.parametrize('perf_mode', ['1', '0', '1'])
+def test_hcutune_perf(monkeypatch, perf_mode, device: str = "cuda"):
+    if perf_mode == '1':
+        triton.utils.global_config_loader.load_all()
+    monkeypatch.setenv("TRITON_HCUTUNE_PERF_MODE", perf_mode)
+
+    N = 1024
+    src = torch.zeros(N, device=device)
+    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+
+    @triton.utils.hcutune(configs=configs, key=['N'], restore_value=['src'], do_bench=do_bench)
+    @triton.jit
+    def _kernel_hcutune_perf(src, N, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        tl.store(src + offsets, x, mask=offsets < N)
+
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    _kernel_hcutune_perf[grid](src, N)
+    triton.testing.assert_close(src, torch.ones_like(src))

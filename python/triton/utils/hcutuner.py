@@ -76,9 +76,9 @@ class Hcutuner(triton.runtime.Autotuner):
         # create dir for saving config (e.g. ~/.triton/cache/configs/...)
         device_name = get_gpu_label()
         run_id = str(uuid.uuid4()) # random run_id for multiprocessing
-        fn_name = fn.fn.__name__ if isinstance(fn, triton.runtime.autotuner.Heuristics) else fn.__name__
+        self._fn_name = fn.fn.__name__ if isinstance(fn, triton.runtime.autotuner.Heuristics) else fn.__name__
         self.save_config_dir = os.path.join(get_config_cache_dir(),
-                                            fn_name,
+                                            self._fn_name,
                                             device_name,
                                             run_id)
         os.makedirs(self.save_config_dir, exist_ok=True)
@@ -92,6 +92,12 @@ class Hcutuner(triton.runtime.Autotuner):
 
         # dict(<key: best config's timings>)
         self._configs_timings = {}
+
+        if os.getenv("TRITON_HCUTUNE_PERF_MODE", "0") == "1":
+            self.perf_mode = True
+            self._configs = triton.utils.get_config_cache(self._fn_name)
+        else:
+            self.perf_mode = False
 
     def warmup(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
@@ -117,6 +123,15 @@ class Hcutuner(triton.runtime.Autotuner):
         return ret
 
     def run(self, *args, **kwargs):
+        if self.perf_mode:
+            _, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
+            key = str(key)
+            if not self._configs or key not in self._configs:
+                return super().run(*args, **kwargs)
+            else:
+                config = self._configs[key]
+                return self.fn.run(*args, **kwargs, **config)
+
         if os.getenv("TRITON_HCUTUNE_COMPILE_ONLY") == "1":
             del kwargs['warmup']
             self.warmup(*args, **kwargs)
