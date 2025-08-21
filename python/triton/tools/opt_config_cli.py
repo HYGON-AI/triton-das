@@ -238,18 +238,17 @@ def export():
       keep_keys = _OCCLI_KEEP_KEY.value.split(',')
       hoisted_keys = [k for k in _cache['key'] if k not in keep_keys]
     else:
-      hoisted_keys = set()
       if _OCCLI_HOIST_KEY.value:
-        for k in _OCCLI_HOIST_KEY.value.split(','):
-          hoisted_keys.add(k)
+        hoisted_keys = _OCCLI_HOIST_KEY.value.split(',')
 
       if _OCCLI_HOIST_DTYPE.value:
         keys = _cache['key']
         vals = list(_cache['configs'].keys())[0][1:-1].split(', ')
         for k, v in zip(keys, vals):
           if isinstance(v, str) and v.startswith("'torch."):
-            hoisted_keys.add(k)
-      hoisted_keys = list(hoisted_keys)
+            hoisted_keys.append(k)
+      # Remove duplicate keys
+      hoisted_keys = list(dict.fromkeys(hoisted_keys))
 
     configs, group_names = _hoist_key(_cache['configs'], _cache['key'], hoisted_keys)
     for g, config in zip(group_names, configs):
