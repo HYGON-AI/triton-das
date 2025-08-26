@@ -252,6 +252,18 @@ class HIPBackend(BaseBackend):
         else:
             raise ValueError(f"Unknown arch: {options.arch}")
 
+        version_args = {
+            "18": [
+                "-mllvm=-enable-hcu-approx-func-fp-math=true",
+            ],
+        }
+        clang_out = subprocess.check_output([HIPBackend.path_to_rocm_clang(), "--version"])
+        match = re.search(r"version\s*(?P<major>\d+)\.(?P<minor>\d+)([\d.]+)?", clang_out.decode())
+        clang_major = match.group("major")
+        clang_minor = match.group("minor")
+        if clang_major in version_args:
+            options_args.extend(version_args[clang_major])
+
         if options.sched_latency != 'none':
             sched_latency_args = {
                 "mmac5-ds10": ["-mllvm=-enable-latency-hack=true", "-mllvm=-mmac-latency=5", "-mllvm=-ds-load-store-latency=10"],
@@ -276,7 +288,7 @@ class HIPBackend(BaseBackend):
             *options_args,
             "-O3",
         ]
-
+        print(f"clang args: {clang_args}")
         return clang_args
 
     @staticmethod
