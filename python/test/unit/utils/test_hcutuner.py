@@ -525,3 +525,34 @@ def test_hcutune_perf(monkeypatch, perf_mode, device: str = "cuda"):
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
     _kernel_hcutune_perf[grid](src, N)
     triton.testing.assert_close(src, torch.ones_like(src))
+
+
+def test_run_saved_kernel(device: str = "cuda"):
+    N = 1024
+    src = torch.zeros(N, device=device)
+    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+
+    @triton.utils.hcutune(configs=configs, key=['N'], restore_value=['src'], do_bench=do_bench)
+    @triton.jit
+    def _kernel_run_saved_kernel(src, N, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(src + offsets, mask=offsets < N) + 1
+        tl.store(src + offsets, x, mask=offsets < N)
+
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
+    _kernel_run_saved_kernel[grid](src, N)
+
+    # run with run_saved_kernel()
+    fn = _kernel_run_saved_kernel.fn
+    src = torch.zeros(N, device=device)
+
+    _, key = get_config_key(_kernel_run_saved_kernel.arg_names,
+                            _kernel_run_saved_kernel.keys, src, N)
+    key = str(key)
+
+    triton.utils.global_config_loader.load_all()
+    configs, paths = triton.utils.get_config_cache(fn.__name__)
+    config = configs[key]
+    path = paths[key]
+    triton.utils.run_saved_kernel(fn, path, src, N, grid=grid, **config)
+    triton.testing.assert_close(src, torch.ones_like(src))

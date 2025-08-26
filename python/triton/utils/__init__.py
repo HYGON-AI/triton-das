@@ -1,6 +1,6 @@
 from typing import Union
 from .kernelentry import kernelentry
-from .hcutuner import hcutune, ConfigLoader, get_gpu_label, hcutune_configured
+from .hcutuner import hcutune, ConfigLoader, get_gpu_label, hcutune_configured, run_saved_kernel
 from .lang import annotate_hint
 from .testing import dist_perf_report
 
@@ -34,8 +34,8 @@ def get_config_cache(op_name: str, device_name: str = None):
         print(
             f"[hcutuner] WARNING: Not found config cache for ({op_name}, {device_name})."
         )
-        return None
-    return tuned.cache['configs']
+        return (None, None)
+    return (tuned.cache['configs'], tuned.cache['paths'])
 
 
 global_config_loader = ConfigLoader()
@@ -50,4 +50,5 @@ __all__ = [
     "get_gpu_label",
     "get_config_cache",
     "hcutune_configured",
+    "run_saved_kernel",
 ]

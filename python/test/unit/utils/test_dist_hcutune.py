@@ -336,6 +336,9 @@ def test_min_timings_config():
         },
         "timings": {
             "(16, 32)": [0.00012, 0.00008, 0.00013]
+        },
+        "paths": {
+            "(16, 32)": "EX3NUTH7J2B5ED47YFJMCOZKIILU3KO4N62FCCLNX2O2EOM7YJNQ",
         }
     }
 
@@ -346,6 +349,9 @@ def test_min_timings_config():
         },
         "timings": {
             "(16, 32)": [0.00010, 0.00018, 0.00012]
+        },
+        "paths": {
+            "(16, 32)": "FIKMNTKZ54W2RDVJXGK5KM73U7GOGBVFHRMGWMN3BLO7JCHMZQQQ",
         }
     }
 
@@ -356,13 +362,17 @@ def test_min_timings_config():
         },
         "timings": {
             "(16, 32)": [0.00013, 0.00028, 0.00013]
+        },
+        "paths": {
+            "(16, 32)": "EX3NUTH7J2B5ED47YFJMCOZKIILU3KO4N62FCCLNX2O2EOM7YJNQ",
         }
     }
 
     cache = merge_caches([cache1, cache3, cache2])
-    assert len(cache['configs']) == len(cache['timings']) == 1
+    assert len(cache['configs']) == len(cache['timings']) == len(cache['paths']) == 1
     assert cache['configs']['(16, 32)'] == {"BLOCK_SIZE_M": 64}
     assert cache['timings']['(16, 32)'] == [0.00010, 0.00018, 0.00012]
+    assert cache['paths']['(16, 32)'] == "FIKMNTKZ54W2RDVJXGK5KM73U7GOGBVFHRMGWMN3BLO7JCHMZQQQ"
 
 
 code_heuristics = """

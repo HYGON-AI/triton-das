@@ -9,21 +9,26 @@ import torch
 import uuid
 import hashlib
 import triton
-from collections import defaultdict
+from pathlib import Path
+from collections import defaultdict, namedtuple
 from triton.knobs import cache as cache_knob
+from triton import knobs
 
 from typing import Dict, Union, Generic
 from distutils.util import strtobool
 
 from triton.runtime.cache import FileCacheManager, _base32
-from triton.compiler.compiler import make_backend, triton_key, ASTSource
+from triton.compiler.compiler import make_backend, triton_key, ASTSource, GPUTarget, AsmDict
 from triton.runtime.driver import driver
 from triton._C.libtriton import get_cache_invalidating_env_vars
 from triton.runtime.jit import mangle_type, DependenciesFinder, T
 
+from .._utils import find_paths_if, get_iterable_path
+
 file_cache = {}
 manager_cache = {}
 config_cache = {}
+kernel_cache = {}
 
 
 def _get_result_template(key: list):
@@ -31,6 +36,7 @@ def _get_result_template(key: list):
         "key": key,
         "configs": {},
         "timings": {},
+        "paths": {},
     }
     return ret
 
@@ -57,6 +63,58 @@ class PruneConfigLoader:
             yield self.configs[i]
 
 
+def get_or_create_metadata(fields):
+    if not hasattr(get_or_create_metadata, "_namedtuple_dict"):
+        get_or_create_metadata._namedtuple_dict = {}
+
+    key = tuple(fields)
+    cls = get_or_create_metadata._namedtuple_dict.get(key)
+    if cls is None:
+        cls = namedtuple('KernelMetadata', key)
+        get_or_create_metadata._namedtuple_dict[key] = cls
+    return cls
+
+
+class CompiledKernel(triton.compiler.compiler.CompiledKernel):
+    '''
+    workaround a occasionality overhead issue about unamedtuple
+    '''
+    def __init__(self, src, metadata_group, hash):
+        metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
+        metadata = json.loads(metadata_path.read_text())
+        metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
+        # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
+        target = metadata['target']
+        metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
+        KernelMetadata = get_or_create_metadata(sorted(list(metadata.keys())))
+        self.metadata = KernelMetadata(**metadata)
+        backend = make_backend(self.metadata.target)
+        self.packed_metadata = backend.pack_metadata(self.metadata)
+        self.src = src
+        self.hash = hash if hash else metadata['hash']
+        self.name = self.metadata.name
+        # stores the text of each level of IR that was generated during compilation
+        asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
+        binary_ext = backend.binary_ext
+        self.asm = AsmDict({
+            file.suffix[1:]: file.read_bytes() if file.suffix[1:] == binary_ext else file.read_text()
+            for file in asm_files
+        })
+        self.kernel = self.asm[binary_ext]
+        # binaries are lazily initialized
+        # because it involves doing runtime things
+        # (e.g., checking amount of shared memory on current device)
+        self.module = None
+        self.function = None
+        self.perf_ir_path = os.path.dirname(str(asm_files[0]))
+
+
+def get_jit_function(fn):
+    while not isinstance(fn, triton.runtime.jit.JITFunction):
+        fn = fn.fn
+    return fn
+
+
 class Hcutuner(triton.runtime.Autotuner):
     """
     Re-implements Triton autotune to support custom operations:
@@ -76,7 +134,8 @@ class Hcutuner(triton.runtime.Autotuner):
         # create dir for saving config (e.g. ~/.triton/cache/configs/...)
         device_name = get_gpu_label()
         run_id = str(uuid.uuid4()) # random run_id for multiprocessing
-        self._fn_name = fn.fn.__name__ if isinstance(fn, triton.runtime.autotuner.Heuristics) else fn.__name__
+        self.jit_fn = get_jit_function(fn)
+        self._fn_name = self.jit_fn.__name__
         self.save_config_dir = os.path.join(get_config_cache_dir(),
                                             self._fn_name,
                                             device_name,
@@ -95,7 +154,7 @@ class Hcutuner(triton.runtime.Autotuner):
 
         if os.getenv("TRITON_HCUTUNE_PERF_MODE", "0") == "1":
             self.perf_mode = True
-            self._configs = triton.utils.get_config_cache(self._fn_name)
+            self._configs, self._paths = triton.utils.get_config_cache(self._fn_name)
         else:
             self.perf_mode = False
 
@@ -212,11 +271,11 @@ class Hcutuner(triton.runtime.Autotuner):
         self.nargs = None
         ###########################################
 
-        self.save_config(*args, **kwargs)
+        self.save_config(ret, *args, **kwargs)
         self.cache_config(*args, **kwargs)
         return ret
 
-    def save_config(self, *args, **kwargs):
+    def save_config(self, compiled, *args, **kwargs):
         """
         Save best config as JSON file to cache dir: triton_cache_dir/configs/...
         """
@@ -227,6 +286,7 @@ class Hcutuner(triton.runtime.Autotuner):
         if _key not in configs['configs']:
             configs['configs'][_key] = self.best_config.all_kwargs()
             configs['timings'][_key] = self._configs_timings[key]
+            configs['paths'][_key] = os.path.basename(compiled.perf_ir_path)
             with open(fname, "w") as f:
                 json.dump(configs, f, indent=4)
             file_cache[fname] = configs
@@ -265,7 +325,7 @@ class Hcutuner(triton.runtime.Autotuner):
                 self._configs_timings[kt] = data['timings'][str(kt)]
 
     def get_config_cache_manager(self, *args, **kwargs):
-        key = _base32(_get_cache_hash(self.fn, self.autotune_param_hash, self.autotune_key_hash,
+        key = _base32(_get_cache_hash(self.jit_fn, self.autotune_param_hash, self.autotune_key_hash,
                                       self.kernel_config_hash, *args, **kwargs))
         if key not in manager_cache:
             manager_cache[key] = ConfigCacheManager(key)
@@ -378,19 +438,25 @@ def get_gpu_label():
 def merge_caches(data):
     """ merge a list of config cache """
     res = _get_result_template(data[0]['key'])
-    _configs, _timings = defaultdict(list), defaultdict(list)
+    _configs, _timings, _paths = defaultdict(list), defaultdict(list), defaultdict(list)
     for d in data:
         for k, v in d['configs'].items():
             _configs[k].append(v)
         for k, v in d['timings'].items():
             _timings[k].append(v)
+        for k, v in d['paths'].items():
+            _paths[k].append(v)
     assert len(_configs) == len(_timings)
+    if _paths:
+        assert len(_paths) == len(_configs)
     # fill with the best config
     for k, v in _timings.items():
         min_v = builtins.min(v)
         i = v.index(min_v)
         res['timings'][k] = v[i]
         res['configs'][k] = _configs[k][i]
+        if _paths:
+            res['paths'][k] = _paths[k][i]
     return res
 
 
@@ -551,9 +617,6 @@ def _get_cache_hash(fn, autotune_param_hash, key_hash, kernel_config_hash, *args
     hash format: triton_code-backend-option-env-src-autotune_params-tune_keys-kernel_configs
     Adapted from: triton/compiler/compiler.py:compile()
     """
-    while not isinstance(fn, triton.runtime.jit.JITFunction):
-        fn = fn.fn
-
     _, _, backend, _ = fn.create_binder()
 
     nargs = dict(zip(fn.arg_names, args))
@@ -745,3 +808,52 @@ def hcutune_configured(get_config_fn=None, get_key_fn=None):
         return JITFunctionWithConfig(fn, get_config_fn, get_key_fn)
 
     return decorator
+
+
+def run_saved_kernel(fn, path, *args, grid, **kwargs):
+    bound_args = dict(zip(fn.arg_names, args))
+    for k in fn.arg_names[len(args):]:
+        bound_args[k] = kwargs[k]
+
+    device = driver.active.get_current_device()
+    stream = driver.active.get_current_stream(device)
+
+    if path not in kernel_cache:
+        _, _, _, binder = fn.device_caches[device]
+        # specialization is list[tuple[str, Any]], where first element of tuple is
+        # the type and the second parameter is the 'specialization' value.
+        _, specialization, _ = binder(*args, **kwargs)
+
+        sigkeys = [x.name for x in fn.params]
+        sigvals = [x[0] for x in specialization]
+        signature = {k: v for (k, v) in zip(sigkeys, sigvals)}
+
+        # constexprs
+        constexprs = find_paths_if(sigvals, lambda _, val: val == "constexpr")
+        constexprs = {path: get_iterable_path(list(bound_args.values()), path) for path in constexprs}
+
+        src = ASTSource(fn, signature, constexprs)
+
+        manager_cls = knobs.cache.manager_class or FileCacheManager
+        fn_cache_manager = manager_cls(path)
+
+        metadata_filename = f"{fn.__name__[:150]}.json"
+        metadata_group = fn_cache_manager.get_group(metadata_filename) or {}
+        metadata_path = metadata_group.get(metadata_filename)
+        assert metadata_path is not None
+        kernel_cache[path] = CompiledKernel(src, metadata_group, None)
+
+    kernel = kernel_cache[path]
+
+    assert grid is not None
+    if callable(grid):
+        grid = grid(bound_args)
+    grid_size = len(grid)
+    grid_0 = grid[0]
+    grid_1 = grid[1] if grid_size > 1 else 1
+    grid_2 = grid[2] if grid_size > 2 else 1
+    # launch kernel
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+    kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
+                knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *bound_args.values())
+    return kernel

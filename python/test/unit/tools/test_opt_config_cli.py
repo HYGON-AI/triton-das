@@ -71,7 +71,11 @@ def test_export():
 
         with open(f"{tmp_dir}/test.json") as f:
             data = json.load(f)
-        list(data.keys())[0] == '(256, 16, 512, torch.float32)'
+        assert len(data) == 2
+        assert list(data['config'].keys()) == list(data['path'].keys())
+        list(data['config'].keys())[0] == '(256, 16, 512, torch.float32)'
+        # kernels + hiputils.so + hip_launcher.so
+        # assert len(os.listdir(f'{tmp_dir}/cache')) == len(list(dict.fromkeys(data['path'].values())))
 
 
 def test_export_hoist():
@@ -82,7 +86,7 @@ def test_export_hoist():
         res = subprocess.run(cmd, stdout=subprocess.PIPE)
         assert res.returncode == 0
 
-        files = os.listdir(tmp_dir)
+        files = [o for o in os.listdir(tmp_dir) if o.endswith(".json")]
         assert len(files) == 3
         for f in files:
             assert f in ["test-N=16,K=512-fp32.json",
@@ -90,7 +94,7 @@ def test_export_hoist():
                          "test-N=8,K=2048-fp32.json",]
 
         with open(f"{tmp_dir}/test-N=16,K=512-fp32.json") as f:
-            data = json.load(f)
+            data = json.load(f)['config']
         assert len(data) == 2
         assert list(data.keys())[0] == "(256, 'torch.float32')"
 
@@ -103,7 +107,7 @@ def test_export_hoist_dtype():
         res = subprocess.run(cmd, stdout=subprocess.PIPE)
         assert res.returncode == 0
 
-        files = os.listdir(tmp_dir)
+        files = [o for o in os.listdir(tmp_dir) if o.endswith(".json")]
         assert len(files) == 3
         for f in files:
             assert f in ["test-N=16-K=512-dtype=fp32.json",
@@ -112,8 +116,8 @@ def test_export_hoist_dtype():
 
         with open(f"{tmp_dir}/test-N=16-K=512-dtype=fp32.json") as f:
             data = json.load(f)
-        assert len(data) == 2
-        assert list(data.keys())[0] == "256"
+        assert list(data['config'].keys())[0] == "256"
+        assert list(data['path'].keys())[0] == "256"
 
 
 def test_export_keep_key():
@@ -124,7 +128,7 @@ def test_export_keep_key():
         res = subprocess.run(cmd, stdout=subprocess.PIPE)
         assert res.returncode == 0
 
-        files = os.listdir(tmp_dir)
+        files = [o for o in os.listdir(tmp_dir) if o.endswith(".json")]
         assert len(files) == 3
         for f in files:
             assert f in ["test-N=16-K=512-dtype=fp32.json",
@@ -133,5 +137,6 @@ def test_export_keep_key():
 
         with open(f"{tmp_dir}/test-N=32-K=1024-dtype=fp32.json") as f:
             data = json.load(f)
-        assert len(data) == 1
-        assert list(data.keys())[0] == "512"
+        assert len(data['config']) == len(data['path']) == 1
+        assert list(data['config'].keys())[0] == "512"
+        assert list(data['path'].keys())[0] == "512"

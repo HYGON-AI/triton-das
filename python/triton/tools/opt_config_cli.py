@@ -11,12 +11,13 @@ queried using the show command.
 
 import os
 import json
-import torch
 from collections import defaultdict
 from absl import app  # pylint: disable=unused-import
 from absl import flags
 from absl.flags import argparse_flags
 from pathlib import Path
+import shutil
+from triton.knobs import cache as cache_knob
 
 import argparse
 from triton.utils.hcutuner import get_config_cache_dir, ConfigLoader
@@ -69,7 +70,7 @@ _OCCLI_KEEP_KEY = flags.DEFINE_string(
 
 command_required_flags = {
     'show': [],
-    'export': ['kernel', 'device', 'output'],
+    'export': ['kernel', 'device'],
 }
 
 
@@ -110,6 +111,10 @@ def _show_config(loader, kernel, device_name, indent=""):
 
       print(f"{indent}timings:")
       for k, v in config['timings'].items():
+        print(f"  {indent}{k}: {v}")
+
+      print(f"{indent}paths:")
+      for k, v in config['paths'].items():
         print(f"  {indent}{k}: {v}")
 
 
@@ -208,6 +213,9 @@ def _get_filename(output_dir, group_name=''):
     "layernorm,M=4096,device=K100,dtype=fp16.json"
   """
   filename = _OCCLI_OUTPUT.value
+  if not filename:
+    filename = f'{_OCCLI_KERNEL.value}{_OCCLI_DELIMITER.value}device={_OCCLI_DEVICE_NAME.value}.json'
+
   if "%G" in filename:
     filename = filename.replace("%G", group_name)
   else:
@@ -219,6 +227,67 @@ def _get_filename(output_dir, group_name=''):
   return os.path.join(output_dir, filename)
 
 
+def hoist_key(data):
+  hoisted_keys = []
+  paths = data['paths']
+  configs = data['configs']
+  keys = data['key']
+
+  assert list(paths.keys()) == list(configs.keys())
+
+  if _OCCLI_KEEP_KEY.value:
+    keep_keys = _OCCLI_KEEP_KEY.value.split(',')
+    hoisted_keys = [k for k in keys if k not in keep_keys]
+  else:
+    if _OCCLI_HOIST_KEY.value:
+      hoisted_keys = _OCCLI_HOIST_KEY.value.split(',')
+
+    if _OCCLI_HOIST_DTYPE.value:
+      vals = list(configs.keys())[0][1:-1].split(', ')
+      for k, v in zip(keys, vals):
+        if isinstance(v, str) and v.startswith("'torch."):
+          hoisted_keys.append(k)
+    # Remove duplicate keys
+    hoisted_keys = list(dict.fromkeys(hoisted_keys))
+
+  _configs, group_names = _hoist_key(configs, keys, hoisted_keys)
+  _paths, _ = _hoist_key(paths, keys, hoisted_keys)
+  return (_configs, _paths, group_names)
+
+
+def put_json(path, data):
+  with open(path, "w") as f:
+    json.dump(data, f, indent=4)
+  print(f"Generated '{path}'")
+
+
+def copy_libraries(dst, src):
+  for dirpath, dirnames, filenames in os.walk(src):
+    for filename in filenames:
+      if filename.endswith(".so"):
+        src_file = os.path.join(dirpath, filename)
+        rel_dir = os.path.relpath(dirpath, src)
+        dst_dir = os.path.join(dst, rel_dir)
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(src_file, dst_dir)
+        print(f"'{src_file}' -> '{dst_dir}/{filename}'")
+
+
+def export_kernel_cache(output_dir, data):
+  src_dir = cache_knob.dir
+  dst_dir = f"{output_dir}/cache"
+  paths = list(dict.fromkeys(data.values()))
+  for p in paths:
+    src = Path(f"{src_dir}/{p}")
+    dst = Path(f"{dst_dir}/{p}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    print(f"'{src}' -> '{dst}'")
+
+  # copy hip launcher and utils libraries
+  copy_libraries(dst_dir, src_dir)
+
+
 def export():
   """Function triggered by export command."""
   loader = ConfigLoader(_OCCLI_DIR.value)
@@ -227,33 +296,20 @@ def export():
   output_dir = _OCCLI_OUTPUT_DIR.value if _OCCLI_OUTPUT_DIR.value else os.getcwd()
   os.makedirs(output_dir, exist_ok=True)
 
+  # copy kernel cache to output_dir
+  export_kernel_cache(output_dir, _cache['paths'])
+
   change_key = True if _OCCLI_HOIST_DTYPE.value or _OCCLI_HOIST_KEY.value \
                         or _OCCLI_KEEP_KEY.value else False
 
   if not change_key:
-    with open(_get_filename(output_dir), "w") as f:
-      json.dump(_cache['configs'], f, indent=4)
+    data = {'config': _cache['configs'], 'path': _cache['paths']}
+    put_json(_get_filename(output_dir), data)
   else:
-    if _OCCLI_KEEP_KEY.value:
-      keep_keys = _OCCLI_KEEP_KEY.value.split(',')
-      hoisted_keys = [k for k in _cache['key'] if k not in keep_keys]
-    else:
-      if _OCCLI_HOIST_KEY.value:
-        hoisted_keys = _OCCLI_HOIST_KEY.value.split(',')
-
-      if _OCCLI_HOIST_DTYPE.value:
-        keys = _cache['key']
-        vals = list(_cache['configs'].keys())[0][1:-1].split(', ')
-        for k, v in zip(keys, vals):
-          if isinstance(v, str) and v.startswith("'torch."):
-            hoisted_keys.append(k)
-      # Remove duplicate keys
-      hoisted_keys = list(dict.fromkeys(hoisted_keys))
-
-    configs, group_names = _hoist_key(_cache['configs'], _cache['key'], hoisted_keys)
-    for g, config in zip(group_names, configs):
-      with open(_get_filename(output_dir, g), "w") as f:
-        json.dump(config, f, indent=4)
+    configs, paths, group_names = hoist_key(_cache)
+    for g, config, path in zip(group_names, configs, paths):
+      data = {'config': config, 'path': path}
+      put_json(_get_filename(output_dir, g), data)
 
 
 def add_show_subparser(subparsers):
