@@ -25,7 +25,7 @@ namespace {
 using triton::AMD::ISAFamily;
 
 MmacLayout getDefaultMmacLayout(StringRef archGen) {
-  // FIXME: Default MMAC layout for Hygon DCUs, not the final version, modify and adjust as needed.
+  // FIXME: Default MMAC layout for HCUs, not the final version, modify and adjust as needed.
   static DenseMap<StringRef, MmacLayout> defaultLayoutMap = {
       {"gfx926", MmacLayout::LEGACY},
       {"gfx928", MmacLayout::LEGACY},
@@ -39,7 +39,7 @@ MmacLayout getDefaultMmacLayout(StringRef archGen) {
   return defaultLayoutMap.contains(archGen) ? defaultLayoutMap[archGen] : MmacLayout::MFMA;
 }
 
-/* Hygon support: mmac v1 dont have chaindot or has special accel mode */
+/* HCU support: mmac v1 dont have chaindot or has special accel mode */
 bool hasReduceInChainDots(Operation *dotOp) {
   if (!isa<mlir::triton::DotOpInterface>(dotOp))
     return false;
@@ -117,9 +117,9 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
   if (rank == 3)
     return {static_cast<unsigned>(numWarps), 1, 1};
 
-  // Case for Hygon DCUs
-  // FIXME: This is primarily an optimization for Hygon ZD&BMZ DCUs, as more mmac layouts
-  //        are supported on new-generation DCUs(NMZ, SHB...), here we need to return the
+  // Case for HCUs
+  // FIXME: This is primarily an optimization for HCUs(gfx926/928/936), as more mmac
+  //        layouts are supported on new-generation HCUs, here we need to return the
   //        appropriate warps based on different layouts currently in use.
   if (hasReduceInChainDots(dotOp))
     return {static_cast<unsigned>(numWarps), 1};
@@ -222,7 +222,7 @@ chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
       nDim = 16;
     }
 #endif
-    // Hygon DCUs only feature 16x16xk matrix core instructions for now.
+    // HCUs only feature 16x16xk matrix core instructions for now.
     if (minSize >= 16) {
       mDim = 16;
       nDim = 16;
@@ -454,7 +454,7 @@ class BlockedToMFMA : public OpRewritePattern<tt::DotOp> {
   int mfmaVersion;
   int nonKDim;
   int kPack;
-  MmacLayout mmacLayout;  // Added for Hygon DCUs
+  MmacLayout mmacLayout;  // Added for HCUs
 
 public:
   BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack, MmacLayout mmacLayout,
@@ -524,7 +524,7 @@ public:
     bool isTransposed =
         isChainDotHead(dotOp) || isChainDotTail(dotOp) || !isFP8;
 #endif
-    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
+    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all HCUs.
     bool isTransposed = false;
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
@@ -638,7 +638,7 @@ class ScaledBlockedToMFMA final : public OpRewritePattern<triton::DotScaledOp> {
   int mfmaVersion;
   int nonKDim;
   int kPack;
-  MmacLayout mmacLayout;  // Added for Hygon DCUs
+  MmacLayout mmacLayout;  // Added for HCUs
 
 public:
   ScaledBlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim,
@@ -735,7 +735,7 @@ public:
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
     #endif
 
-    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all Hygon DCUs.
+    // Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all HCUs.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
         /*instrShape=*/mDim, nDim,
@@ -1322,7 +1322,7 @@ public:
     RewritePatternSet patterns(context);
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
     case ISAFamily::CDNA4:
-      // FIXME: CDNAx are AMD-specific and not available to HYGON DCUs. We should eliminate
+      // FIXME: CDNAx are AMD-specific and not available to HCUs. We should eliminate
       //        this special handling and separate the mmac logic from the mfma patterns.
       assert(0 && "CDNA4 is not supported yet");
       patterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(

@@ -120,7 +120,7 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   TRITON_MFMA_v(1, m, n, aET, bET, symbol, k, kBase),                          \
       TRITON_MFMA_v2to4(m, n, aET, bET, symbol, k, kBase)
 
-// FIXME: Macro for defining HYGON MMAC intrinsics based on MFMA intrinsics.
+// FIXME: Macro for defining HCU MMAC intrinsics based on MFMA intrinsics.
 //        Now we always mock us as CDNA3 MFMA intrinsics to reuse the existing
 //        code, but it should be noted that this is a workaround and we should
 //        fix it later.

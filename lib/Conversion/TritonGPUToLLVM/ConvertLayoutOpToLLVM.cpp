@@ -40,7 +40,7 @@ struct ConvertLayoutOpUsingLinearLayoutsConversion
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
 
-    // For hygon mmac, for now, the conversion between C/D and A is done
+    // For HCU mmac, for now, the conversion between C/D and A is done
     // on the kernel side, so we have nothing to do here.
     // Maybe we can implement a transfer-within-warp instead of kernel-side
     // transfer, if it can lead to performance gain

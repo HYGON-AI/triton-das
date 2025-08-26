@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-A copy of python/perf-kernels/flash-attention.py customized for tuning on Hygon DCUs.
+A copy of python/perf-kernels/flash-attention.py customized for tuning on HCUs.
 ===============
 
 This is a Triton implementation of the Flash Attention v2 algorithm from Tri Dao (https://tridao.me/publications/flash2/flash2.pdf)

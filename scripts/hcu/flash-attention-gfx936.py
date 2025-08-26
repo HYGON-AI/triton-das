@@ -213,7 +213,7 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     #     order=(1, 0),
     # )
 
-    # Note: bmz add to increase lds coalesce
+    # Note: gfx936 add to increase lds coalesce
     V_block_ptr = tl.make_block_ptr(
         base=VT + kv_offset,
         shape=(N_CTX, BLOCK_DMODEL),
@@ -372,7 +372,7 @@ def _attn_bwd_dkdv(dk, dv,
     offs_n = start_n + tl.arange(0, BLOCK_N1)
     offs_k = tl.arange(0, BLOCK_DMODEL)
 
-    # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
+    # Note: gfx936 add to increase load/store coalesce and increase lds coalesce, not fit for gfx928
     Q_block_ptr = tl.make_block_ptr(
         base=QT,
         shape=(N_CTX, BLOCK_DMODEL),
@@ -471,7 +471,7 @@ def _attn_bwd_dq(dq, q, K, KT, V,
     )
 
     if GQA_FLAG:
-        # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
+        # Note: gfx936 add to increase load/store coalesce and increase lds coalesce, not fit for gfx928
         K_block_ptr = tl.make_block_ptr(
             base=KT,
             shape=(N_CTX, BLOCK_DMODEL),
@@ -818,7 +818,7 @@ class _attention(torch.autograd.Function):
         assert Lq == Lk and Lk == Lv
         assert Lk in {16, 32, 64, 128}
 
-        # Note: bmz add to increase lds coalesce
+        # Note: gfx936 add to increase lds coalesce
         vt = v.transpose(-1, -2).contiguous()
 
         o = torch.empty_like(q, dtype=v.dtype)
@@ -902,7 +902,7 @@ class _attention(torch.autograd.Function):
         K_HEAD = k.shape[1]
         q_num_per_group = N_HEAD // K_HEAD
 
-        # Note: bmz add to increase load/store coalesce and increase lds coalesce, not fit for zde
+        # Note: gfx936 add to increase load/store coalesce and increase lds coalesce, not fit for gfx928
         gqa_flag = N_HEAD != K_HEAD
         qt = torch.empty((q.shape[0], q.shape[1], q.shape[3], q.shape[2]), dtype=q.dtype,
                          device="cuda")

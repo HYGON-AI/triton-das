@@ -1713,7 +1713,7 @@ void AMDRotatingSharedEncodingAttr::print(AsmPrinter &printer) const {
 //===----------------------------------------------------------------------===//
 // TODO: there is a lot of common code with MmaEncoding here
 
-/* Hygon support: mmac has special C/D layout */
+/* HCU support: mmac has special C/D layout */
 bool AMDMfmaEncodingAttr::isHCUMmac() const {
   return getMmacLayout() != MmacLayout::MFMA;
 }

@@ -239,8 +239,8 @@ struct CDNA3Kind : public MachineDescrImpl<CDNA3Kind> {
 std::unique_ptr<MachineDescr> MachineDescr::get(StringRef arch) {
   AMD::ISAFamily family = AMD::deduceISAFamily(arch);
 
-  /* [HYGON] TODO: need refine to put ZD/KM in CDNA2Kind future ? */
-  if (arch == "gfx928" /* ZD */ || arch == "gfx926" /* KM */)
+  /* [HCU] TODO: need refine in the future ? */
+  if (arch == "gfx928" || arch == "gfx926")
     family = AMD::ISAFamily::CDNA2;
 
   switch (family) {

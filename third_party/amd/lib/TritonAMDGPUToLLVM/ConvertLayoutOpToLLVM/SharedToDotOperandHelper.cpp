@@ -148,7 +148,7 @@ llvm::SmallVector<Value> computeOffsetsAType(
 
   if (!isSwizzlePatternFitsIntoBlock(srcLayout, 0, reps, elemsPerInstr,
                                      warpsPerBlock)) {
-    /* Hygon modify: adjust the offset add location to easy match ds_read2st_xxx inst
+    /* HCU modify: adjust the offset add location to easy match ds_read2st_xxx inst
      * which OFFSET1 require OFFSET1 * 4|8 * 64 and can decrease register pressuer.
     **/
 #if 0
@@ -237,7 +237,7 @@ llvm::SmallVector<Value> computeOffsetsBType(
 
   if (!isSwizzlePatternFitsIntoBlock(srcLayout, 0, reps, elemsPerInstr,
                                      warpsPerBlock)) {
-    /* Hygon modify: adjust the offset add location to easy match ds_read2st_xxx inst
+    /* HCU modify: adjust the offset add location to easy match ds_read2st_xxx inst
      * which OFFSET1 require OFFSET1 * 4|8 * 64 and can decrease register pressuer.
     **/
 #if 0

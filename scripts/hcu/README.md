@@ -1,6 +1,6 @@
-# HYGON Scripts
+# HCU Scripts
 
-This directory contains utility scripts customized for daily development on Hygon GPUs.
+This directory contains utility scripts customized for daily development on HCUs.
 
 # Scripts Usage
 

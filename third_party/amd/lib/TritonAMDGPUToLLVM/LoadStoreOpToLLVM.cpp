@@ -422,7 +422,7 @@ struct BufferLoadOpConversion
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
     // FIXME: Explicitly disable cache swizzling(introduced by oai commit 7fffa0df) for
-    //        buffer ops on DCUs as more dcu-specific details (stride field particularly)
+    //        buffer ops on HCUs as more hcu-specific details (stride field particularly)
     //        should be considered.
     // Create the resource descriptor and then emit the buffer_load intrinsic(s)
     // Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
@@ -901,7 +901,7 @@ struct BufferAtomicRMWOpConversion
     }
 
     // FIXME: Explicitly disable cache swizzling(introduced by oai commit 83229ced0479) for
-    //        buffer atomic ops on DCUs as more dcu-specific details (stride field particularly)
+    //        buffer atomic ops on HCUs as more hcu-specific details (stride field particularly)
     //        should be considered.
     // Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr);
@@ -1103,7 +1103,7 @@ struct BufferStoreOpConversion
         getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
 
     // FIXME: Explicitly disable cache swizzling(introduced by oai commit 7fffa0df) for
-    //        buffer ops on DCUs as more dcu-specific details (stride field particularly)
+    //        buffer ops on HCUs as more hcu-specific details (stride field particularly)
     //        should be considered.
     // Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr);

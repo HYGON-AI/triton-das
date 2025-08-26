@@ -36,7 +36,7 @@ namespace mlir {
 
 namespace {
 
-// ========================== HYGON Utility Functions ==========================
+// ========================== HCU Utility Functions ==========================
 void collectAssumptionsForLoad(ModuleOp mod, DenseMap<Value, SetVector<Operation *>> &assumptions) {
   mod.walk([&](LLVM::AssumeOp op) {
     if (auto cmpIOp = op.getCond().getDefiningOp<arith::CmpIOp>()) {
@@ -89,7 +89,7 @@ bool verifyNonNegativeByHint(
 
   return false;
 }
-// ========================== HYGON Utility Functions ==========================
+// ========================== HCU Utility Functions ==========================
 
 bool verifyNonSmallerByAssumption(
     Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
@@ -595,7 +595,7 @@ public:
     if (failed(solver->initializeAndRun(getOperation())))
       return signalPassFailure();
 
-    // HYGON: Collect assumptions for loads.
+    // HCU: Collect assumptions for loads.
     // This is a moe-specific hack to support loading sorted tokens using buffer ops.
     // The sorted tokens are assumed to be non-negative, so we collect the assumptions for loads
     // to ensure that the buffer ops can be used. This is a temporary solution and should be

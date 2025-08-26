@@ -408,8 +408,8 @@ struct DotOpMFMAConversionHelper {
   /// rawElems is a vector of kBase elements. Each element is of the raw
   /// element type from the input. We need to prepare a vector of kBase
   /// elements of appropriate element type required by mfma instructions.
-  /// FIXME: isHCUMmac is a special handling for Hygon DCUs and should be eliminated
-  ///        once Hygon DCU backend is implemented in Triton.
+  /// FIXME: isHCUMmac is a special handling for HCUs and should be eliminated
+  ///        once HCU backend is implemented in Triton.
   Value prepareOperands(Value rawElems, int kBase, Type type, bool preserveBF16, bool isHCUMmac,
                         bool isConstantScale = false) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -524,7 +524,7 @@ struct DotOpMFMAConversionHelper {
             dotOpVals[{b, nonK, kBaseVec}] =
                 tb.extract_element(type, rawElems, tb.i32_val(0));
 #endif
-            /* Hygon support: add mmac_f32_m16n16k8_f32 support */
+            /* HCU support: add mmac_f32_m16n16k8_f32 support */
             if (kWidth == 1) {
               dotOpVals[{b, nonK, kBaseVec}] =
                 tb.extract_element(type, rawElems, tb.i32_val(0));

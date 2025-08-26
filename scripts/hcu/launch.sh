@@ -7,7 +7,7 @@ export MAX_JOBS=8
 
 function run_pytest() {
   test_files=(
-    "test_performance_hygon.py"
+    "test_performance_hcu.py"
   )
   file_path=${SRC_HOME}/python/test/regression
   for f in ${test_files[@]}; do

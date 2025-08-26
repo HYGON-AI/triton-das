@@ -1,7 +1,7 @@
 """AWQ Triton Implementation.
 
 This module contains the AWQ (Activation-Weight Quantization) implementation using Triton.
-Cloned from vllm main branch (commit:cb080f32) and modified to fit Hygon.
+Cloned from vllm main branch (commit:cb080f32) and modified to fit HCU.
 Original file path: vllm/model_executor/layers/quantization/awq_triton.py
 """
 
