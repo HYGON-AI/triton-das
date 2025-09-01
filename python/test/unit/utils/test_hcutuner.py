@@ -19,11 +19,6 @@ def get_save_config_root_dir():
     return f"{cache_knob.dir}/configs"
 
 
-def get_gpu_label():
-    gpu_name = torch.cuda.get_device_name().replace(" ", "_").replace("/", "_")
-    return gpu_name
-
-
 def get_device_name(device: str):
     if device == "cuda":
         return get_gpu_label()

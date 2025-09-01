@@ -431,7 +431,7 @@ def get_config_key(arg_names, keys, *args, **kwargs):
 
 
 def get_gpu_label():
-    gpu_name = torch.cuda.get_device_name().replace(" ", "_").replace("/", "_")
+    gpu_name = torch.cuda.get_device_name().split(' ')[-1].replace("/", "_")
     return gpu_name
 
 

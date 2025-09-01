@@ -323,7 +323,7 @@ def add_show_subparser(subparsers):
       'To show all metadata of configs from specified kernel functions:\n'
       '$opt_config_cli show --kernel layernorm_kernel,awq_kernel [--dir ...]\n\n'
       'To show all metadata of configs from specified kernel functions and devices:\n'
-      '$opt_config_cli show --kernel fused_moe_kernel,awq_kernel --device DCU_K100_AI'
+      '$opt_config_cli show --kernel fused_moe_kernel,awq_kernel --device K100_AI'
       ' [--dir ...]\n\n')
   parser_show = subparsers.add_parser(
       'show',
@@ -337,8 +337,8 @@ def add_export_subparser(subparsers):
   export_msg = (
       'Usage examples:\n'
       'To export the specfied kernel\'s optimal configs to JSON file:\n'
-      '$opt_config_cli export --kernel _layernorm_kernel --device DCU_K100_AI'
-      ' --output _layernorm_kernel-DCU_K100_AI-fp32.json'
+      '$opt_config_cli export --kernel _layernorm_kernel --device K100_AI'
+      ' --output _layernorm_kernel-K100_AI-fp32.json'
       ' [--hoist_dtype]'
       ' [--keep_dtype key,...]'
       ' [--hoist_key key,...]'
