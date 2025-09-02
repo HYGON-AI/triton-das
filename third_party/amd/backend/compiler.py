@@ -288,7 +288,7 @@ class HIPBackend(BaseBackend):
             *options_args,
             "-O3",
         ]
-        print(f"clang args: {clang_args}")
+
         return clang_args
 
     @staticmethod
