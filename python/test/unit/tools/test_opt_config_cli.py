@@ -140,3 +140,16 @@ def test_export_keep_key():
         assert len(data['config']) == len(data['path']) == 1
         assert list(data['config'].keys())[0] == "512"
         assert list(data['path'].keys())[0] == "512"
+
+
+def test_export_keep_timings():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cmd = ["opt_config_cli", "export", "--kernel", "_kernel_opt_config_cli",
+            "--device", get_gpu_label(), "--output", "test.json",
+            "--output_dir", tmp_dir, "--keep_key", "M", "--keep_timings"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE)
+        assert res.returncode == 0
+
+        with open(f"{tmp_dir}/test-N=32-K=1024-dtype=fp32.json") as f:
+            data = json.load(f)
+        assert len(data['config']) == len(data['path']) == len(data['timings']) == 1

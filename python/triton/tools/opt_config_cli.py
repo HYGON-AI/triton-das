@@ -68,6 +68,10 @@ _OCCLI_KEEP_KEY = flags.DEFINE_string(
     name='keep_key', default=None,
     help='As opposed to --hoist_key')
 
+_OCCLI_KEEP_TIMINGS = flags.DEFINE_bool(
+    name='keep_timings', default=False,
+    help='Export timing to output files.')
+
 command_required_flags = {
     'show': [],
     'export': ['kernel', 'device'],
@@ -89,6 +93,8 @@ def to_type(t):
     return 'bf16'
   elif t.startswith("'torch.float8_'"):
     return 'fp8'
+  elif t == "'torch.bool'":
+    return 'bool'
   else:
     return t
 
@@ -232,8 +238,10 @@ def hoist_key(data):
   paths = data['paths']
   configs = data['configs']
   keys = data['key']
+  timings = data['timings']
 
   assert list(paths.keys()) == list(configs.keys())
+  assert list(timings.keys()) == list(configs.keys())
 
   if _OCCLI_KEEP_KEY.value:
     keep_keys = _OCCLI_KEEP_KEY.value.split(',')
@@ -252,7 +260,8 @@ def hoist_key(data):
 
   _configs, group_names = _hoist_key(configs, keys, hoisted_keys)
   _paths, _ = _hoist_key(paths, keys, hoisted_keys)
-  return (_configs, _paths, group_names)
+  _timings, _ = _hoist_key(timings, keys, hoisted_keys)
+  return (_configs, _paths, _timings, group_names)
 
 
 def put_json(path, data):
@@ -304,11 +313,15 @@ def export():
 
   if not change_key:
     data = {'config': _cache['configs'], 'path': _cache['paths']}
+    if _OCCLI_KEEP_TIMINGS.value:
+      data['timings'] = _cache['timings']
     put_json(_get_filename(output_dir), data)
   else:
-    configs, paths, group_names = hoist_key(_cache)
-    for g, config, path in zip(group_names, configs, paths):
+    configs, paths, timings, group_names = hoist_key(_cache)
+    for g, config, path, _timings in zip(group_names, configs, paths, timings):
       data = {'config': config, 'path': path}
+      if _OCCLI_KEEP_TIMINGS.value:
+        data['timings'] = _timings
       put_json(_get_filename(output_dir, g), data)
 
 
