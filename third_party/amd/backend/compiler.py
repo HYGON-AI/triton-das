@@ -246,6 +246,12 @@ class HIPBackend(BaseBackend):
             "gfx936": [
                         "-mllvm=-support-768-vgprs=true",
                       ],
+            "gfx946": [
+                        "-mllvm=-support-512-vgprs=true",
+                      ],
+            "gfx92a": [
+                        "-mllvm=-support-512-vgprs=true",
+                      ],
         }
         if options.arch in arch_args:
             options_args = arch_args[options.arch]

@@ -240,7 +240,7 @@ std::unique_ptr<MachineDescr> MachineDescr::get(StringRef arch) {
   AMD::ISAFamily family = AMD::deduceISAFamily(arch);
 
   /* [HCU] TODO: need refine in the future ? */
-  if (arch == "gfx928" || arch == "gfx926")
+  if (arch == "gfx928" || arch == "gfx926" || arch == "gfx946" || arch == "gfx92a")
     family = AMD::ISAFamily::CDNA2;
 
   switch (family) {
