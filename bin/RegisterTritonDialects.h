@@ -1,4 +1,5 @@
 #pragma once
+#include "triton/Dialect/Distributed/IR/Dialect.h"
 #include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "amd/include/TritonAMDGPUTransforms/Passes.h"
 #include "third_party/nvidia/include/Dialect/NVGPU/IR/Dialect.h"
@@ -90,6 +91,7 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   // NVGPU transform passes
   mlir::registerNVHopperTransformsPasses();
 
+  // TODO: register Triton & TritonGPU passes
   registry.insert<
       mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
       mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
@@ -98,5 +100,6 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
       mlir::LLVM::LLVMDialect, mlir::NVVM::NVVMDialect,
       mlir::triton::nvgpu::NVGPUDialect, mlir::triton::nvws::NVWSDialect,
       mlir::triton::amdgpu::TritonAMDGPUDialect,
+      mlir::triton::distributed::DistributedDialect,
       mlir::triton::proton::ProtonDialect, mlir::ROCDL::ROCDLDialect>();
 }

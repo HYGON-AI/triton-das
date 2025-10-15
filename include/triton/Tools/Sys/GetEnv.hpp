@@ -47,6 +47,7 @@ inline const std::set<std::string> CACHE_INVALIDATING_ENV_VARS = {
     "TRITON_F32_DEFAULT",
     "CHAINED_DOT_SHORTCUT",     // FIXME: Legacy env for HCU chaindot shortcut and need to be removed.
     "TRITON_PREFER_TMEM_16x256_LAYOUT",
+    "NVSHMEM_IBGDA_SUPPORT",
     // clang-format on
 };
 

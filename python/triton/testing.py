@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List
 from . import language as tl
 from . import runtime
+import torch
 
 
 def nvsmi(attrs):
@@ -123,6 +124,40 @@ def do_bench_cudagraph(fn, rep=20, grad_to_none=None, quantiles=None, return_mod
             ret += [start_event.elapsed_time(end_event) / n_repeat]
         return _summarize_statistics(ret, quantiles, return_mode)
 
+def do_bench_multiprocess(fn, warmup=5, rep=10, grad_to_none=None, quantiles=None, return_mode="mean", perf_profiling=False):
+    """
+    Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
+    the 20-th and 80-th performance percentile.
+
+    :param fn: Function to benchmark
+    :type fn: Callable
+    :param warmup: Warmup time (in count)
+    :type warmup: int
+    :param rep: Repetition time (in count)
+    :type rep: int
+    """
+    start_event = torch.cuda.Event(enable_timing=True)
+    stop_event = torch.cuda.Event(enable_timing=True)
+
+    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
+    stop_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
+
+    # Warm-up
+    for _ in range(warmup):
+        fn()
+    # Benchmark
+    for i in range(rep):
+        start_event[i].record()
+        fn()
+        stop_event[i].record()
+    for i in range(rep):
+        start_event[i].wait()
+        stop_event[i].wait()
+    torch.cuda.current_stream().synchronize()
+    # times = start_event.elapsed_time(stop_event)
+    times = [s.elapsed_time(e) for s, e in zip(start_event, stop_event)]
+    # return output, duration_ms / iters
+    return _summarize_statistics(times, quantiles, return_mode)
 
 def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_mode="mean", perf_profiling=False):
     """

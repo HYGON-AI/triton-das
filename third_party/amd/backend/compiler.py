@@ -1,5 +1,5 @@
 from triton.backends.compiler import BaseBackend, GPUTarget
-from triton._C.libtriton import ir, passes, llvm, amd
+from triton._C.libtriton import ir, passes, llvm, amd, distributed
 from triton import knobs
 from triton.runtime.errors import HSACOError
 from dataclasses import dataclass
@@ -95,7 +95,10 @@ class HIPOptions:
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         for lib in ["ocml", "ockl", "hip", "opencl"]:   # Add hip and opencl for HCU toolchain.
             extern_libs[lib] = str(default_libdir / f'{lib}.bc')
+        # rocshmem_device_lib = str(default_libdir / 'librocshmem_device.bc')
+
         object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
+        # object.__setattr__(self, 'rocshmem_device_lib', rocshmem_device_lib)
 
     def hash(self):
         key = '_'.join([f'{name}-{val}' for name, val in self.__dict__.items()])
@@ -159,10 +162,16 @@ class HIPBackend(BaseBackend):
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from triton.language.extra.hip import libdevice
+        # from triton.language.extra.hip import librocshmem_device
+        from triton.language.extra.hip import libnvshmem_device
 
-        return {"triton.language.extra.libdevice": libdevice}
+        return {
+            "triton.language.extra.libdevice": libdevice,
+            "triton.language.extra.libshmem_device": libnvshmem_device
+        }
 
     def load_dialects(self, ctx):
+        distributed.ir.load_dialects(ctx)
         amd.load_dialects(ctx)
 
     @staticmethod
@@ -320,6 +329,9 @@ class HIPBackend(BaseBackend):
         pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(pm, f"hip:{options.arch}", options.num_warps, options.warp_size,
                                            options.num_ctas)
+        # TritonDistributed Extension
+        # distributed.passes.ttir.add_convert_to_ttgpuir_ext(pm, f"hip:{options.arch}", options.num_warps,
+        #                                                    options.warp_size, options.num_ctas)
         pm.run(mod)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
@@ -403,6 +415,8 @@ class HIPBackend(BaseBackend):
         ##    For now it is used as a controller for developers only.
         __HIP_FTZ = True
         amd.passes.ttgpuir.add_to_llvmir(pm, options.arch, __HIP_FTZ)
+        # TritonDistributed Extension: distributed -> llvm
+        distributed.passes.ttgpuir.amd.add_distributed_to_llvm(pm, options.arch, __HIP_FTZ)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
@@ -416,6 +430,8 @@ class HIPBackend(BaseBackend):
         if not knobs.compilation.disable_line_info:
             passes.llvmir.add_di_scope(pm)
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)
+        # TritonDistributed Extension: libdevice -> llvm
+        distributed.passes.ttgpuir.amd.add_lib_device_to_llvmir(pm, __HIP_FTZ)
         pm.run(mod)
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
@@ -461,6 +477,11 @@ class HIPBackend(BaseBackend):
         # to user SGPRs so that the kernel does not need to s_load its arguments
         # from memory.
         amd.set_all_fn_arg_inreg(fns[0])
+        metadata['use_nvshmem'] = False
+        for k in llvm_mod.get_functions():
+            if "nvshmem" in k.name and k.is_declaration():
+                metadata['use_nvshmem'] = True
+                break
 
         if knobs.compilation.enable_asan:
             default_libdir = Path(__file__).parent / 'lib'
@@ -473,6 +494,11 @@ class HIPBackend(BaseBackend):
         elif options.extern_libs:
             paths = [path for (name, path) in options.extern_libs if amd.need_extern_lib(llvm_mod, name)]
             llvm.link_extern_libs(llvm_mod, paths)
+
+        # if options.rocshmem_device_lib and metadata['use_rocshmem']:
+        if metadata['use_nvshmem']:
+            default_libdir = Path(__file__).parent / 'lib'
+            llvm.link_extern_libs(llvm_mod, [str(default_libdir / "libnvshmem_device.bc")])
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
 
@@ -488,6 +514,7 @@ class HIPBackend(BaseBackend):
         amd.disable_print_inline(llvm_mod)
         return str(llvm_mod)
 
+    ## TODO: [AMD] integrate with rocshmem
     @staticmethod
     def make_amdgcn(src, metadata, options):
         # Find kernel names (there should only be one)

@@ -15,6 +15,8 @@
 #include "llvm/Support/Casting.h"
 #include <queue>
 
+#include "triton/Dialect/Distributed/IR/Dialect.h"
+
 using namespace mlir;
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
@@ -260,6 +262,26 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     atomicRMWOp.getMaskMutable().assign(mask);
     return op;
   }
+
+  // TODO(zhengsize): add predicate to distributed ops?
+  // Distributed barrier ops
+  if (isa<triton::distributed::ConsumeTokenOp>(op))
+    return op;
+  if (isa<triton::distributed::WaitOp>(op)) {
+    // fallback to branch
+    scf::IfOp newIfOp = rewriter.create<scf::IfOp>(
+        op->getLoc(), op->getResultTypes(), pred, true);
+    auto thenB = newIfOp.getThenBodyBuilder();
+    auto newOpInThen = thenB.clone(*op);
+    thenB.create<scf::YieldOp>(op->getLoc(), newOpInThen->getResults());
+    auto elseB = newIfOp.getElseBodyBuilder();
+    auto elseConst = elseB.create<arith::ConstantOp>(
+        op->getLoc(), IntegerAttr::get(op->getResultTypes().front(), 0));
+    elseB.create<scf::YieldOp>(op->getLoc(), elseConst->getResults());
+    rewriter.replaceOp(op, newIfOp.getResults());
+    return newIfOp;
+  }
+
   if (!op->isRegistered()) {
     // Skip ops from unregistered dialects to make writing lit tests easier.
     return op;

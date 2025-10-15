@@ -419,8 +419,10 @@ getLinearLayoutForMmacLayout(MLIRContext *ctx, MmacLayout mmacLayout,
         outDimNames);
   case MmacLayout::MFMA:
     assert(false && "This function is only used for mmac layout");
+    return LinearLayout::empty();
   default:
     assert(false && "Unsupported layout");
+    return LinearLayout::empty();
   }
 }
 

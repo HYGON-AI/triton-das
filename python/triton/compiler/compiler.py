@@ -491,6 +491,18 @@ class CompiledKernel:
         if self.metadata.num_warps * warp_size > self.n_max_threads:
             raise OutOfResources(self.metadata.num_warps * warp_size, self.n_max_threads, "threads")
 
+        if hasattr(self.metadata, 'use_nvshmem'):
+            if self.metadata.use_nvshmem:
+                # patch function with nvshmem
+                import pynvshmem
+                pynvshmem.nvshmemx_cumodule_init(self.module)
+        elif hasattr(self.metadata, 'use_rocshmem'):
+            assert False, "currently only supports pynvshmem, please use pynvshmem.xxx instead"
+            if self.metadata.use_rocshmem:
+                pass
+        else:
+            print("Warning: No nvshmem/rocshmem imported.")
+
     def __getattribute__(self, name):
         if name == 'run':
             self._init_handles()
