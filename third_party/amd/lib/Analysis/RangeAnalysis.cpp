@@ -291,7 +291,7 @@ bool cmpIIsStaticallyTrue(const DataFlowSolver &solver, arith::CmpIOp cmpOp) {
 std::optional<ConstantIntRanges>
 TritonIntegerRangeAnalysis::maybeGetAssumedRange(Value anchor) const {
   auto matchingAssumptions = this->assumptions.lookup(anchor);
-  if (matchingAssumptions.empty())
+  if (matchingAssumptions.empty() || isa<tt::PointerType>(anchor.getType()) /* HCU Fix */)
     return {};
 
   unsigned bitWidth = ConstantIntRanges::getStorageBitwidth(anchor.getType());

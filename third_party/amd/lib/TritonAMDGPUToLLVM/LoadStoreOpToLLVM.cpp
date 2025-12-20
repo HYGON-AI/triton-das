@@ -1508,7 +1508,11 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     unsigned lowBits = vmCnt & 0xF;
     unsigned highBits = vmCnt >> 4 << 14;
     unsigned otherCnts = ~0xC00F; // C00F has bits 15:14 and 3:0 set
-    unsigned waitValue = lowBits | highBits | otherCnts;
+
+    // HCU extend: bit 7 to enable backend hcu-update-wait-by-reverse-search optimize.
+    // see http://172.20.48.13/browse/DCUSW-3577 to know more details.
+    unsigned enableOptWaitCntBits = 0x1 << 7;
+    unsigned waitValue = lowBits | highBits | otherCnts | enableOptWaitCntBits;
 
     rewriter.create<ROCDL::SWaitcntOp>(loc, waitValue);
 
@@ -1532,6 +1536,7 @@ struct AsyncCommitGroupOpConversion
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     rewriter.replaceOp(op, b.i32_val(0));
+
     return success();
   }
 };

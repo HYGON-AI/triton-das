@@ -62,7 +62,7 @@ public:
     return AMDMfmaEncodingAttr::get(
         &ctx, /*versionMajor=*/2, /*versionMinor=*/0, warps, mDim, nDim,
         isTransposed, CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd),
-        MmacLayout::MFMA);
+        MmacLayout::MFMA, 0);
   }
 
   DotOperandEncodingAttr mfmaDotOp(AMDMfmaEncodingAttr mfma, unsigned opIdx,

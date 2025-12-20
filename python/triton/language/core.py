@@ -2124,6 +2124,26 @@ def load(pointer, mask=None, other=None, boundary_check=(), padding_option="", c
     return semantic.load(pointer, mask, other, boundary_check, padding_option, cache_modifier, eviction_policy,
                          volatile, _builder)
 
+@builtin
+def matrix_load(base: tensor,
+                shape: List[tensor],
+                strides: List[tensor],
+                block_shape: List[constexpr],
+                offsets: Sequence[constexpr | tensor],
+                boundary_check=(),
+                mask=None,
+                cache_modifier="",
+                eviction_policy="",
+                volatile=False,
+                _builder=None):
+    # `mask` can be constexpr
+    mask = _unwrap_if_constexpr(mask)
+    if mask is not None:
+        mask = semantic.to_tensor(mask, _builder)
+    return semantic.matrix_load(base, shape, strides, block_shape, offsets,
+                                boundary_check, mask, cache_modifier, eviction_policy, volatile,
+                                _builder)
+
 
 @builtin
 def load_tensor_descriptor(desc: tensor_descriptor_base, offsets: Sequence[constexpr | tensor],

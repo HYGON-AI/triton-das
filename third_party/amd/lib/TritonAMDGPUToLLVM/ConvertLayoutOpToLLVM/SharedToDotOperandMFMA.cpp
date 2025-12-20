@@ -222,7 +222,8 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();
   assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
-         (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
+         (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64) ||
+         ((mDim == 16 && nDim == 16) || (mDim <= 128 && nDim <= 128 && mDim % 16 == 0 && nDim % 16 == 0)));
   auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
   auto sharedLayout =

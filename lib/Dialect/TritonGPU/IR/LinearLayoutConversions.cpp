@@ -436,10 +436,6 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   int nIndex = 1 + hasBatchDim;
   (void)mIndex, (void)nIndex;
 
-  assert(((getMDim() == 32 && getNDim() == 32) ||
-          (getMDim() == 16 && getNDim() == 16)) &&
-         "Unsupported mfma type");
-
   MLIRContext *ctx = getContext();
   SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
 
@@ -454,50 +450,70 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   SmallVector<unsigned> order = getDefaultMmaOrder(*this);
   auto tileLayout = LinearLayout::empty();
 
-  if (getMDim() == 32) {
-    // For mfma with 32x32 output, each of the 64 threads holds 16 elements.
-    //
-    // For the register (i.e., element) dimension, these 16 elements are along
-    // the matrix C's M dimension, with 4 consecutive elements spanning 4 rows
-    // and then the next 4 rows being a gap.
-    //
-    // For the lane (i.e., thread) dimension, these threads are along the
-    // matrix C's N dimension, with 32 consecutive threads covering a whole
-    // row and the next 32 threads start after a gap spanning 4 rows.
-    tileLayout = LinearLayout(
-        {{kRegister, {{0, 1}, {0, 2}, {0, 8}, /*gap*/ {0, 16}}},
-         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 4}}}},
-        {outDimNames[order[0]], outDimNames[order[1]]});
-    // For mfma.transposed layout, the element ownership among threads are
-    // "transposed" within each warp.
-    if (getIsTransposed())
-      tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}, {2, 0}, {8, 0}, /*gap*/ {16, 0}}},
-           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, /*gap*/ {4, 0}}}},
-          {outDimNames[order[0]], outDimNames[order[1]]});
-  } else {
-    assert(getMDim() == 16);
-    assert(isHCUMmac());
-    // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
-    //
-    // For the register (i.e., element) dimension, these 4 elements are along
-    // the matrix C's M dimension, with 4 consecutive elements spanning 4 rows.
-    //
-    // For the lane (i.e., thread) dimension, these threads are along the
-    // matrix C's N dimension, with 16 consecutive threads covering a whole
-    // row and the next 16 threads start after a gap spanning 4 rows.
+  if (isHCUMmac()) {
+    auto mDim = getMDim();
+    auto nDim = getNDim();
+    assert(mDim >= 16 && mDim <= 128 && mDim % 16 == 0 && "mDim should be 16, 32, 64, 128");
+    assert(nDim >= 16 && nDim <= 128 && nDim % 16 == 0 && "nDim should be 16, 32, 64, 128");
+
     tileLayout = getLinearLayoutForMmacLayout(
         ctx, getMmacLayout(),
         {outDimNames[order[0]], outDimNames[order[1]]});
-
-    // For mfma.transposed layout, the element ownership among threads are
-    // "transposed" within each warp.
-    if (getIsTransposed())
-      tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}, {2, 0}}},
-           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {4, 0}, {8, 0}}}},
-          {outDimNames[order[0]], outDimNames[order[1]]});
+    // Extend the layout from one mmac to multi-mmacs within one warp according
+    // to the size of getInstrsPerWarp.
+    // Only need to extend register layout, the lane layout is the same
+    tileLayout *= identityStandardND(kRegister, getInstrsPerWarp(), order);
   }
+  // For AMD mfma
+  else {
+    assert(((getMDim() == 32 && getNDim() == 32) ||
+            (getMDim() == 16 && getNDim() == 16)) &&
+          "Unsupported mfma type");
+    if (getMDim() == 32) {
+      // For mfma with 32x32 output, each of the 64 threads holds 16 elements.
+      //
+      // For the register (i.e., element) dimension, these 16 elements are along
+      // the matrix C's M dimension, with 4 consecutive elements spanning 4 rows
+      // and then the next 4 rows being a gap.
+      //
+      // For the lane (i.e., thread) dimension, these threads are along the
+      // matrix C's N dimension, with 32 consecutive threads covering a whole
+      // row and the next 32 threads start after a gap spanning 4 rows.
+      tileLayout = LinearLayout(
+          {{kRegister, {{0, 1}, {0, 2}, {0, 8}, /*gap*/ {0, 16}}},
+          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 4}}}},
+          {outDimNames[order[0]], outDimNames[order[1]]});
+      // For mfma.transposed layout, the element ownership among threads are
+      // "transposed" within each warp.
+      if (getIsTransposed())
+        tileLayout = LinearLayout(
+            {{kRegister, {{1, 0}, {2, 0}, {8, 0}, /*gap*/ {16, 0}}},
+            {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, /*gap*/ {4, 0}}}},
+            {outDimNames[order[0]], outDimNames[order[1]]});
+    } else {
+      assert(getMDim() == 16);
+      // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
+      //
+      // For the register (i.e., element) dimension, these 4 elements are along
+      // the matrix C's M dimension, with 4 consecutive elements spanning 4 rows.
+      //
+      // For the lane (i.e., thread) dimension, these threads are along the
+      // matrix C's N dimension, with 16 consecutive threads covering a whole
+      // row and the next 16 threads start after a gap spanning 4 rows.
+      tileLayout = LinearLayout(
+          {{kRegister, {{0, 1}, {0, 2}}},
+          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 4}, {0, 8}}}},
+          {outDimNames[order[0]], outDimNames[order[1]]});
+      // For mfma.transposed layout, the element ownership among threads are
+      // "transposed" within each warp.
+      if (getIsTransposed())
+        tileLayout = LinearLayout(
+            {{kRegister, {{1, 0}, {2, 0}}},
+            {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {4, 0}, {8, 0}}}},
+            {outDimNames[order[0]], outDimNames[order[1]]});
+    }
+  }
+
   if (hasBatchDim) {
     assert(order[2] == 0);
     // Extend the base vector with one value to accommodate for the batch
@@ -712,34 +728,68 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
   std::vector<std::vector<int32_t>> laneBase;
   int32_t kTileSize = -1;
 
-  if (mfmaLayout.getMDim() == 32) {
-    // Canonical MFMA linear layout handles 4 consecutive elements along
-    // the register dimension. Dot operand handles variable kWidth consecutive
-    // elements. For lane dim, since the MFMA thread arrangement is {K, N} = {2,
-    // 32}, this means that mapping of first 5 base (up to thread 16) vectors
-    // will be an identity along N dim. Thread 32 will be mapped to element
-    // kWidth in K dimension.
-    laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {kWidth, 0}};
-    kTileSize = kWidth * 2;
-  } else {
-    assert(mfmaLayout.getMDim() == 16);
+  auto tileLayout = LinearLayout::empty();
+  if (mfmaLayout.isHCUMmac()) {
+    unsigned mDim = mfmaLayout.getMDim();
+    unsigned nDim = mfmaLayout.getNDim();
+    assert(mDim >= 16 && mDim <= 128 && mDim % 16 == 0 && "mDim should be 16, 32, 64, 128");
+    assert(nDim >= 16 && nDim <= 128 && nDim % 16 == 0 && "nDim should be 16, 32, 64, 128");
+    assert(!mfmaLayout.getInterleaveKind() && "mfmaLayout for interleave should check the code!");
+
     // For lane dim, since the MFMA thread arrangement is {K, N} = {4, 16}, this
     // means that mapping of first 4 base (up to thread 16) vectors will be an
     // identity along N dim. Thread 16 will be mapped to element kWisth in K
     // dimension. Thread 32 is mapped to element 2*kWidth in K dim.
     laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {kWidth, 0}, {kWidth * 2, 0}};
     kTileSize = kWidth * 4;
-  }
-  assert(kTileSize != -1);
-  // Add repeats of registers along K dimension to register base vectors
-  for (int32_t elem = kTileSize; elem < kSize; elem *= 2)
-    registerBase.emplace_back(std::vector<int32_t>{elem, 0});
 
-  // Base vectors above are defined in a fixed order [k-dim, non-k-dim].
-  // To assign them to actual matrix dimensions we assoicate with register
-  // `order` which is also also [k, nonk].
-  LinearLayout tileLayout({{kRegister, registerBase}, {kLane, laneBase}},
-                          {outDimNames[order[0]], outDimNames[order[1]]});
+    assert(kTileSize != -1);
+    // Add repeats of registers along K dimension to register base vectors
+    for (int32_t elem = kTileSize; elem < kSize; elem *= 2)
+      registerBase.emplace_back(std::vector<int32_t>{elem, 0});
+
+    // Base vectors above are defined in a fixed order [non-k-dim, k-dim].
+    // To assign them to actual matrix dimensions `order` array is used.
+    // For operand A: non-k-dim -> dim0, k-dim -> dim1
+    // For operand B: non-k-dim -> dim1, k-dim -> dim0
+    tileLayout = LinearLayout({{kRegister, registerBase}, {kLane, laneBase}},
+                              {outDimNames[order[0]], outDimNames[order[1]]});
+
+    auto nonKDimIdx = dotMfmaLayout.getOpIdx() == 0 ? 0 : 1;
+    if (mfmaLayout.getInstrsPerWarp()[nonKDimIdx] > 1) {
+      tileLayout *= LinearLayout::identity1D(mfmaLayout.getInstrsPerWarp()[nonKDimIdx],
+                                             kRegister, outDimNames[nonKDimIdx]);
+    }
+  } else {
+    if (mfmaLayout.getMDim() == 32) {
+      // Canonical MFMA linear layout handles 4 consecutive elements along
+      // the register dimension. Dot operand handles variable kWidth consecutive
+      // elements. For lane dim, since the MFMA thread arrangement is {K, N} = {2,
+      // 32}, this means that mapping of first 5 base (up to thread 16) vectors
+      // will be an identity along N dim. Thread 32 will be mapped to element
+      // kWidth in K dimension.
+      laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {kWidth, 0}};
+      kTileSize = kWidth * 2;
+    } else {
+      assert(mfmaLayout.getMDim() == 16);
+      // For lane dim, since the MFMA thread arrangement is {K, N} = {4, 16}, this
+      // means that mapping of first 4 base (up to thread 16) vectors will be an
+      // identity along N dim. Thread 16 will be mapped to element kWisth in K
+      // dimension. Thread 32 is mapped to element 2*kWidth in K dim.
+      laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {kWidth, 0}, {kWidth * 2, 0}};
+      kTileSize = kWidth * 4;
+    }
+    assert(kTileSize != -1);
+    // Add repeats of registers along K dimension to register base vectors
+    for (int32_t elem = kTileSize; elem < kSize; elem *= 2)
+      registerBase.emplace_back(std::vector<int32_t>{elem, 0});
+
+    // Base vectors above are defined in a fixed order [k-dim, non-k-dim].
+    // To assign them to actual matrix dimensions we assoicate with register
+    // `order` which is also also [k, nonk].
+    tileLayout = LinearLayout({{kRegister, registerBase}, {kLane, laneBase}},
+               {outDimNames[order[0]], outDimNames[order[1]]});
+  }
 
   if (hasBatchDim) {
     assert(order[2] == 0);
@@ -756,6 +806,7 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
 
   return combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape);
 }
+
 
 LinearLayout
 AMDWmmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {

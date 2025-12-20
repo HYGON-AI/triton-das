@@ -821,6 +821,39 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy) {
          !matchMFMAAndDotOperandShuffleCase(srcTy, dstTy);
 }
 
+// HCU: extend to retained unsupported cvt, leave to handle by LLs
+bool cvtNeedsRetainedToLinearLayout(RankedTensorType srcTy, RankedTensorType dstTy) {
+  auto srcLayout = srcTy.getEncoding();
+  auto dstLayout = dstTy.getEncoding();
+
+  // TODO: will remove this after local_load sharedToDot support non-M16N16 cases.
+  auto isDotMfmaM16N16Fn = [](DotOperandEncodingAttr dotOperandLayout) {
+    auto opIdx = dotOperandLayout.getOpIdx();
+    auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(dotOperandLayout.getParent());
+    if (mfmaLayout && (opIdx == 0 && mfmaLayout.getMDim() == 16) || (opIdx == 1 && mfmaLayout.getNDim() == 16))
+      return true;
+    return false;
+  };
+
+  if (isa<DotOperandEncodingAttr>(dstLayout)) {
+    auto dotOperandLayout = cast<DotOperandEncodingAttr>(dstLayout);
+    auto kWidth = dotOperandLayout.getKWidth();
+    if (!isDotMfmaM16N16Fn(dotOperandLayout)) {
+      if (isa<AMDMfmaEncodingAttr>(srcLayout) &&
+          isMmacToDotShortcut(srcTy, dstTy)) {
+        return false;
+      }
+      if (isa<DotOperandEncodingAttr>(srcLayout) &&
+          dyn_cast<DotOperandEncodingAttr>(srcLayout).getKWidth() == kWidth) {
+        return false;
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool atomicNeedsSharedMemory(Value value) {
   auto type = value.getType();
   if (isa<RankedTensorType>(type) || value.use_empty())

@@ -1142,6 +1142,84 @@ def load(ptr: tl.tensor, mask: Optional[tl.tensor], other: Optional[tl.tensor], 
         # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
         return _load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile, builder)
 
+def matrix_load(base: tl.tensor,
+                shape: List[tl.tensor],
+                strides: List[tl.tensor],
+                block_shape: List[tl.constexpr],
+                offsets: Sequence[tl.constexpr | tl.tensor],
+                boundary_check: Tuple,
+                mask: Optional[tl.tensor],
+                cache_modifier: str,
+                eviction_policy: str,
+                volatile: bool,
+                builder: ir.builder) -> tl.tensor:
+
+    cache_modifier = _str_to_load_cache_modifier(cache_modifier)
+    eviction_policy = _str_to_eviction_policy(eviction_policy)
+
+    ndim = len(shape)
+    if (ndim != 2):
+        raise ValueError(f"Expected 2 dimensions but got {ndim}")
+    if len(strides) != ndim:
+        raise ValueError(f"Expected {ndim} strides but got {len(strides)}")
+    if len(block_shape) != ndim:
+        raise ValueError(f"Expected block_shape to have {ndim} dimensions but got {len(strides)}")
+    if mask is not None and boundary_check != ():
+        raise ValueError("`mask` and `boundary_check` arguments no need to be specified at the same time")
+
+
+    def scalar_constant(value, dtype: tl.dtype) -> tl.tensor:
+        # scalar
+        if dtype is None:
+            raise ValueError("dtype must be specified when value is not a tensor")
+        if value == 0:
+            value = builder.get_null_value(dtype.to_ir(builder))
+        else:
+            get_value_fn = getattr(builder, f"get_{dtype.name}")
+            value = get_value_fn(value)
+        return tl.tensor(value, dtype)
+
+    def make_scalar(value, dtype: tl.dtype) -> tl.tensor:
+        if isinstance(value, tl.tensor):
+            assert value.numel.value == 1, "only accepts size-1 tensor"
+            return cast(value, dtype, builder)
+        # scalar
+        return scalar_constant(value, dtype)
+
+    shape = [make_scalar(x, tl.int32) for x in shape]
+    strides = [make_scalar(x, tl.int64) for x in strides]
+    block_shape = tl._unwrap_shape(block_shape)
+    offsets = _convert_to_ir_values(builder, offsets, require_i64=False)
+
+    # Preprocess `boundary_check` argument: filter out None values
+    if boundary_check:
+        if hasattr(boundary_check, "__iter__") and not isinstance(boundary_check, (str, bytes)):
+            boundary_check = tuple(
+                elem for elem in boundary_check
+                if elem is not None
+                and not (isinstance(elem, tl.constexpr) and elem.value is None)
+            )
+    # Canonicalize `boundary_check` argument (validate and normalize dimension indices)
+    boundary_check = _canonicalize_boundary_check(boundary_check, block_shape)
+
+    # Execute matrix_load without mask (matrix_load op don't support mask natively)
+    result = tl.tensor(builder.create_matrix_load(base.handle, [s.handle for s in shape],
+                                                  [s.handle for s in strides], block_shape, offsets,
+                                                   boundary_check, cache_modifier, eviction_policy, volatile),
+                       tl.block_type(base.type.element_ty, block_shape))
+
+    # Apply mask using where operation if mask is provided
+    if mask is not None:
+        mask = broadcast_impl_shape(mask, block_shape, builder)
+        # Create zero tensor with same shape and dtype as result
+        zero_value = builder.get_null_value(base.type.element_ty.to_ir(builder))
+        zero_tensor = tl.tensor(zero_value, base.type.element_ty)
+        zero_result = splat(zero_tensor, block_shape, builder)
+        # Apply mask: where(mask, result, zero_result)
+        result = where(mask, result, zero_result, builder)
+
+    return result
+
 
 def descriptor_load(desc: tl.tensor_descriptor_base, offsets, cache_modifier: str, eviction_policy: str,
                     builder: ir.builder) -> tl.tensor:

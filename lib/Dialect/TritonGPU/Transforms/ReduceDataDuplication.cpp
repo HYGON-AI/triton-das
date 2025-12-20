@@ -14,6 +14,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "triton/Analysis/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
@@ -43,6 +44,8 @@ public:
       if (!dstDotOp)
         return;
       if (!cvtNeedsSharedMemory(srcType, dstType))
+        return;
+      if (cvtNeedsRetainedToLinearLayout(srcType, dstType))
         return;
       auto order = getOrderForMemory(srcType);
       auto sharedMemorySpace =

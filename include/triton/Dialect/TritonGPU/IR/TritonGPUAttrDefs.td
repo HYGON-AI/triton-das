@@ -578,6 +578,39 @@ Swizzling examples (matrix is filled with numbers 0, 1, 2, .. columns*rows-1):
   let hasCustomAssemblyFormat = 1;
 }
 
+def AMDMlsSharedEncodingAttr :
+  TritonGPU_Attr<"AMDMlsSharedEncoding", "hcu_mls_shared_encoding",
+                [SharedEncodingTrait, LayoutEncodingTrait]> {
+  let mnemonic = "mls_shared";
+  let description = [{
+    Represent HCU mls shared memory encoding.
+  }];
+
+  let parameters = (ins "unsigned":$opIdx,  // or nonKTileIdx
+                        ArrayRefParameter<"unsigned">:$mlsTile,
+                        "unsigned":$elemBitWidth,
+                        "unsigned":$alt2Kind,
+                        "unsigned":$version,
+                        ArrayRefParameter<"unsigned">:$order,
+                        "CTALayoutAttr":$CTALayout);
+
+  // let extraClassDeclaration = extraBaseClassDeclaration;
+
+  let extraClassDeclaration = extraBaseClassDeclaration # [{
+    int32_t getAlignment() const;
+    SmallVector<unsigned> getCTAsPerCGA() const;
+    SmallVector<unsigned> getCTASplitNum() const;
+    SmallVector<unsigned> getCTAOrder() const;
+  }];
+
+  let assemblyFormat = "`<` `opIdx` `=` $opIdx `,` "
+                       "`mlsTile` `=` `[` $mlsTile `]` `,` "
+                       "`elemBitWidth` `=` $elemBitWidth `,` "
+                       "`alt2Kind` `=` $alt2Kind `,` "
+                       "`version` `=` $version `,` "
+                       "`order` `=` `[` $order `]` `,` "
+                       "`CTALayout` `=` $CTALayout `>`";
+}
 
 //===----------------------------------------------------------------------===//
 // Distributed Layout Encoding
@@ -1038,11 +1071,36 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
     "unsigned":$NDim,
     "bool":$isTransposed,
     "CTALayoutAttr":$CTALayout,
-    DefaultValuedParameter<"MmacLayout", "MmacLayout::LEGACY">:$mmacLayout
+    DefaultValuedParameter<"MmacLayout", "MmacLayout::LEGACY">:$mmacLayout,
+    DefaultValuedParameter<"unsigned", "0">:$interleaveInfo
   );
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
+    bool supportReduction() const {
+      return true;
+    }
+
     bool isHCUMmac() const;
+    bool isM16N16() const { return getMDim() == 16 && getNDim() == 16; }
+    bool isInterleaved() const { return getInterleaveInfo() != 0; }
+    bool isInterleavedForOperand(int opIdx) const { return ((getInterleaveInfo() >> 2) & (opIdx == 0 ? 0b10 : 0b01)); }
+    unsigned getInterleaveKind() const { return getInterleaveInfo() & 0x3; }
+    unsigned getInterleaveKindForOperand(int opIdx) const { return isInterleavedForOperand(opIdx) ? getInterleaveKind() : 0; }
+
+    SmallVector<unsigned> getMfmaTile() const { return {getMDim(), getNDim()}; }
+    SmallVector<unsigned> getInstrShape() const { return {16, 16}; }
+    SmallVector<unsigned> getInstrsPerWarp() const { return {getMDim()/16, getNDim()/16}; }
+    SmallVector<unsigned> getMfmaTileRepForOperand(ArrayRef<int64_t> operandShape, int kWidth,int opIdx) const {
+      auto rep = getRepForOperand(operandShape, kWidth, opIdx);
+      SmallVector<unsigned> ret{rep.begin(), rep.end()};
+      auto rank = rep.size();
+      if (opIdx == 0)
+        ret[rank - 2] = std::max<unsigned>(1, ret[rank - 2] / getInstrsPerWarp()[0]);
+      else
+        ret[rank - 1] = std::max<unsigned>(1, ret[rank - 1] / getInstrsPerWarp()[1]);
+      return ret;
+    }
+
     SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
     SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;

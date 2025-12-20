@@ -54,6 +54,7 @@ bool comesFromAsyncWait(Value token) {
 bool filterAsyncLocalLoadsDeppendencies(Operation *op1, Operation *op2) {
   auto isAsyncLoad = [](Operation *op) {
     return llvm::isa<triton::gpu::AsyncCopyGlobalToLocalOp,
+                     triton::amdgpu::MatrixLoadToLocalOp,
                      triton::amdgpu::BufferLoadToLocalOp>(op);
   };
   auto isLocalLoadWithAsyncWaitToken = [](Operation *op) {

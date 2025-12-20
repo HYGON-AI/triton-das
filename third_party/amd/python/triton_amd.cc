@@ -56,9 +56,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   ADD_PASS_WRAPPER_2("add_optimize_lds_usage",
                      mlir::triton::AMD::createOptimizeLDSUsagePass,
                      const std::string &, int32_t);
-  ADD_PASS_OPTION_WRAPPER_3("add_accelerate_matmul",
+  ADD_PASS_OPTION_WRAPPER_4("add_accelerate_matmul",
                             mlir::createTritonAMDGPUAccelerateMatmul,
-                            const std::string, int, int);
+                            const std::string, int, int, int);
   ADD_PASS_WRAPPER_0("add_optimize_epilogue",
                      mlir::createTritonAMDGPUOptimizeEpilogue);
   m.def("add_hoist_layout_conversions", [](mlir::PassManager &pm) {
@@ -90,6 +90,12 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
     pm.addNestedPass<mlir::triton::FuncOp>(
         mlir::createTritonAMDGPUInThreadTranspose());
   });
+  ADD_PASS_OPTION_WRAPPER_3("add_mls_stream_pipeline",
+                            mlir::createTritonAMDGPUMlsStreamPipeline, int, bool, int);
+  ADD_PASS_WRAPPER_0("add_mls_encoding_insertion",
+                     mlir::createTritonAMDGPUMlsEncodingInsertion);
+  ADD_PASS_WRAPPER_0("add_mls_lowering_pass",
+                     mlir::createTritonAMDGPUMlsLowering);
 }
 
 void addControlConstant(llvm::Module *module, const char *name,

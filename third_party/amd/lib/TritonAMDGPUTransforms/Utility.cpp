@@ -1,8 +1,10 @@
 #include "Utility.h"
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Analysis/SliceAnalysis.h"
 
 #include <limits>
+#include <deque>
 
 namespace deduceMin {
 int deduceMinCountInBlock(Block &block,
@@ -105,4 +107,44 @@ int deduceMinCountOnDefChain(Value defValue, Operation *consumerOp,
                              llvm::function_ref<int(Operation *)> countFunc) {
   return deduceMinCountOnDefChain(defValue, consumerOp, countFunc, 0,
                                   std::numeric_limits<int>::max());
+}
+
+
+FailureOr<std::pair<triton::DotOp, unsigned>>
+getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp) {
+  SetVector<Operation *> slices;
+  mlir::getForwardSlice(matrixOp.getResult(), &slices);
+
+  std::deque<Operation *> worklist(slices.begin(), slices.end());
+  while (!worklist.empty()) {
+    Operation *op = worklist.front();
+    worklist.pop_front();
+
+    if (auto dotOp = dyn_cast<triton::DotOp>(op)) {
+      for (unsigned idx = 0; idx < dotOp.getNumOperands(); ++idx) {
+        auto defineOp = dotOp.getOperand(idx).getDefiningOp();
+        if (defineOp == matrixOp || (defineOp && slices.contains(defineOp))) {
+          return success(std::make_pair(dotOp, idx));
+        }
+      }
+    } else if (auto scfYieldOp = dyn_cast<scf::YieldOp>(op)) {
+      for (auto &&yieldOperand : llvm::enumerate(scfYieldOp.getOperands())) {
+        unsigned argIdx = yieldOperand.index();
+        Value argVal = yieldOperand.value();
+
+        Operation *defOp = argVal.getDefiningOp();
+        if (defOp == matrixOp || (defOp && slices.contains(defOp))) {
+          auto scfRes = scfYieldOp->getParentOp()->getResult(argIdx);
+          SetVector<Operation *> outSlice;
+          mlir::getForwardSlice(scfRes, &outSlice);
+          for (Operation *outOp : outSlice)
+            if (slices.insert(outOp))
+              worklist.push_back(outOp);
+        }
+      }
+    }
+
+  }
+
+  return failure();
 }

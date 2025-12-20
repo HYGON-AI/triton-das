@@ -282,7 +282,8 @@ static void sinkSecondLoad(scf::ForOp forOp) {
   // Only apply the optimization when tile size is large enough
   // 1. nonKDim >= 128
   // 2. kDim >= 64
-  if (!(tileAShape[0] >= 128 && tileAShape[1] >= 64 && tileBShape[1] >= 128))
+  if (tileAShape.size() < 2 || tileBShape.size() < 2 ||
+      !(tileAShape[0] >= 128 && tileAShape[1] >= 64 && tileBShape[1] >= 128))
     return;
   // Only apply the optimization when the moving is legal
   // 1. Make sure the 2nd loadOp is before the dot

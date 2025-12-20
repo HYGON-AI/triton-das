@@ -84,6 +84,10 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerTritonAMDGPUInsertInstructionSchedHints();
   mlir::triton::registerTritonAMDGPULowerInstructionSchedHints();
   mlir::registerTritonAMDFoldTrueCmpI();
+  /* HCU Passes */
+  mlir::registerTritonAMDGPUMlsEncodingInsertion();
+  mlir::registerTritonAMDGPUMlsLowering();
+  mlir::registerTritonAMDGPUMlsStreamPipeline();
 
   // NVWS passes
   mlir::triton::registerNVWSTransformsPasses();

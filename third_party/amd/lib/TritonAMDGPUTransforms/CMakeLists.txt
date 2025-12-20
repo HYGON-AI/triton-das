@@ -13,6 +13,10 @@ add_triton_library(TritonAMDGPUTransforms
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
+  MlsStreamPipeline.cpp
+  MlsGroup.cpp
+  MlsEncodingInsertion.cpp
+  MlsLowering.cpp
 
   DEPENDS
   TritonAMDGPUIR

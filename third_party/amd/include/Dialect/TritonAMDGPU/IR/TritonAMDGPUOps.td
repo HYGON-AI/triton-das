@@ -494,4 +494,37 @@ def InThreadTransposeOp : TT_AMDGPU_Op<"in_thread_transpose", [Pure]> {
   }];
 }
 
+def MatrixLoadToLocalOp : TT_AMDGPU_Op<"matrix_load_to_local", [AttrSizedOperandSegments]> {
+  let summary = "matrix load from global memory to local memory";
+  let description = [{
+    This operation load matrix data from global memory to local memory asynchronously.
+    This is analogue to tt.matrix_load except the data are copied to local memory.
+  }];
+
+  let arguments = (ins
+    Arg<TT_Ptr, "Global memory scalar base pointer to load from", [MemRead<GlobalMemory>]>:$base,
+    Variadic<I32>:$shape,
+    Variadic<I64>:$strides,
+    DenseI32ArrayAttr:$tensorShape,
+    Variadic<I32>:$indices,
+    DefaultValuedAttr<DenseI32ArrayAttr, "::llvm::ArrayRef<int32_t>{}">:$boundaryCheck,
+    DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache,
+    DefaultValuedAttr<TT_EvictionPolicyAttr, "triton::EvictionPolicy::NORMAL">:$evict,
+    DefaultValuedAttr<BoolAttr, "false">:$isVolatile,
+    Arg<TTG_MemDescType, "Shared memory slice to write to", [MemWrite<SharedMemory>]>:$dest
+  );
+  let results = (outs TTG_AsyncToken:$token);
+
+  let assemblyFormat = [{
+    $base `,` $dest `,` `shape` `=` `[` $shape `]` `,` `strides` `=` `[` $strides `]` `,`
+    `tensorShape` `=` $tensorShape `,` `indices` `=` `[` $indices `]`
+    oilist(
+      `boundaryCheck` `=` $boundaryCheck |
+      `cacheModifier` `=` $cache |
+      `evictionPolicy` `=` $evict
+    )
+    attr-dict `:` type($base) `->` type($dest)
+  }];
+}
+
 #endif

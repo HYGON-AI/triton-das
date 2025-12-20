@@ -48,7 +48,10 @@ def TritonAMDGPUAccelerateMatmul : Pass<"tritonamdgpu-accelerate-matmul", "mlir:
            "enforce matrix instruction MN size">,
     Option<"kPack", "kPack",
            "int32_t", /*default*/"1",
-           "KWidth / kBase">
+           "KWidth / kBase">,
+    Option<"mmacLayoutForce", "mmac-layout-force",
+           "int32_t", /*default*/"-1",
+           "enforce mmac layout">
   ];
 }
 
@@ -254,5 +257,46 @@ def TritonAMDFoldTrueCmpI: Pass<"tritonamdgpu-fold-true-cmpi", "mlir::ModuleOp">
   }];
 }
 
+// =================================================================================================
+// HCU Pass
+
+def TritonAMDGPUMlsStreamPipeline : Pass<"tritonamdgpu-mls-stream-pipeline", "mlir::ModuleOp"> {
+  let summary = "Pipeline MatrixLoad to shared memory async";
+
+  let description = [{
+    Pipeline MatrixLoad to shared memory asynchronously while computing on previous
+    tile
+  }];
+
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+
+  let options = [
+    Option<"numStages", "num_stages",
+           "int32_t", /*default*/"2",
+           "Number of Pipeline stages">,
+    Option<"useAsyncCopy", "use_async_copy",
+           "bool", /*default*/"true",
+           "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
+    Option<"asyncCopySingleBuffer", "async_copy_single_buffer",
+           "int32_t", /*default*/"1",
+           "Use AsyncCopyGlobalToLocal to directly load to shared memory with single buffer">,
+  ];
+}
+
+def TritonAMDGPUMlsEncodingInsertion: Pass<"tritonamdgpu-mls-encoding-insertion", "mlir::ModuleOp"> {
+  let summary = "Insert MlsEncoding to the matrix_load instruction";
+
+  let description = "This pass insert MlsEncoding attribute to the matrix_load instruction";
+
+  let dependentDialects = [];
+}
+
+def TritonAMDGPUMlsLowering: Pass<"tritonamdgpu-mls-lowering", "mlir::ModuleOp"> {
+  let summary = "Lower matrix_load to the matrix_load_to_local instruction";
+
+  let description = "This pass lower matrix_load to the matrix_load_to_local instruction";
+
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
 
 #endif

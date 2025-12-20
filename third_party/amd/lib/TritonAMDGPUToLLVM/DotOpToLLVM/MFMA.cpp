@@ -297,10 +297,12 @@ struct DotOpMFMAConversionHelper {
 
     bool allowXF32 =
         op.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
+    bool capFP8 = isa<mlir::FloatType>(aTensorTy.getElementType()) &&
+                  aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
-        /*withScale=*/false, allowXF32);
+        /*withScale=*/false, allowXF32, capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -404,6 +406,165 @@ struct DotOpMFMAConversionHelper {
     return success();
   }
 
+  // Conduct the Dot conversion.
+  LogicalResult convertDotNonM16N16(DotOp op, DotOpAdaptor adaptor) const {
+    auto tb = TritonLLVMOpBuilder(loc, rewriter);
+    // Check if this dot has come with priority set by setprio.
+    auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
+
+    auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+    auto mDim = mfmaLayout.getMDim();
+    auto nDim = mfmaLayout.getNDim();
+    auto mfmaVersion = mfmaLayout.getVersionMajor();
+    assert((mDim == 16 && nDim == 16) || (mDim <= 64 && nDim <= 64 && mDim % 16 == 0 && nDim % 16 == 0));
+
+    Value a = op.getA();
+    Value b = op.getB();
+    Value d = op.getD();
+    auto aTensorTy = cast<RankedTensorType>(a.getType());
+    auto bTensorTy = cast<RankedTensorType>(b.getType());
+    auto dTensorTy = cast<RankedTensorType>(d.getType());
+    auto elemTyA = aTensorTy.getElementType();
+    auto elemTyB = bTensorTy.getElementType();
+
+    const auto kDimOperandSize = aTensorTy.getShape().back();
+    bool allowXF32 =
+        op.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
+    bool capFP8 = isa<mlir::FloatType>(aTensorTy.getElementType()) &&
+                  aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
+    StringRef intrinsicName;
+    FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
+      mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB, false, allowXF32,
+      capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
+    if (failed(maybeMfmaIntrinsic))
+      llvm::report_fatal_error("No match found in MFMA database\n");
+
+    intrinsicName = maybeMfmaIntrinsic->name;
+    unsigned kBase = maybeMfmaIntrinsic->kBase;
+
+    auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
+    auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
+    int kWidth = aEncoding.getKWidth();
+    // If we are using XF32, the kWidth (and kBase) is double that of F32.
+    if (aTensorTy.getElementType().isF32() && allowXF32)
+      kWidth *= 2;
+    const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
+
+    intrinsicName = maybeMfmaIntrinsic->name;
+
+    auto rank = aTensorTy.getShape().size();
+
+    auto repA = mfmaLayout.getRepForOperand(aTensorTy.getShape(), kWidth, 0);
+    auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
+
+    assert(repA[2] == repB[1]);
+
+    Value loadedA = adaptor.getA();
+    Value loadedB = adaptor.getB();
+    Value loadedC = adaptor.getC();
+
+    auto numRepM = repA[1];
+    auto numRepN = repB[2];
+    auto numRepK = repA[2];
+    auto numRepB = repA[0];
+    unsigned numRepMWithinWarp = mfmaLayout.getInstrsPerWarp()[0];
+    unsigned numRepNWithinWarp = mfmaLayout.getInstrsPerWarp()[1];
+    unsigned numRepMTile =
+        mfmaLayout.getMfmaTileRepForOperand(aTensorTy.getShape(), kWidth, 0)[1];
+    unsigned numRepNTile =
+        mfmaLayout.getMfmaTileRepForOperand(bTensorTy.getShape(), kWidth, 1)[2];
+    assert(numRepMWithinWarp * numRepMTile == numRepM);
+    assert(numRepNWithinWarp * numRepNTile == numRepN);
+    assert(repA[0] == repB[0]);
+    auto mfmaEncoding = cast<AMDMfmaEncodingAttr>(aEncoding.getParent());
+    auto mfmaMmacLayout = mfmaEncoding.getMmacLayout();
+    bool isHCUMmac = mfmaEncoding ? mfmaEncoding.isHCUMmac() : false;
+    bool preserveBF16 = intrinsicName.contains(".bf16") && mfmaVersion >= 4;
+    auto operandA = getValuesFromDotOperandLayoutStruct(
+        loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
+        aTensorTy.getElementType(), allowXF32, preserveBF16, /*isConstantScale=*/false,
+        isHCUMmac);
+    auto operandB = getValuesFromDotOperandLayoutStruct(
+        loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
+        aTensorTy.getElementType(), allowXF32, preserveBF16, /*isConstantScale=*/false,
+        isHCUMmac);
+
+    auto dstElemTy = dTensorTy.getElementType();
+    auto fc = unpackLLElements(loc, loadedC, rewriter);
+
+    auto mfmaInstrM = mfmaLayout.getInstrShape()[0];
+    auto mfmaInstrN = mfmaLayout.getInstrShape()[1];
+
+    unsigned warpSize = triton::gpu::lookupThreadsPerWarp(rewriter);
+    // compute number of output elements that each thread holds for one MFMA
+    // instruction. subBlocks
+    const int subBlocks =
+        getNumSubmatrices(aTensorTy.getElementType(), mfmaInstrM, mfmaInstrN);
+    auto elemsPerVec = mfmaInstrM * mfmaInstrN * subBlocks / warpSize;
+
+    auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+    for (int b = 0; b < numRepB; ++b) {
+      for (int mTileIdx = 0; mTileIdx < numRepMTile; ++mTileIdx) {
+        for (int nTileIdx = 0; nTileIdx < numRepNTile; ++nTileIdx) {
+          // The granularity for mfma tile is warp, so generate mfma within warp
+          // firstly
+          for (int mIner = 0; mIner < numRepMWithinWarp; ++mIner) {
+            for (int nIner = 0; nIner < numRepNWithinWarp; ++nIner) {
+              int mIdx = mTileIdx * numRepMWithinWarp + mIner;
+              int nIdx = nTileIdx * numRepNWithinWarp + nIner;
+              int zigzagIdxOfAcc =
+                  nTileIdx * numRepMWithinWarp * numRepNWithinWarp +
+                  mIner * numRepNWithinWarp + nIner;
+              Value acc = tb.undef(vecTy);
+              for (unsigned v = 0; v < elemsPerVec; ++v) {
+                acc = tb.insert_element(
+                    vecTy, acc,
+                    fc[b * numRepM * numRepN * elemsPerVec +
+                       mTileIdx * numRepN * numRepMWithinWarp * elemsPerVec +
+                       zigzagIdxOfAcc * elemsPerVec + v],
+                    tb.i32_val(v));
+              }
+              acc = zeroAuxiliarBlocks(subBlocks, acc);
+              int numVecInKBase = numRepK * kWidth / kBase;
+              for (int k = 0; k < numVecInKBase; k++) {
+                acc =
+                    mfmaLayout.getIsTransposed()
+                        ? generateMFMAOp(intrinsicName, operandB[{b, nIdx, k}],
+                                        operandA[{b, mIdx, k}], acc,
+                                        mfmaMmacLayout)
+                        : generateMFMAOp(intrinsicName, operandA[{b, mIdx, k}],
+                                        operandB[{b, nIdx, k}], acc,
+                                        mfmaMmacLayout);
+              }
+              acc = reduceSubBlocks(subBlocks, acc);
+              for (unsigned v = 0; v < elemsPerVec; ++v) {
+                fc[b * numRepM * numRepN * elemsPerVec +
+                   mTileIdx * numRepN * numRepMWithinWarp * elemsPerVec +
+                   zigzagIdxOfAcc * elemsPerVec + v] =
+                    tb.extract_element(dstElemTy, acc, tb.i32_val(v));
+              }
+            }
+          }
+        }
+      }
+    }
+    // replace with new packed result
+    Type structTy = LLVM::LLVMStructType::getLiteral(
+        ctx, SmallVector<Type>(fc.size(), dstElemTy));
+    Value res = packLLElements(loc, typeConverter, fc, rewriter, structTy);
+
+    Type elemtTy = elemTyA;
+    const size_t mmaCount =
+        numRepB * numRepM * numRepN * numRepK * kWidth / kBase;
+    setNumGeneratedMMAs(op, mmaCount, maybeMfmaIntrinsic->mDim,
+                        maybeMfmaIntrinsic->nDim, maybeMfmaIntrinsic->kDim,
+                        elemtTy);
+
+    rewriter.replaceOp(op, res);
+
+    return success();
+  }
+
   /// Process the elements in rawElems and prepare a vector for mfma input.
   /// rawElems is a vector of kBase elements. Each element is of the raw
   /// element type from the input. We need to prepare a vector of kBase
@@ -411,7 +572,7 @@ struct DotOpMFMAConversionHelper {
   /// FIXME: isHCUMmac is a special handling for HCUs and should be eliminated
   ///        once HCU backend is implemented in Triton.
   Value prepareOperands(Value rawElems, int kBase, Type type, bool preserveBF16, bool isHCUMmac,
-                        bool isConstantScale = false) const {
+    bool isConstantScale = false) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     Value results;
 
@@ -652,7 +813,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                             : kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
         scaleDotElemTypeToMLIRType(ctx, bElemType),
-        /*withScale=*/true, allowXF32);
+        /*withScale=*/true, allowXF32, HCUISAFeature::NONE);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -825,7 +986,11 @@ LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
 
   DotOpMFMAConversionHelper helper(mfmaLayout, rewriter, typeConverter, loc);
 
-  return helper.convertDot(op, adaptor);
+  if (mfmaLayout.isM16N16()) {
+    return helper.convertDot(op, adaptor);
+  } else {
+    return helper.convertDotNonM16N16(op, adaptor);
+  }
 }
 
 LogicalResult convertScaledMFMA(triton::DotScaledOp op,

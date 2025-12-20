@@ -189,6 +189,11 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
           mlir::dyn_cast<AMDRotatingSharedEncodingAttr>(layout)) {
     return llvm::to_vector(sharedLayout.getOrder());
   }
+  if (auto sharedLayout =
+          mlir::dyn_cast<AMDMlsSharedEncodingAttr>(layout)) {
+    return llvm::to_vector(sharedLayout.getOrder());
+  }
+
   llvm::report_fatal_error("Unimplemented usage of getOrder for MemDescType");
   return {};
 }
@@ -651,6 +656,18 @@ SmallVector<unsigned> AMDRotatingSharedEncodingAttr::getCTAOrder() const {
   return SmallVector<unsigned>(getCTALayout().getCTAOrder());
 }
 SmallVector<unsigned> AMDRotatingSharedEncodingAttr::getCTASplitNum() const {
+  return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
+}
+
+int32_t AMDMlsSharedEncodingAttr::getAlignment() const { return 16; }
+
+SmallVector<unsigned> AMDMlsSharedEncodingAttr::getCTAsPerCGA() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
+}
+SmallVector<unsigned> AMDMlsSharedEncodingAttr::getCTAOrder() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAOrder());
+}
+SmallVector<unsigned> AMDMlsSharedEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
 }
 
@@ -1291,6 +1308,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
   SmallVector<unsigned> instrShape;
   bool isTransposed;
   unsigned mmacLayout;
+  unsigned interleaveInfo;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
   std::optional<SmallVector<unsigned>> CTASplitNum;
   std::optional<SmallVector<unsigned>> CTAOrder;
@@ -1336,6 +1354,10 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
       if (parseUInt(parser, attr, mmacLayout, "mmacLayout").failed())
         return {};
     }
+    if (attr.getName() == "interleaveInfo") {
+      if (parseUInt(parser, attr, interleaveInfo, "interleaveInfo").failed())
+        return {};
+    }
   }
 
   std::optional<CTALayoutAttr> CTALayout = getCTALayoutOrError(
@@ -1346,7 +1368,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
   return parser.getChecked<AMDMfmaEncodingAttr>(
       parser.getContext(), versionMajor, versionMinor, warpsPerCTA,
       instrShape[0], instrShape[1], isTransposed, *CTALayout,
-      *symbolizeMmacLayout(mmacLayout));
+      *symbolizeMmacLayout(mmacLayout), interleaveInfo);
 }
 
 void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
@@ -1356,7 +1378,8 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
           << ", warpsPerCTA = [" << getWarpsPerCTA() << "]"              //
           << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
           << ", isTransposed = " << getIsTransposed()
-          << ", mmacLayout = " << (uint32_t)getMmacLayout();
+          << ", mmacLayout = " << (uint32_t)getMmacLayout()
+          << ", interleaveInfo = " << getInterleaveInfo();
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getRank());
   printer << "}>";
@@ -1368,16 +1391,15 @@ AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
                             llvm::ArrayRef<unsigned int> warpsPerCTA,
                             unsigned mDim, unsigned nDim, bool isTransposed,
                             mlir::triton::gpu::CTALayoutAttr,
-                            mlir::triton::gpu::MmacLayout mmacLayout) {
+                            mlir::triton::gpu::MmacLayout mmacLayout,
+                            unsigned interleaveInfo) {
   if (!(versionMajor >= 0 && versionMajor <= 4)) {
     return emitError() << "major version must be in the [0, 4] range";
   }
-  // if (versionMinor != 0) {
-  //   return emitError() << "minor version must be 0";
-  // }
-  if (!((mDim == 32 && nDim == 32) || (mDim == 16 && nDim == 16))) {
+
+  if (!((mDim == 16 && nDim == 16) || (mDim <= 128 && nDim <= 128 && mDim % 16 == 0 && nDim % 16 == 0))) {
     return emitError()
-           << "(M, N) cases other than (32, 32) or (16, 16) unimplemented";
+           << "(M, N) cases other than (16, 16) or (M, N) cases other than (128, 128) unimplemented";
   }
 
   return success();
@@ -1730,9 +1752,20 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getCTASplitNum() const {
 
 SmallVector<int64_t>
 AMDMfmaEncodingAttr::getInstrShapeForOperand(int kWidth, int opIdx) const {
+  if (!isM16N16()) {
+    assert(getInstrShape()[0] == getInstrShape()[1] && getInstrShape()[0] == 16);
+    int kGroups = 64 / getInstrShape()[0];
+    int64_t kDim = kWidth * kGroups;
+    if (opIdx == 0) {
+      return {getInstrShape()[0], kDim};
+    } else {
+      return {kDim, getInstrShape()[1]};
+    }
+  }
+
   unsigned mDim = getMDim();
   unsigned nDim = getNDim();
-  assert((mDim == nDim) && (mDim == 32 || mDim == 16 || mDim == 4) ||
+  assert((mDim == nDim) && (mDim == 64 || mDim == 32 || mDim == 16 || mDim == 4) ||
          (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
   constexpr int warpSize = 64; // MFMA is always based on the 64-wide warps.
   int kGroups = -1;
@@ -1765,6 +1798,23 @@ AMDMfmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
   auto warpsPerCTA = getWarpsPerCTA();
   int numRepBatch =
       rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
+
+  if (!isM16N16()) {
+    auto mfmaTile = getMfmaTile();
+    auto instsPerWarp = getInstrsPerWarp();
+    if (opIdx == 0) {
+      return {numRepBatch,
+              std::max<int64_t>(instsPerWarp[0], operandShape[rank - 2] * instsPerWarp[0] /
+                                       (mfmaTile[0] * warpsPerCTA[rank - 2])),
+              std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
+    } else {
+      return {numRepBatch,
+              std::max<int64_t>(1, operandShape[rank - 2] / operandTileShape[0]),
+              std::max<int64_t>(instsPerWarp[1], operandShape[rank - 1] * instsPerWarp[1] /
+                                       (mfmaTile[1] * warpsPerCTA[rank - 1]))};
+    }
+  }
+
   if (opIdx == 0)
     return {
         numRepBatch,

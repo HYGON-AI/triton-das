@@ -269,6 +269,11 @@ struct CanonicalizeConvertFromConvert
 
     // cvt(local_load) -> local_load.
     if (auto sharedLoad = dyn_cast<LocalLoadOp>(arg)) {
+      // HCU: local_load with mls encoding can only specify dst to dot operand encoding.
+      if (isa<AMDMlsSharedEncodingAttr>(sharedLoad.getSrc().getType().getEncoding()) &&
+          !isa<DotOperandEncodingAttr>(op.getType().getEncoding()))
+        return failure();
+
       // Shared_load can load to any layout so we can always fold convert into
       // it.
       // We insert at the point of the original op as there could be ops with

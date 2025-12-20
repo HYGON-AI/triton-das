@@ -37,18 +37,19 @@ namespace mlir {
 namespace {
 
 // ========================== HCU Utility Functions ==========================
-void collectAssumptionsForLoad(ModuleOp mod, DenseMap<Value, SetVector<Operation *>> &assumptions) {
+void collectAssumptionsForFuncArgPtr(ModuleOp mod, DenseMap<Value, SetVector<Operation *>> &assumptions) {
   mod.walk([&](LLVM::AssumeOp op) {
     if (auto cmpIOp = op.getCond().getDefiningOp<arith::CmpIOp>()) {
-      /*  HGCG: add ConvertToBufferOp with data from memory assumptions support.
-       *  This is a trick method to support addPtr with offset from memory load.
-       *        In triton kernel if user write below code, it means that the
-       *  sorted_token_ids_ptr is a pointer to the memory, and all value in the
-       *  memory(like offs_token) is assumed to be non-negative.
-       *        Due to the propagation of assume, the a_ptrs is fit for using
-       *  buffer load ops.
+      /*  HCU: add ConvertToBufferOp with ptr's offset are always non-negative support.
        *
-       *  Eg:
+       *     This is a trick method to annotate ptr's offset are always non-negative.
+       *  CanonicalizeationPointersPass only propagate the ptr & ptr's user attributes, and this
+       *  lead the attributes which tagged on the offsets maybe abandoned.
+       *     So we need to put the assume info in ptr, not offsets.
+       *     Besides, annotate_hint operations currently can only operate on op, not block arguments.
+       *  and tl.assume operation is mlir & llvm native operation.
+       *
+       *  Eg, below code annotate all loaded offset calc from sorted_token_ids_ptr are non-negative.
        *    tl.assume(sorted_token_ids_ptr.to(tl.int64) >= 0)
        *    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
        *    .....
@@ -74,21 +75,45 @@ void collectAssumptionsForLoad(ModuleOp mod, DenseMap<Value, SetVector<Operation
   });
 }
 
-// Utility function to verify if an expression is non-negative by checking annotated hints.
-bool verifyNonNegativeByHint(
-  Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions) {
-  if (!assumptions.contains(expr))
+bool isFuncArgPtrWithNonNegativeAssumption(mlir::Value value,
+  const DenseMap<Value, SetVector<Operation *>> &assumptions) {
+  while (value.getDefiningOp() && isa<triton::AddPtrOp>(value.getDefiningOp())) {
+    value = value.getDefiningOp<triton::AddPtrOp>().getPtr();
+  }
+
+  if (value.getDefiningOp())
     return false;
-  // FIXME: This is a dirty and moe-specific hack to load sorted tokens using buffer ops.
-  //        Refactored to use hint annotation instead in the future.
-  if (auto blockArg = mlir::dyn_cast<BlockArgument>(expr)) {
-    if (blockArg.getOwner()->isEntryBlock() && isa<tt::PointerType>(blockArg.getType())) {
-      return true;
+
+  mlir::BlockArgument blockArg = mlir::cast<mlir::BlockArgument>(value);
+  auto blk = blockArg.getOwner();
+  auto funcOp = dyn_cast_or_null<tt::FuncOp>(blk->getParentOp());
+
+  if (funcOp && blk == &funcOp->getRegion(0).front()) {
+    for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
+      if (arg != value)
+        continue;
+      return assumptions.contains(value);
+    }
+  }
+
+  if (auto forOp = llvm::dyn_cast<scf::ForOp>(blk->getParentOp())) {
+    if (blk == forOp.getBody()) {
+      unsigned argNum = blockArg.getArgNumber();
+      // scf.for body args: (iv, iter_args...)
+      if (argNum == 0)
+        return false;
+      unsigned iterIdx = argNum - 1;
+      auto initArgs = forOp.getInitArgs();
+      if (iterIdx >= initArgs.size())
+        return false;
+      return isFuncArgPtrWithNonNegativeAssumption(initArgs[iterIdx],
+                                                   assumptions);
     }
   }
 
   return false;
 }
+
 // ========================== HCU Utility Functions ==========================
 
 bool verifyNonSmallerByAssumption(
@@ -149,9 +174,6 @@ bool verifyNonNegativeExpr(
   };
 
   if (nonNegativePred(expr))
-    return true;
-
-  if (verifyNonNegativeByHint(expr, assumptions))
     return true;
 
   // Recurse if the operation is defined
@@ -260,11 +282,14 @@ bool verifyNonNegativeExpr(
             return verifyNonSmallerByAssumption(op.getLhs(), assumptions,
                                                 op.getRhs());
           })
-          .Case<triton::LoadOp>([&](auto loadOp) {
-            // HGCG: add ConvertToBufferOp with data from memory assumptions support.
-            return verifyNonNegativeExpr(loadOp->getOperand(0), assumptions, solver);
-          })
           .Default([&](Operation *) {
+            // HCU: if op is explicitly marked "non-negative", return true
+            if (auto attr = op->template getAttrOfType<mlir::BoolAttr>("non-negative")) {
+              bool nonNegative = attr.getValue();
+              if (nonNegative) {
+                return true;
+              }
+            }
             // Conservatively assume that the expression is negative
             LDBG("  Unhandled op, cannot assume non-negative");
             return false;
@@ -296,7 +321,8 @@ bool canUseBufferOps(Value ptr,
     return false;
   LDBG("32 bit offset");
 
-  return verifyNonNegativeExpr(offset, assumptions, std::move(solver));
+  return verifyNonNegativeExpr(offset, assumptions, std::move(solver)) ||
+         isFuncArgPtrWithNonNegativeAssumption(maybeSplatOp.getSrc(), assumptions);
 }
 
 // Extract stride of the blocked offset of LD/ST ops.
@@ -482,7 +508,7 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       if (op.getOther() && !isZeroConst(op.getOther()))
         maybeOther = op.getOther();
       Value maybeMask{};
-      if (op.getMask() && !isZeroConst(op.getMask()))
+      if (op.getMask() && !isOneConst(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
 
@@ -552,7 +578,7 @@ struct ConvertTritonStoreToBufferStore
       auto splatOp = tensorPtr.getDefiningOp<triton::SplatOp>();
       Value basePtr = splatOp.getSrc();
       Value maybeMask{};
-      if (op.getMask() && !isZeroConst(op.getMask()))
+      if (op.getMask() && !isOneConst(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
       rewriter.replaceOpWithNewOp<triton::amdgpu::BufferStoreOp>(
@@ -588,19 +614,13 @@ public:
     // Collect assumptions in the function
     DenseMap<Value, SetVector<Operation *>> assumptions =
         AMD::TritonIntegerRangeAnalysis::collectAssumptions(getOperation());
+    collectAssumptionsForFuncArgPtr(mod, assumptions);
     std::shared_ptr<DataFlowSolver> solver = createDataFlowSolver();
     AMD::TritonIntegerRangeAnalysis *rangeAnalysis =
         solver->load<AMD::TritonIntegerRangeAnalysis>(assumptions);
     AMD::initializeFuncOps(mod, rangeAnalysis);
     if (failed(solver->initializeAndRun(getOperation())))
       return signalPassFailure();
-
-    // HCU: Collect assumptions for loads.
-    // This is a moe-specific hack to support loading sorted tokens using buffer ops.
-    // The sorted tokens are assumed to be non-negative, so we collect the assumptions for loads
-    // to ensure that the buffer ops can be used. This is a temporary solution and should be
-    // replaced with a more robust solution in the future.
-    collectAssumptionsForLoad(mod, assumptions);
 
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,

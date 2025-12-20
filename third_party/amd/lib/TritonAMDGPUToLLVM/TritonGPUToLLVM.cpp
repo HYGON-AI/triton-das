@@ -100,8 +100,9 @@ struct ConvertTritonAMDGPUToLLVM
     // Allocate shared memory and set barrier
     ModuleAllocation allocation(mod);
 
-    ModuleMembarAnalysis membarPass(&allocation,
-                                    mlir::triton::AMD::membarFilter);
+    // TODO: HCU disable membar filter for now and will enable after check can support.
+    ModuleMembarAnalysis membarPass(&allocation
+                                    /* mlir::triton::AMD::membarFilter */);
     membarPass.run();
 
     // Lower functions
@@ -174,6 +175,9 @@ struct ConvertTritonAMDGPUToLLVM
                                              targetInfo, AMDBenefit);
     AMD::populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
                                            axisInfoAnalysis, AMDBenefit);
+    int HCUBenefit = AMDBenefit + 1;
+    AMD::populateMLSOpToLLVMPatterns(typeConverter, targetInfo, patterns,
+                                     axisInfoAnalysis, HCUBenefit);
     populatePatterns7(mlir::triton::populateReduceOpToLLVMPatterns,
                       commonBenefit);
     populatePatterns7(mlir::triton::populateScanOpToLLVMPatterns,

@@ -51,6 +51,14 @@ class HIPOptions:
     max_num_imprecise_acc_default: int = 0
     backend_name: str = 'hip'
     optimize_epilogue: bool = False
+    # 0: mfma
+    # 1: mmac legacy
+    # 2: mmac interleave
+    # 3: mmac transpose
+    # 4: mmac interleave and transpose
+    mmac_layout_force: int = -1
+
+    async_copy_use_single_buffer: bool = True
 
     # The following option provides hints to the AMDGPU backend regarding instruction scheduling
     # for all `tt.dot` operations in a kernel. The "none" variant preserves the default
@@ -91,7 +99,7 @@ class HIPOptions:
 
         # default_libdir = Path(__file__).parent / 'lib'
         # HCU toolchain uses this path.
-        default_libdir = Path(HIPBackend.path_to_rocm()) / 'amdgcn/bitcode/' 
+        default_libdir = Path(HIPBackend.path_to_rocm()) / 'amdgcn/bitcode/'
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         for lib in ["ocml", "ockl", "hip", "opencl"]:   # Add hip and opencl for HCU toolchain.
             extern_libs[lib] = str(default_libdir / f'{lib}.bc')
@@ -133,8 +141,10 @@ class HIPBackend(BaseBackend):
                 supported_fp8_dtypes.update({'fp8e4nv', 'fp8e5'})
             elif 'gfx12' in self.target.arch:
                 supported_fp8_dtypes.update({'fp8e4nv', 'fp8e5'})
-            elif self.target.arch in ('gfx938', 'gfx946', 'gfx948'):    # for HCUs
-                supported_fp8_dtypes.update({'fp8e4b8', 'fp8e5b16'})
+            elif self.target.arch in ('gfx938', 'gfx946', 'gfx948'):
+                supported_fp8_dtypes.update({'fp8e4nv'})
+            elif self.target.arch in ('gfx928', 'gfx936'):
+                supported_fp8_dtypes.update({'fp8e4nv'})
             args["supported_fp8_dtypes"] = tuple(sorted(supported_fp8_dtypes))
 
         if "enable_fp_fusion" not in opts:
@@ -255,6 +265,9 @@ class HIPBackend(BaseBackend):
             "gfx936": [
                         "-mllvm=-support-768-vgprs=true",
                       ],
+            "gfx938": [
+                        "-mllvm=-support-768-vgprs=true",
+                      ],
             "gfx946": [
                         "-mllvm=-support-512-vgprs=true",
                       ],
@@ -270,6 +283,7 @@ class HIPBackend(BaseBackend):
         version_args = {
             "18": [
                 "-mllvm=-enable-hcu-approx-func-fp-math=true",
+                "-mllvm=-hcu-update-wait-by-reverse-search=true",
             ],
         }
         clang_out = subprocess.check_output([HIPBackend.path_to_rocm_clang(), "--version"])
@@ -300,6 +314,8 @@ class HIPBackend(BaseBackend):
             f"-mcpu={options.arch}:xnack-",
             "-mllvm=-check-valu-data-forward-hazards=0",
             "-mllvm=-disable-cluster-lds-memops=true",
+            # Note: when register spill after ds_read_matrix, result is wrong for compiler backend. disable current.
+            "-mllvm=-hcu-pre-emit-load-store-opt=false",
             *options_args,
             "-O3",
         ]
@@ -338,11 +354,18 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)
+        amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch,
+                                                 options.matrix_instr_nonkdim,
+                                                 options.kpack,
+                                                 options.mmac_layout_force)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         if options.optimize_epilogue:
             amd.passes.ttgpuir.add_optimize_epilogue(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
+
+        amd.passes.ttgpuir.add_mls_encoding_insertion(pm)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
+
         amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
 
         passes.ttgpuir.add_fuse_nested_loops(pm)
@@ -358,7 +381,11 @@ class HIPBackend(BaseBackend):
         if options.schedule_hint == "local-prefetch":
             global_prefetch = local_prefetch = 1
 
+        async_copy_single_buffer = options.async_copy_use_single_buffer and (options.num_stages == 2 and not global_prefetch)
+        amd.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, True, async_copy_single_buffer)
+
         amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy)
+
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
@@ -366,6 +393,9 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.schedule_hint)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttgpuir.add_remove_layout_conversions(pm)
+
+        amd.passes.ttgpuir.add_mls_lowering_pass(pm)
+
         passes.ttgpuir.add_reduce_data_duplication(pm)
         if is_in_thread_transpose_enabled(options.arch):
             amd.passes.ttgpuir.add_in_thread_transpose(pm)
@@ -384,7 +414,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
-        if use_async_copy:
+        if 1:#use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
         return mod

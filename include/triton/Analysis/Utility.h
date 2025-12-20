@@ -22,6 +22,16 @@ inline bool isZeroConst(Value v) {
   return false;
 }
 
+inline bool isOneConst(Value v) {
+  auto constantOp = v.getDefiningOp<arith::ConstantOp>();
+  if (!constantOp)
+    return false;
+  if (auto denseAttr =
+          dyn_cast<DenseIntElementsAttr>(constantOp.getValueAttr()))
+    return denseAttr.isSplat() && denseAttr.getSplatValue<APInt>().isOne();
+  return false;
+}
+
 class ReduceOpHelper {
 public:
   explicit ReduceOpHelper(triton::ReduceOp op)
@@ -238,6 +248,9 @@ bool cvtNeedsWarpShuffle(RankedTensorType srcTy, RankedTensorType dstTy);
 // Conversion from `srcTy` to `dstTy` involves data exchange across threads,
 // warps, and possibly blocks.
 bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy);
+
+// HCU: extend to retained unsupported cvt, leave to handle by LLs
+bool cvtNeedsRetainedToLinearLayout(RankedTensorType srcTy, RankedTensorType dstTy);
 
 bool atomicNeedsSharedMemory(Value result);
 

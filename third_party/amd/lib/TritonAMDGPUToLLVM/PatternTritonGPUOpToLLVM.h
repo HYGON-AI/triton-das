@@ -30,6 +30,11 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        RewritePatternSet &patterns,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit);
+void populateMLSOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                 const TargetInfo &targetInfo,
+                                 RewritePatternSet &patterns,
+                                 ModuleAxisInfoAnalysis &axisInfoAnalysis,
+                                 PatternBenefit benefit);
 
 void populateSPMDOpToLLVMPattern(LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns,

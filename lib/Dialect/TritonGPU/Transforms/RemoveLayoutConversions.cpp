@@ -16,6 +16,7 @@
 #include "mlir/Transforms/RegionUtils.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
@@ -136,6 +137,7 @@ public:
                     ConvertLayoutOp convertOp, IRMapping &mapping);
   void rewriteSlice(SetVector<Value> &slice, DenseMap<Value, Attribute> &layout,
                     ConvertLayoutOp convertOp);
+  bool isCvtFromMlsMaskPattern(ConvertLayoutOp convertOp);
 
   LogicalResult
   getConvertBackwardSlice(OpOperand &root, Attribute rootEncoding,
@@ -182,7 +184,7 @@ bool isLayoutAnchor(Operation *op) {
   if (isa<LoadOp, StoreOp>(op))
     return isExpensiveLoadOrStore(op);
   if (isa<DotOp, DotScaledOp, nvidia_gpu::WarpGroupDotOp, AtomicRMWOp,
-          AtomicCASOp, triton::nvidia_gpu::TMEMLoadOp>(op))
+          AtomicCASOp, triton::nvidia_gpu::TMEMLoadOp, MatrixLoadOp>(op))
     return true;
   if (auto gatherOp = dyn_cast<GatherOp>(op))
     return gatherOp.getEfficientLayout();
@@ -345,8 +347,10 @@ void LayoutPropagation::resolveConflicts() {
     Attribute encoding = *info.encodings.begin();
     bool isLoadOrStore =
         op && isa<LoadOp, StoreOp, AtomicRMWOp, AtomicCASOp>(op);
+    bool isMatrixLoad = op && isa<MatrixLoadOp>(op);
     for (Attribute e : info.encodings) {
       if ((isLoadOrStore && isa<BlockedEncodingAttr>(e)) ||
+          (isMatrixLoad && isa<DotOperandEncodingAttr>(e)) ||
           (!isLoadOrStore && isa<MmaEncodingTrait>(e))) {
         encoding = e;
         break;
@@ -742,7 +746,7 @@ Operation *LayoutPropagation::rewriteOp(Operation *op) {
 bool canBeRemat(Operation *op) {
   if (isa<LoadOp, StoreOp>(op))
     return !isExpensiveLoadOrStore(op);
-  if (isa<AtomicRMWOp, AtomicCASOp, DotOp>(op))
+  if (isa<AtomicRMWOp, AtomicCASOp, DotOp, MatrixLoadOp>(op))
     return false;
   if (auto gather = dyn_cast<GatherOp>(op))
     return !gather.getEfficientLayout();
@@ -1091,11 +1095,42 @@ static int64_t getByteCount(Value result, int64_t minElementCount = 0,
   return (elementCount * dtypeBitWidth) >> 3;
 }
 
+/* HCU: extend to support tt.matrix_load with tt.where to workaround gfx938 mls hw issue.
+ *
+ * Detect below pattern:
+ *   %x = matrix_load               (dot layout)
+ *   %pred = convert_layout %mask   (block -> dot layout)
+ *   %z = select %pred, %x, %others (dot layout)
+ *
+ * Note: can remove this pattern detection after dotlayout rematerialization
+ *       is stable on large-scale testing ?
+ **/
+ bool LayoutRematerialization::isCvtFromMlsMaskPattern(ConvertLayoutOp convertOp) {
+  auto srcEncoding = convertOp.getSrc().getType().getEncoding();
+  auto dstEncoding = convertOp.getType().getEncoding();
+  if (!(isa<DotOperandEncodingAttr>(dstEncoding) && isa<BlockedEncodingAttr>(srcEncoding)) ||
+      !isa<AMDMfmaEncodingAttr>(cast<DotOperandEncodingAttr>(dstEncoding).getParent()))
+    return false;
+
+  // Find the select operation that uses this convert
+  arith::SelectOp selectOp = nullptr;
+  for (OpOperand &use : convertOp.getResult().getUses()) {
+    if (auto select = dyn_cast<arith::SelectOp>(use.getOwner())) {
+      selectOp = select;
+      break;
+    }
+  }
+  if (!selectOp)
+    return false;
+
+  return isa<MatrixLoadOp>(selectOp.getTrueValue().getDefiningOp());
+}
+
 void LayoutRematerialization::backwardRematerialization(
     ConvertLayoutOp convertOp) {
   // DotOperand is hoisted by hoistDotOperand
   RankedTensorType targetType = convertOp.getType();
-  if (isa<DotOperandEncodingAttr>(targetType.getEncoding()))
+  if (isa<DotOperandEncodingAttr>(targetType.getEncoding()) && !isCvtFromMlsMaskPattern(convertOp))
     return;
   Value oldV = convertOp.getSrc();
   LDBG("check backward remat with source " << oldV << " encoding "

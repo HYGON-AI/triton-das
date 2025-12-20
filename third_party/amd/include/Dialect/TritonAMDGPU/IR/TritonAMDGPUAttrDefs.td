@@ -90,4 +90,36 @@ def TritonAMDGPU_SchedHintsEnum : TritonAMDGPU_I32Enum<
 def TritonAMDGPU_SchedHintVariantAttr :
   TritonAMDGPU_I32EnumAttr<"SchedHintVariant", TritonAMDGPU_SchedHintsEnum>;
 
+def TritonAMDGPU_MlsEncoding : TritonAMDGPU_Attr<"MlsEncoding"> {
+  let cppNamespace = "::mlir::triton::amdgpu";
+  let mnemonic = "MlsEncoding";
+  let summary = "mls encoding attribute.";
+  let description = [{
+    The attribute holds some information about mls.matrix_load operation.
+    it include two parts: mls info(to restore matrix_load info)  and warpsPerCTA info.
+      opIdx       :  the operand index for dot operation.
+      mlsTile     :  the mls tile shape. opIdx == 0 ? [nonKTile, kTile] : [kTile, nonKTile]
+      elemBitWidth:  the element bit width of the mls encoding attribute.
+      alt2Kind    :  the alt2 kind of the mls encoding attribute.
+      version     :  the version of the mls encoding attribute.
+      order       :  the order of the tensor, the fastest-changing axis first.
+      warpsPerCTA :  the number of warps per CTA. warpOrder follow the order field to fit triton framework.
+  }];
+
+  let parameters = (ins "unsigned":$opIdx,  // or nonKTileIdx
+                        ArrayRefParameter<"unsigned">:$mlsTile,
+                        "unsigned":$elemBitWidth,
+                        "unsigned":$alt2Kind,
+                        "unsigned":$version,
+                        ArrayRefParameter<"unsigned">:$order,
+                        ArrayRefParameter<"unsigned">:$warpsPerCTA);
+  let assemblyFormat = "`opIdx` `=` $opIdx `,` "
+                       "`mlsTile` `=` `[` $mlsTile `]` `,` "
+                       "`elemBitWidth` `=` $elemBitWidth `,` "
+                       "`alt2Kind` `=` $alt2Kind `,` "
+                       "`version` `=` $version `,` "
+                       "`order` `=` `[` $order `]` `,` "
+                       "`warpsPerCTA` `=` `[` $warpsPerCTA `]`";
+}
+
 #endif
