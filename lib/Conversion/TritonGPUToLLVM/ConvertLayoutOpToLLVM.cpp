@@ -40,17 +40,6 @@ struct ConvertLayoutOpUsingLinearLayoutsConversion
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
 
-    // For HCU mmac, for now, the conversion between C/D and A is done
-    // on the kernel side, so we have nothing to do here.
-    // Maybe we can implement a transfer-within-warp instead of kernel-side
-    // transfer, if it can lead to performance gain
-    auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(srcTy.getEncoding());
-    auto dotOperandLayout = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-    if (triton::tools::getBoolEnv("CHAINED_DOT_SHORTCUT") && mfmaLayout && dotOperandLayout) {
-      rewriter.replaceOp(op, adaptor.getSrc());
-      return success();
-    }
-
     LinearLayout conversion = minimalCvtLayout(srcTy, dstTy);
     LinearLayout srcLayout =
         toLinearLayout(srcTy.getShape(), srcTy.getEncoding());

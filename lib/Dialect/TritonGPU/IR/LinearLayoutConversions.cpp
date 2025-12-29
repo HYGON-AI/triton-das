@@ -807,7 +807,6 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
   return combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape);
 }
 
-
 LinearLayout
 AMDWmmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   int rank = shape.size();

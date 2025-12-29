@@ -1064,23 +1064,23 @@ torch.manual_seed(0)
 # result1 = run_layout_combination_test(a1, b1, 'row', 'row', 0b00, True, True, "Case 1: A(row) × B(row)", config1)
 
 
-# # 测试用例2: A(row) × B(col)
-# M = 16
-# N = 16
-# K = 40
-# dtype = torch.float16
+# 测试用例2: A(row) × B(col)
+M = 16
+N = 16
+K = 40
+dtype = torch.float16
 
-# config2 = {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 64, 'num_warps': 1, "GROUP_SIZE_M": 1}
-# config2['optimize_epilogue'] = 1
-# config2['num_stages'] = 2
-# config2['async_copy_use_single_buffer'] = True
-# # config2['schedule_hint'] = "local-prefetch"
+config2 = {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 64, 'num_warps': 1, "GROUP_SIZE_M": 1}
+config2['optimize_epilogue'] = 1
+config2['num_stages'] = 2
+config2['async_copy_use_single_buffer'] = True
+# config2['schedule_hint'] = "local-prefetch"
 
-# print(f"\n{'='*60}")
-# print(f"测试用例2: A(row) × B(col), config={config2}")
-# print(f"A: [{M}, {K}] 行主序, B: [{K}, {N}] 行主序但逻辑上是[{N}, {K}]列主序")
-# a2, b2 = create_test_matrices(M, K, N, 'row', 'col', dtype)
-# result2 = run_layout_combination_test(a2, b2, 'row', 'col', 0b11, False, True, "Case 2: A(row) × B(col)", config2)
+print(f"\n{'='*60}")
+print(f"测试用例2: A(row) × B(col), config={config2}")
+print(f"A: [{M}, {K}] 行主序, B: [{K}, {N}] 行主序但逻辑上是[{N}, {K}]列主序")
+a2, b2 = create_test_matrices(M, K, N, 'row', 'col', dtype)
+result2 = run_layout_combination_test(a2, b2, 'row', 'col', 0b11, False, True, "Case 2: A(row) × B(col)", config2)
 
 
 

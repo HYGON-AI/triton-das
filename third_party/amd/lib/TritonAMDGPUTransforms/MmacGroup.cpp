@@ -25,9 +25,12 @@ using MfmaKey =
 // to query with "mismatches".
 MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
                           Type &aElemType, Type &bElemType, bool withScale,
-                          bool useTF32) {
+                          bool useTF32, HCUISAFeature features) {
   Type aET = aElemType, bET = bElemType;
   Builder b(aElemType.getContext());
+
+  bool capFP8 = features & HCUISAFeature::MAMC_FP8;
+  bool capFP6FP4 = features & HCUISAFeature::MMAC_FP6FP4;
   if (withScale) {
     assert(version == 4 && isF8F6F4(aET) && isF8F6F4(bET));
     // For MXFP types, we have the same intrinsic, which uses FP4 as the key
@@ -38,6 +41,10 @@ MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
     // In the MFMA map we use the proper TF32 type. So "fix" it here.
     assert(version == 3);
     aET = bET = b.getType<FloatTF32Type>();
+  } else if (version <= 3 && capFP8 &&
+             isa<Float8E4M3FNType, Float8E5M2Type>(aET) &&
+             isa<Float8E4M3FNType, Float8E5M2Type>(bET)) {
+    (void)features;
   } else if (version <= 3 && isa<Float8E5M2Type>(aET) &&
              isa<Float8E5M2Type>(bET)) {
     // For the OCP FP8 E5M2 type, we can emulate the support for it with FP16.
@@ -120,6 +127,17 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   TRITON_MFMA_v(1, m, n, aET, bET, symbol, k, kBase),                          \
       TRITON_MFMA_v2to4(m, n, aET, bET, symbol, k, kBase)
 
+// FIXME: Macro for defining HCU MMAC intrinsics based on MFMA intrinsics.
+//        Now we always mock us as CDNA3 MFMA intrinsics to reuse the existing
+//        code, but it should be noted that this is a workaround and we should
+//        fix it later.
+#define TRITON_MMAC(m, n, aET, bET, symbol, k, kBase)                          \
+  {                                                                            \
+    /*key=*/{3, m, n, aET.getTypeID(), bET.getTypeID()}, /*value=*/{           \
+      {ROCDL::symbol::getOperationName(), k, kBase},                           \
+    }                                                                          \
+  }
+
   Builder b(context);
   auto f32T = b.getF32Type();
   auto tf32T = b.getTF32Type();
@@ -132,6 +150,80 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   auto ocpBf8T = b.getType<Float8E5M2Type>();
   auto fp4T = b.getType<Float4E2M1FNType>();
 
+  mfmaMap = {
+      // f32 inputs
+      // mmac_f32_16x16x8f32
+      TRITON_MMAC(16, 16, f32T, f32T, mmac_f32_16x16x8f32, 8, 2),
+      // mmac_f32_16x16x4f32
+      TRITON_MMAC(16, 16, f32T, f32T, mmac_f32_16x16x4f32, 4, 1),
+
+      // f16 inputs
+      // mmac_f32_16x16x16xf16
+      TRITON_MMAC(16, 16, f16T, f16T, mmac_f32_16x16x16f16, 16, 4),
+
+      // bf16 inputs
+      // mmac_f32_16x16x16xbf16
+      TRITON_MMAC(16, 16, bf16T, bf16T, mmac_f32_16x16x16bf16, 16, 4),
+
+      // int8 inputs
+      // mmac_i32_16x16x32i8
+      TRITON_MMAC(16, 16, i8T, i8T, mmac_i32_16x16x32i8, 32, 8),
+
+      // fp8/bf8 inputs
+      // mmac_f32_16x16x32_fp8_fp8
+      TRITON_MMAC(16, 16, ocpFp8T, ocpFp8T, mmac_f32_16x16x32_fp8_fp8, 32, 8),
+      // mmac_f32_16x16x32_fp8_bf8
+      TRITON_MMAC(16, 16, ocpFp8T, ocpBf8T, mmac_f32_16x16x32_fp8_bf8, 32, 8),
+      // mmac_f32_16x16x32_bf8_fp8
+      TRITON_MMAC(16, 16, ocpBf8T, ocpFp8T, mmac_f32_16x16x32_bf8_fp8, 32, 8),
+      // mmac_f32_16x16x32_bf8_bf8
+      TRITON_MMAC(16, 16, ocpBf8T, ocpBf8T, mmac_f32_16x16x32_bf8_bf8, 32, 8),
+  };
+
+  // Add non-m16n16 MMAC intrinsics using TRITON_MMAC_NON_M16N16 macro
+  {
+    unsigned mDims[] = {16, 32, 64};
+    unsigned nDims[] = {16, 32, 64};
+    for (unsigned mDim : mDims) {
+      for (unsigned nDim : nDims) {
+        if (mDim == 16 && nDim == 16)
+          continue; // skip (16,16)
+
+        // fp16
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, f16T, f16T, mmac_f32_16x16x16f16, 16, 4));
+
+        // bf16
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, bf16T, bf16T, mmac_f32_16x16x16bf16, 16, 4));
+      }
+    }
+
+    unsigned mDims8[] = {16, 64, 128};
+    unsigned nDims8[] = {16, 64, 128};
+    for (unsigned mDim : mDims8) {
+      for (unsigned nDim : nDims8) {
+        if (mDim == 16 && nDim == 16)
+          continue; // skip (16,16)
+
+        // int8
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, i8T, i8T, mmac_i32_16x16x32i8, 32, 8));
+
+        // fp8 * fp8
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpFp8T, ocpFp8T, mmac_f32_16x16x32_fp8_fp8, 32, 8));
+
+        // fp8 * bf8
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpFp8T, ocpBf8T, mmac_f32_16x16x32_fp8_bf8, 32, 8));
+
+        // bf8 * fp8
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpBf8T, ocpFp8T, mmac_f32_16x16x32_bf8_fp8, 32, 8));
+
+        // bf8 * bf8
+        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpBf8T, ocpBf8T, mmac_f32_16x16x32_bf8_bf8, 32, 8));
+      }
+    }
+  }
+
+
+#if 0
   mfmaMap = {
       // f32 inputs
       // mfma_f32_32x32x2f32
@@ -261,6 +353,7 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       TRITON_MFMA_v(4, 32, 32, fp4T, fp4T, mfma_scale_f32_32x32x64_f8f6f4, 64,
                     32),
   };
+#endif
 }
 
 } // namespace
@@ -272,13 +365,20 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 FailureOr<MfmaIntrinsic>
 MfmaIntrinsic::selectFor(int version, unsigned mDim, unsigned nDim,
                          unsigned inputKDim, Type aElemType, Type bElemType,
-                         bool withScale, bool useTF32) {
+                         bool withScale, bool useTF32,
+                         HCUISAFeature features,
+                         unsigned interleaveInfo) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
   MfmaKey key = composeMfmaKeyFor(version, mDim, nDim, aElemType, bElemType,
-                                  withScale, useTF32);
+                                  withScale, useTF32, features);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())
+    return failure();
+
+  auto interleaveKind = MFMA_INTERLEAVE_GET_KIND(interleaveInfo);
+  auto interleaveOperand = MFMA_INTERLEAVE_GET_OPERAND(interleaveInfo);
+  if (interleaveKind != 0 && interleaveOperand != 0b00)
     return failure();
 
   const SmallVector<MfmaMapValue, 2> &values = it->second;

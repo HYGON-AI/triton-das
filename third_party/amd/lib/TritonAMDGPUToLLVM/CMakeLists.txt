@@ -7,10 +7,10 @@ add_triton_library(TritonAMDGPUToLLVM
     ConvertLayoutOpToLLVM.cpp
     MemoryOpToLLVM.cpp
     DotOpToLLVM/FMA.cpp
-    DotOpToLLVM/MFMA.cpp
+    # DotOpToLLVM/MFMA.cpp
     DotOpToLLVM/WMMA.cpp
     DotOpToLLVM.cpp
-    ElementwiseOpToLLVM.cpp
+    # ElementwiseOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     GCNAsmFormat.cpp
     TritonGPUToLLVM.cpp
@@ -25,6 +25,9 @@ add_triton_library(TritonAMDGPUToLLVM
     UpcastMXFPToLLVM.cpp
     MembarUtility.cpp
     ScalarizePackedFOps.cpp
+    # ---- HCU code ---- #
+    DotOpToLLVM/MMAC.cpp
+    ElementwiseOpHCUToLLVM.cpp
     MlsOpToLLVM.cpp
 
     DEPENDS

@@ -1,5 +1,5 @@
 add_triton_library(TritonAMDGPUTransforms
-  AccelerateAMDMatmul.cpp
+  #AccelerateAMDMatmul.cpp
   BlockPingpong.cpp
   CanonicalizePointers.cpp
   CoalesceAsyncCopy.cpp
@@ -8,11 +8,14 @@ add_triton_library(TritonAMDGPUTransforms
   HoistLayoutConversions.cpp
   ReorderInstructions.cpp
   StreamPipeline.cpp
-  MfmaGroup.cpp
+  # MfmaGroup.cpp
   InThreadTranspose.cpp
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
+  # ---- HCU code ---- #
+  AccelerateHCUMatmul.cpp
+  MmacGroup.cpp
   MlsStreamPipeline.cpp
   MlsGroup.cpp
   MlsEncodingInsertion.cpp
