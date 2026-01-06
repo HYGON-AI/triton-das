@@ -1,6 +1,7 @@
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseMap.h"
 #include <tuple>
 
@@ -23,9 +24,10 @@ using MfmaKey =
 //
 // This function adapts certain parameters so we can be flexible when trying
 // to query with "mismatches".
-MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
-                          Type &aElemType, Type &bElemType, bool withScale,
-                          bool useTF32, HCUISAFeature features) {
+MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
+                          unsigned nDim, Type &aElemType, Type &bElemType,
+                          bool withScale, bool useTF32,
+                          HCUISAFeature features) {
   Type aET = aElemType, bET = bElemType;
   Builder b(aElemType.getContext());
 
@@ -45,9 +47,10 @@ MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
              isa<Float8E4M3FNType, Float8E5M2Type>(aET) &&
              isa<Float8E4M3FNType, Float8E5M2Type>(bET)) {
     (void)features;
-  } else if (version <= 3 && isa<Float8E5M2Type>(aET) &&
-             isa<Float8E5M2Type>(bET)) {
-    // For the OCP FP8 E5M2 type, we can emulate the support for it with FP16.
+  } else if (version <= 3 && isa<Float8E5M2Type, Float8E4M3FNType>(aET) &&
+             isa<Float8E5M2Type, Float8E4M3FNType>(bET)) {
+    // For the OCP FP8 E5M2/E4M3FN type, we don't have native support until
+    // CDNA4. So emulate with FP16.
     aElemType = bElemType = aET = bET = b.getF16Type();
   }
   return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID()};
@@ -363,14 +366,13 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 //===----------------------------------------------------------------------===//
 
 FailureOr<MfmaIntrinsic>
-MfmaIntrinsic::selectFor(int version, unsigned mDim, unsigned nDim,
-                         unsigned inputKDim, Type aElemType, Type bElemType,
-                         bool withScale, bool useTF32,
-                         HCUISAFeature features,
-                         unsigned interleaveInfo) {
+MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
+                         unsigned nDim, unsigned inputKDim, Type aElemType,
+                         Type bElemType, bool withScale, bool useTF32,
+                         HCUISAFeature features, unsigned interleaveInfo) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
-  MfmaKey key = composeMfmaKeyFor(version, mDim, nDim, aElemType, bElemType,
-                                  withScale, useTF32, features);
+  MfmaKey key = composeMfmaKeyFor(loc, version, mDim, nDim, aElemType,
+                                  bElemType, withScale, useTF32, features);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())

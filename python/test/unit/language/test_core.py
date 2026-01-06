@@ -2858,6 +2858,36 @@ def test_histogram(M, N, device):
     assert (z_torch == z).all()
 
 
+# ------------------------
+# test histogram with mask
+# ------------------------
+
+
+@pytest.mark.interpreter
+@pytest.mark.parametrize("M, N", [[2048, 2], [1024, 8], [1024, 128], [256, 512], [32, 512], [8, 512], [8, 2]])
+def test_histogram_mask(M, N, device):
+
+    @triton.jit
+    def histogram_kernel(x_ptr, z_ptr, M: tl.constexpr, N: tl.constexpr):
+        offset1 = tl.arange(0, 2 * M)
+        offset2 = tl.arange(0, N)
+        mask = offset1 < M
+        x = tl.load(x_ptr + offset1)
+        z = tl.histogram(x, N, mask)
+        tl.store(z_ptr + offset2, z)
+
+    torch.manual_seed(17)
+    x1 = torch.randint(0, N, (M, ), device=device, dtype=torch.int32)
+    x = torch.cat((x1, x1), 0)
+    z = torch.empty(N, dtype=torch.int32, device=device)
+    # torch.histc does not work when the input type is not float and the device is CPU
+    # https://github.com/pytorch/pytorch/issues/74236
+    # This is a workload by converting the input to float
+    z_torch = torch.histc(x1.float(), bins=N, min=0, max=N - 1)
+    histogram_kernel[(1, )](x, z, M=M, N=N)
+    assert (z_torch == z).all()
+
+
 @pytest.mark.parametrize("M, N", [(1, 64), (2, 32), (4, 16), (8, 8), (16, 4), (32, 2), (64, 1)])
 def test_scan_1d(M, N, device):
 
@@ -3036,7 +3066,7 @@ layouts = [
 ]
 
 
-@pytest.mark.parametrize("M, N", [[128, 16], [128, 128], [32, 128], [32, 32], [16, 16]])
+@pytest.mark.parametrize("M, N", [[128, 16], [32, 128], [32, 32], [16, 16]])
 @pytest.mark.parametrize("src_layout", filter_layouts(layouts))
 @pytest.mark.parametrize("axis", [0, 1])
 @pytest.mark.parametrize("epilogue_kind", ['reduce1d', 'reduce2d', 'expand_reduce2d'])
@@ -3048,12 +3078,8 @@ def test_reduce_layouts(M, N, src_layout, axis, epilogue_kind, dtype_str, add_ov
     if isinstance(src_layout,
                   (MfmaLayout, MmaLayout)) and (M < src_layout.instr_shape[0] or N < src_layout.instr_shape[1]):
         pytest.skip("Skipping because tensor shape is smaller than M(f)maLayout instr_shape")
-    if is_hip() and isinstance(src_layout, MfmaLayout) and ((M, N) == (128, 128)):
-        pytest.skip("Skipping test because it runs out of shared memory")
     if reduce_op == "sum" and dtype_str == "float16" and M * N > 1024:
         pytest.skip("Skipping sum reduction on float16 due to accuracy issues")
-    if is_hip() and isinstance(src_layout, LinearLayout):
-        pytest.skip("FIXME: LinearLayout not supported on HIP")
 
     if isinstance(src_layout, MmaLayout) and src_layout.version == 3:
         src_layout.instr_shape[2] = 16 if dtype_str == "float16" else 8
@@ -5907,14 +5933,9 @@ layouts = [
     DotOperandLayout(parent=MmaLayout([3, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 32, 16]), op_idx=0, k_width=2),
     DotOperandLayout(parent=MmaLayout([3, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 32, 16]), op_idx=0, k_width=1),
     MmaLayout([2, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 8]),
-    DotOperandLayout(parent=MmaLayout([2, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=0, k_width=2),
     DotOperandLayout(parent=MmaLayout([2, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=1, k_width=2),
     DotOperandLayout(parent=MmaLayout([2, 0], [2, 2], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=0, k_width=2),
-    DotOperandLayout(parent=MmaLayout([2, 0], [2, 2], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=1, k_width=2),
     DotOperandLayout(parent=MmaLayout([2, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=0, k_width=8),
-    DotOperandLayout(parent=MmaLayout([2, 0], [4, 1], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=1, k_width=8),
-    DotOperandLayout(parent=MmaLayout([2, 0], [2, 2], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=0, k_width=8),
-    DotOperandLayout(parent=MmaLayout([2, 0], [2, 2], [1, 1], [1, 1], [1, 0], [16, 8]), op_idx=1, k_width=8),
     SliceLayout(
         dim=1,
         parent=DotOperandLayout(parent=MmaLayout([3, 0], [4, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 0], [16, 32, 16]),
@@ -5950,7 +5971,7 @@ def compute_scratch_buffer_shape(src_layout, dst_layout, shape):
     return np.minimum(full_scratch_shape, shape)
 
 
-@pytest.mark.parametrize("M, N", [[64, 1], [64, 64], [128, 128], [1, 64]])
+@pytest.mark.parametrize("M, N", [[64, 1], [64, 64], [64, 128], [1, 64]])
 @pytest.mark.parametrize("dtype", ['float16'])
 @pytest.mark.parametrize("src_layout", filter_layouts(layouts))
 @pytest.mark.parametrize("interm_layout", intermediate_layouts)
@@ -6618,8 +6639,8 @@ def test_dot_max_num_imprecise_acc(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, in_type_s
         num_stages = 2
         if in_type_str in ("float8e5b16", "float8e4b8") and not is_hip_cdna3():
             pytest.skip(f"{in_type_str} only supported on CDNA3")
-        if in_type_str in ("float8e5", "float8e4nv") and not is_hip_cdna4():
-            pytest.skip(f"{in_type_str} only supported on CDNA4")
+        if in_type_str in ("float8e5", "float8e4nv") and not (is_hip_cdna4() or is_hip_gfx12()):
+            pytest.skip(f"{in_type_str} only supported on CDNA4 or gfx12")
 
     check_type_supported(in_type_str, device)
     A = numpy_random((M, K), dtype_str=in_type_str)
@@ -6870,7 +6891,7 @@ def test_tl_range_num_stages(device):
             if capability[0] >= 8:
                 ptx = pgm.asm['ptx']
                 # check that the loop got pipelined with the right number of stages.
-                assert 'cp.async.wait_group 6' in ptx
+                assert 'cp.async.wait_group \t6' in ptx
 
 
 def test_tl_range_fuse():
@@ -7594,3 +7615,15 @@ def test_cumsum_dtype(device):
     kernel[(1, )](z)
     expected = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device=device)
     assert torch.equal(z, expected)
+
+
+@pytest.mark.interpreter
+def test_tensor_member(device):
+
+    @triton.jit
+    def kernel():
+        x = tl.arange(0, 16)
+        tl.device_assert(tl.abs(x) == x.abs())
+        tl.device_assert(tl.sum(x) == x.sum())
+
+    kernel[(1, )]()

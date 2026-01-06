@@ -23,10 +23,11 @@ inline bool isF8F6F4(mlir::Type type) {
 
 struct MfmaIntrinsic {
   // Chooses a suitable mfma instrinsic for the given input case.
-  static FailureOr<MfmaIntrinsic> selectFor(int version,unsigned mDim,
-                                            unsigned nDim, unsigned inputKDim,
-                                            Type aElemType, Type bElemType,
-                                            bool withScale, bool useTF32,
+  static FailureOr<MfmaIntrinsic> selectFor(Location loc, int version,
+                                            unsigned mDim, unsigned nDim,
+                                            unsigned inputKDim, Type aElemType,
+                                            Type bElemType, bool withScale,
+                                            bool useTF32,
                                             HCUISAFeature features,
                                             unsigned interleaveInfo = 0);
 

@@ -1,4 +1,4 @@
-from triton.backends.compiler import BaseBackend, GPUTarget
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, nvidia
 from triton import knobs
 from triton.runtime.errors import PTXASError
@@ -106,6 +106,7 @@ class CUDAOptions:
     maxnreg: Optional[int] = None
     cluster_dims: tuple = (1, 1, 1)
     ptx_version: int = None
+    ptx_options: str = None
     ir_override: Optional[str] = None  # filename of a user-defined IR (*.{ttir|ttgir|llir|ptx})
     enable_fp_fusion: bool = True
     launch_cooperative_grid: bool = False
@@ -150,6 +151,10 @@ class CUDABackend(BaseBackend):
         if not match:
             raise ValueError(f"TRITON_OVERRIDE_ARCH must have the form {pattern}")
         return int(match.group(1))
+
+    def get_target_name(self, options) -> str:
+        capability = self._parse_arch(options.arch)
+        return f"cuda:{capability}"
 
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
@@ -287,11 +292,27 @@ class CUDABackend(BaseBackend):
         if capability // 10 >= 9:
             nvidia.passes.ttnvgpuir.add_tma_lowering(pm)
             nvidia.passes.ttnvgpuir.add_fence_insertion(pm)
+        passes.common.add_sccp(pm)
         passes.common.add_canonicalizer(pm)
         pm.run(mod)
         metadata["cluster_dims"] = (cluster_info.clusterDimX, cluster_info.clusterDimY, cluster_info.clusterDimZ)
         tensordesc_meta = mod.get_tensordesc_metadata()
         metadata["tensordesc_meta"] = tensordesc_meta
+        return mod
+
+    def ttgir_opt(self, src, metadata, options, capability):
+        mod = src
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        passes.ttgpuir.add_inliner(pm)
+        passes.common.add_sccp(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.ttgpuir.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+
+        pm.run(mod)
+        metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
     def make_llir(self, src, metadata, options, capability):
@@ -387,8 +408,17 @@ class CUDABackend(BaseBackend):
             line_info = ["-lineinfo", "-suppress-debug-info"] if knobs.compilation.disable_line_info else ["-lineinfo"]
             fmad = [] if opt.enable_fp_fusion else ['--fmad=false']
             arch = sm_arch_from_capability(capability)
-            opt_level = ['--opt-level', '0'] if knobs.nvidia.disable_ptxas_opt else []
-            ptxas_cmd = [ptxas, *line_info, *fmad, '-v', *opt_level, f'--gpu-name={arch}', fsrc.name, '-o', fbin]
+
+            # Disable ptxas optimizations if requested
+            disable_opt = ['--opt-level', '0'] if knobs.nvidia.disable_ptxas_opt else []
+
+            # Accept more ptxas options if provided
+            ptx_extra_options = opt.ptx_options.split(" ") if opt.ptx_options else []
+
+            ptxas_cmd = [
+                ptxas, *line_info, *fmad, '-v', *disable_opt, *ptx_extra_options, f'--gpu-name={arch}', fsrc.name, '-o',
+                fbin
+            ]
             try:
                 subprocess.run(ptxas_cmd, check=True, close_fds=False, stderr=flog)
                 if os.path.exists(fsrc.name):
@@ -418,10 +448,13 @@ class CUDABackend(BaseBackend):
                 os.remove(fbin)
         return cubin
 
-    def add_stages(self, stages, options):
+    def add_stages(self, stages, options, language):
         capability = self._parse_arch(options.arch)
-        stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options, capability)
-        stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options, capability)
+        if language == Language.TRITON:
+            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options, capability)
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options, capability)
+        elif language == Language.GLUON:
+            stages["ttgir"] = lambda src, metadata: self.ttgir_opt(src, metadata, options, capability)
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options, capability)
         stages["ptx"] = lambda src, metadata: self.make_ptx(src, metadata, options, self.target.arch)
         stages["cubin"] = lambda src, metadata: self.make_cubin(src, metadata, options, self.target.arch)

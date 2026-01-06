@@ -349,10 +349,11 @@ chooseMfmaInstructionWithMLS(tt::DotOp dot,
   assert(mDim != 0 && nDim != 0);
 
   auto maybeMfmaIntrinsic =
-      MfmaIntrinsic::selectFor(mfmaVersion, mDim, nDim, inputKSize, aElemType,
+      MfmaIntrinsic::selectFor(dot.getLoc(), mfmaVersion, mDim, nDim, inputKSize, aElemType,
                                bElemType, false, false, features,0);
   if (failed(maybeMfmaIntrinsic))
-    llvm::report_fatal_error("No match found in MFMA database\n");
+    return emitError(dot.getLoc(), "no matching matrix core intrinsic due to "
+                          "unsupported element type");
 
   kDim = maybeMfmaIntrinsic->kDim;
   assert(kDim != 0 && "kDim should not be 0");
@@ -365,9 +366,9 @@ chooseMfmaInstructionWithMLS(tt::DotOp dot,
 // If enforcedNonKDim is not zero, it will be used to overwrite the default
 // logic to choose a MFMA with matching M/N dim.
 FailureOr<MfmaIntrinsic>
-chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
-                      Type bElemType, int inputKSize, int enforcedNonKDim,
-                      bool withScale, bool allowXF32,
+chooseMfmaInstruction(Location loc, int mfmaVersion, RankedTensorType cType,
+                      Type aElemType, Type bElemType, int inputKSize,
+                      int enforcedNonKDim, bool withScale, bool allowXF32,
                       HCUISAFeature features = HCUISAFeature::NONE) {
   // number of matrix elements along k dim per one MFMA instruction
   unsigned kDim = 0;
@@ -403,11 +404,12 @@ chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
     return failure();
 
   FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic =
-      MfmaIntrinsic::selectFor(mfmaVersion, mDim, nDim, inputKSize, aElemType,
-                               bElemType, withScale, allowXF32,
+      MfmaIntrinsic::selectFor(loc, mfmaVersion, mDim, nDim, inputKSize,
+                               aElemType, bElemType, withScale, allowXF32,
                                features, 0);
   if (failed(maybeMfmaIntrinsic))
-    llvm::report_fatal_error("No match found in MFMA database\n");
+    return emitError(loc, "no matching matrix core intrinsic due to "
+                          "unsupported element type");
 
   kDim = maybeMfmaIntrinsic->kDim;
   assert(kDim != 0);
@@ -427,7 +429,7 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotOp dot, int mfmaVersion,
   bool allowXF32 =
       dot.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
   return chooseMfmaInstruction(
-      mfmaVersion, dot.getC().getType(), aType.getElementType(),
+    dot.getLoc(), mfmaVersion, dot.getC().getType(), aType.getElementType(),
       dot.getB().getType().getElementType(), aType.getShape().back(), nonKDim,
       withScale, allowXF32, features);
 }
@@ -443,8 +445,8 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   }
   Type aElemType = scaleDotElemTypeToMLIRType(ctx, dot.getAElemType());
   Type bElemType = scaleDotElemTypeToMLIRType(ctx, dot.getBElemType());
-  return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), aElemType,
-                               bElemType, inputKDim, nonKDim,
+  return chooseMfmaInstruction(dot.getLoc(), mfmaVersion, dot.getC().getType(),
+                               aElemType, bElemType, inputKDim, nonKDim,
                                /*withScale=*/true, /*allowXF32=*/false);
 }
 
@@ -454,9 +456,9 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   // For scaled dot, we handle it with fp16 or bf16 emulation for now.
   Builder b(dot.getContext());
   Type elemType = useFp16 ? b.getF16Type() : b.getBF16Type();
-  return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), elemType,
-                               elemType, dot.getA().getType().getShape().back(),
-                               nonKDim,
+  return chooseMfmaInstruction(dot.getLoc(), mfmaVersion, dot.getC().getType(),
+                               elemType, elemType,
+                               dot.getA().getType().getShape().back(), nonKDim,
                                /*withScale=*/false, /*allowXF32=*/false);
 }
 
@@ -645,7 +647,8 @@ public:
                 HCUISAFeature features, MmacLayout mmacLayout,
                 PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
-        nonKDim(nonKDim), kPack(kPack), features(features), mmacLayout(mmacLayout) {}
+        nonKDim(nonKDim), kPack(kPack),
+        features(features), mmacLayout(mmacLayout) {}
 
   LogicalResult matchAndRewrite(tt::DotOp dotOp,
                                 PatternRewriter &rewriter) const override {
@@ -706,7 +709,8 @@ public:
     auto kDim = mfmaInstr->kDim;
     auto kBase = mfmaInstr->kBase;
 
-    auto warpsPerTile = warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
+    auto warpsPerTile =
+        warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
     // Use transposed mfma layout to enable larger vectorization for global
     // store instructions, except for fp8 matmul kernels due to regression
@@ -723,8 +727,8 @@ public:
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
-        /*instrShape*/ mDim, nDim, isTransposed, CTALayout, mmacLayout,
-        /*interleaveInfo*/ 0);
+        /*instrShape*/ mDim, nDim, isTransposed, CTALayout,
+        mmacLayout, /*interleaveInfo*/ 0);
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -1531,9 +1535,6 @@ public:
                                                         : getDefaultMmacLayout(archGenerationName);
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
     case ISAFamily::CDNA4:
-      // FIXME: CDNAx are AMD-specific and not available to HCUs. We should eliminate
-      //        this special handling and separate the mmac logic from the mfma patterns.
-      assert(0 && "CDNA4 is not supported yet");
       patterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize,
           /*benefit=*/10);

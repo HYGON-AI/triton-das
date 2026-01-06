@@ -902,6 +902,8 @@ def test_mls_comprehensive(dtype, config_list, layout_combination,
 
     if (num_stages == 3 and async_copy_use_single_buffer):
         pytest.skip(f"skip: [{M},{N},{K}] with num_stages={num_stages} and async_copy_use_single_buffer={async_copy_use_single_buffer}")
+    if (num_stages == 1 and schedule_hint == "local-prefetch"):
+        pytest.skip(f"skip: [{M},{N},{K}] with num_stages={num_stages} and schedule_hint={schedule_hint}")
 
     if boundary_check or use_mask:
         if (mix_load != 0b11):

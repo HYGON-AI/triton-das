@@ -448,11 +448,9 @@ class amd_knobs(base_knobs):
     use_async_copy: env_bool = env_bool("TRITON_HIP_USE_ASYNC_COPY")
     scalarize_packed_fops: env_bool = env_bool("AMDGCN_SCALARIZE_PACKED_FOPS")
 
-    # HCU specific knobs
-    optimize_epilogue: env_bool = env_bool("OPTIMIZE_EPILOGUE")
 
 class proton_knobs(base_knobs):
-    cupti_path: env_opt_str = env_opt_str("TRITON_CUPTI_LIB_PATH")
+    cupti_dir: env_opt_str = env_opt_str("TRITON_CUPTI_LIB_PATH")
 
 
 build = build_knobs()

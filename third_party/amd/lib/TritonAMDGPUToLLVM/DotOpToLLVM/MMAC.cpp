@@ -301,7 +301,7 @@ struct DotOpMFMAConversionHelper {
                   aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
+        op.getLoc(), mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
         /*withScale=*/false, allowXF32, capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
@@ -434,7 +434,7 @@ struct DotOpMFMAConversionHelper {
                   aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-      mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB, false, allowXF32,
+      op.getLoc(), mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB, false, allowXF32,
       capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
@@ -808,7 +808,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto ctx = op.getContext();
     constexpr bool allowXF32 = false;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        mfmaVersion, mDim, nDim,
+        op.getLoc(), mfmaVersion, mDim, nDim,
         aElemType == ScaleDotElemType::E2M1 ? kDimOperandSize * 2
                                             : kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),

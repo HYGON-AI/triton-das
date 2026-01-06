@@ -60,8 +60,11 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOp dot, int opIdx,
   auto dType = dot.getResult().getType();
   auto mfmaEncoding = dyn_cast<ttg::AMDMfmaEncodingAttr>(dType.getEncoding());
   bool capFP8 = isa<mlir::FloatType>(aType.getElementType()) && aType.getElementType().getIntOrFloatBitWidth() == 8;
-  auto maybeMfmaInsn = MfmaIntrinsic::selectFor(mfmaEncoding.getVersionMajor(), mfmaEncoding.getMDim(),
-                                                mfmaEncoding.getNDim(), aType.getShape()[aType.getRank() - 1],
+  auto maybeMfmaInsn = MfmaIntrinsic::selectFor(dot.getLoc(),
+                                                mfmaEncoding.getVersionMajor(),
+                                                mfmaEncoding.getMDim(),
+                                                mfmaEncoding.getNDim(),
+                                                aType.getShape()[aType.getRank() - 1],
                                                 aType.getElementType(), bType.getElementType(),
                                                 false, false,
                                                 capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
@@ -242,7 +245,8 @@ public:
 
       // 3. try to construct a mfma encoding for the matrix load
       constexpr unsigned mfmaVersion = 3;
-      auto maybeMfmaInsn = MfmaIntrinsic::selectFor(mfmaVersion,
+      auto maybeMfmaInsn = MfmaIntrinsic::selectFor(matrixOp.getLoc(),
+                                                    mfmaVersion,
                                                     nonKTile, 16,
                                                     blockK, elemType,
                                                     elemType,

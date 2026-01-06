@@ -12,7 +12,6 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
-#include "triton/Tools/Sys/GetEnv.hpp"
 
 namespace {
 

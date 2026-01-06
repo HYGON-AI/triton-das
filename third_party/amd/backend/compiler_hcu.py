@@ -1,4 +1,4 @@
-from triton.backends.compiler import BaseBackend, GPUTarget
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, amd, distributed
 from triton import knobs
 from triton.runtime.errors import HSACOError
@@ -50,7 +50,7 @@ class HIPOptions:
     allow_flush_denorm: bool = False
     max_num_imprecise_acc_default: int = 0
     backend_name: str = 'hip'
-    optimize_epilogue: bool = False
+    optimize_epilogue: bool = True
     # 0: mfma
     # 1: mmac legacy
     # 2: mmac interleave
@@ -124,6 +124,9 @@ class HIPBackend(BaseBackend):
         assert isinstance(target.arch, str)
         self.binary_ext = "hsaco"
 
+    def get_target_name(self, options) -> str:
+        return f"hip:{options.arch}"
+
     def parse_options(self, opts) -> Any:
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
@@ -150,8 +153,7 @@ class HIPBackend(BaseBackend):
         if "enable_fp_fusion" not in opts:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
 
-        if "optimize_epilogue" not in opts:
-            args["optimize_epilogue"] = knobs.amd.optimize_epilogue
+        args["optimize_epilogue"] = False if self.target.arch in ('gfx928', 'gfx936') else True
 
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
@@ -420,6 +422,21 @@ class HIPBackend(BaseBackend):
         return mod
 
     @staticmethod
+    def ttgir_opt(src, metadata, options):
+        mod = src
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        passes.ttgpuir.add_inliner(pm)
+        passes.common.add_sccp(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.ttgpuir.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+
+        pm.run(mod)
+        return mod
+
+    @staticmethod
     def make_llir(src, metadata, options):
         mod = src
         # TritonGPU -> LLVM-IR (MLIR)
@@ -481,7 +498,6 @@ class HIPBackend(BaseBackend):
         amd.set_bool_control_constant(llvm_mod, "__oclc_finite_only_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_correctly_rounded_sqrt32", True)
         amd.set_bool_control_constant(llvm_mod, "__oclc_unsafe_math_opt", False)
-        amd.set_bool_control_constant(llvm_mod, "__oclc_daz_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_wavefrontsize64", options.warp_size == 64)
 
         # Set kernel attributes first given this may affect later optimizations.
@@ -590,7 +606,9 @@ class HIPBackend(BaseBackend):
             for file in [llir_file, asm_file]:
                 if os.path.exists(file):
                     os.remove(file)
-
+        if knobs.amd.dump_amdgcn:
+            print("// -----// AMDGCN Dump //----- //")
+            print(amdgcn)
         return amdgcn
 
     @staticmethod
@@ -621,9 +639,12 @@ class HIPBackend(BaseBackend):
 
         return ret
 
-    def add_stages(self, stages, options):
-        stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-        stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+    def add_stages(self, stages, options, language):
+        if language == Language.TRITON:
+            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+        elif language == Language.GLUON:
+            stages["ttgir"] = lambda src, metadata: self.ttgir_opt(src, metadata, options)
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
         stages["amdgcn"] = lambda src, metadata: self.make_amdgcn(src, metadata, options)
         stages["hsaco"] = lambda src, metadata: self.make_hsaco(src, metadata, options)

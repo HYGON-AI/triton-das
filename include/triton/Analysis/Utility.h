@@ -254,8 +254,6 @@ bool cvtNeedsRetainedToLinearLayout(RankedTensorType srcTy, RankedTensorType dst
 
 bool atomicNeedsSharedMemory(Value result);
 
-bool isMmacToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
-
 // Return true if the src and dst layout match.
 bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
                                    RankedTensorType dstTy);

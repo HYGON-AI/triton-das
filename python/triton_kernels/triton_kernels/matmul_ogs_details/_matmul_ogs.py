@@ -301,7 +301,6 @@ def _matmul_ogs(
         w_scale = load_scale(WScale)
     acc *= x_scale * w_scale
     acc = acc + bias[None, :] * betas[:, None]
-    acc *= gammas[:, None]
     if out_alpha is not None:
         acc *= out_alpha
     if ACTIVATION_FN is not None:
@@ -312,6 +311,7 @@ def _matmul_ogs(
     else:
         tl.static_assert(ACTIVATION_REDUCTION_N == 1, "Activation reduction must be 1 if no activation fn is provided")
         out = acc
+    out *= gammas[:, None]
     # write-back
     Y += start_z.to(index_type) * stride_y_z
     if WriteBackIndx is not None:
@@ -385,9 +385,9 @@ def _compute_writeback_idx(
     src_offs = offs_m[:, None] * N_EXPTS_ACT + tl.arange(0, N_EXPTS_ACT)[None, :]
     src_idxs = tl.load(ScatterSrcIndx + src_offs, mask=mask_m[:, None], other=-1)
     is_src_active = (src_idxs != -1).to(tl.int32)
-    has_one_active = tl.sum(is_src_active, axis=1) == 1
+    num_src_active = tl.sum(is_src_active, axis=1)
 
-    need_finalize_scatter = mask_m & (~has_one_active)
+    need_finalize_scatter = mask_m & (num_src_active != 1)
     finalize_scatter_count = tl.sum(need_finalize_scatter.to(tl.int32))
     if finalize_scatter_count == 0:
         return
