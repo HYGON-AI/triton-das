@@ -26,6 +26,9 @@ def TritonAMDGPUStreamPipeline : Pass<"tritonamdgpu-stream-pipeline", "mlir::Mod
     Option<"useAsyncCopy", "use_async_copy",
            "bool", /*default*/"false",
            "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
+    Option<"usePingpong", "use_pingpong",
+           "bool", /*default*/"false",
+           "Use schedules to enable block ping-pong">,
   ];
 }
 
@@ -140,6 +143,9 @@ def TritonAMDGPUConvertToBufferOps : Pass<"tritonamdgpu-convert-buffer-ops", "ml
     Option<"archGenerationName", "arch-generation-name",
            "std::string", /*default=*/"std::string{}",
            "GFX generation name of target device.">,
+    Option<"allowBufferAtomics", "allow-buffer-atomics",
+           "bool", /*default*/"true",
+           "Allow buffer atomic operations when the hardware supports it.">,
   ];
 }
 
@@ -206,7 +212,7 @@ def TritonAMDGPUInThreadTranspose: Pass<"tritonamdgpu-in-thread-transpose", "mli
     local_load is vectorized, because shared memory order matches destination layout register order.
 
     This pass introduces two ttg.convert_layouts to properly cover cases when between ttg.load and ttg.local_alloc/ttg.local_store
-    exist more operations like scf or ttg.memdesc_subview. These convert_layouts ops are optimized out by later passes.
+    exist more operations like scf or ttg.memdesc_index. These convert_layouts ops are optimized out by later passes.
   }];
 
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect", "mlir::triton::gpu::TritonGPUDialect"];
@@ -257,6 +263,24 @@ def TritonAMDFoldTrueCmpI: Pass<"tritonamdgpu-fold-true-cmpi", "mlir::ModuleOp">
   }];
 }
 
+def TritonAMDGPUOptimizeDotOperands : Pass<"tritonamdgpu-optimize-dot-operands", "mlir::ModuleOp"> {
+  let summary = "Optimize shared memory use for dot operands";
+
+  let description = [{
+    Perform transformations to promote shared memory reuse between matrix multiplication operands.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::amdgpu::TritonAMDGPUDialect",
+                           "mlir::triton::TritonDialect"];
+  let options = [
+    Option<"archGenerationName", "arch-generation-name",
+           "std::string", /*default=*/"std::string{}",
+           "GFX generation name of target device.">
+  ];
+}
+
+
 // =================================================================================================
 // HCU Pass
 
@@ -274,9 +298,9 @@ def TritonAMDGPUMlsStreamPipeline : Pass<"tritonamdgpu-mls-stream-pipeline", "ml
     Option<"numStages", "num_stages",
            "int32_t", /*default*/"2",
            "Number of Pipeline stages">,
-    Option<"useAsyncCopy", "use_async_copy",
-           "bool", /*default*/"true",
-           "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
+    Option<"globalPrefetch", "global_prefetch",
+           "int32_t", /*default*/"0",
+           "Set global prefetch stage count">,
     Option<"asyncCopySingleBuffer", "async_copy_single_buffer",
            "int32_t", /*default*/"1",
            "Use AsyncCopyGlobalToLocal to directly load to shared memory with single buffer">,

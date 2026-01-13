@@ -45,7 +45,6 @@
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/PatternTritonGPUOpToLLVM.h"
-#include "third_party/amd/lib/TritonAMDGPUToLLVM/SchedInstructions.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "triton/Analysis/Allocation.h"
 #include "triton/Analysis/AxisInfo.h"

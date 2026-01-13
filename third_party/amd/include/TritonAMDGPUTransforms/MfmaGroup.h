@@ -9,12 +9,6 @@
 namespace mlir {
 using mlir::triton::AMD::HCUISAFeature;
 
-#define MFMA_INTERLEAVE_GET_KIND(flags) ((flags) & 0x3)
-#define MFMA_INTERLEAVE_GET_OPERAND(flags) (((flags) >> 2) & 0x3)
-#define MFMA_INTERLEAVE_PACK(kind, operand) \
-  (((kind) & 0x3) | \
-   (((operand) & 0x3) << 2))
-
 // Returns true if the given type is an OCP FP8/FP6/FP6 type.
 inline bool isF8F6F4(mlir::Type type) {
   return llvm::isa<Float8E4M3FNType, Float8E5M2Type, Float6E3M2FNType,
@@ -28,23 +22,17 @@ struct MfmaIntrinsic {
                                             unsigned inputKDim, Type aElemType,
                                             Type bElemType, bool withScale,
                                             bool useTF32,
-                                            HCUISAFeature features,
-                                            unsigned interleaveInfo = 0);
+                                            HCUISAFeature features);
 
   MfmaIntrinsic(StringRef symbol, unsigned m, unsigned n, unsigned k,
-                unsigned kB, Type aET, Type bET, unsigned interleaveInfo = 0)
+                unsigned kB, Type aET, Type bET)
       : name(symbol), mDim(m), nDim(n), kDim(k), kBase(kB), aElementType(aET),
-        bElementType(bET), interleaveInfo(interleaveInfo) {}
+        bElementType(bET) {}
 
   MfmaIntrinsic(const MfmaIntrinsic &other) = default;
   MfmaIntrinsic(MfmaIntrinsic &&other) = default;
   MfmaIntrinsic() = default;
   MfmaIntrinsic &operator=(MfmaIntrinsic &&other) = default;
-
-  SmallVector<unsigned, 2> getMfmaTile() { return {mDim, nDim}; }
-  SmallVector<unsigned, 2> getInstrShape() { return {instMDim, instNDim}; }
-  SmallVector<unsigned, 2> getInstrsPerWarp() { return {instMDim / 16, instNDim / 16}; }
-  unsigned getInterleaveKind() { return MFMA_INTERLEAVE_GET_KIND(interleaveInfo); }
 
   llvm::StringRef name;
 
@@ -61,10 +49,6 @@ struct MfmaIntrinsic {
 
   Type aElementType;
   Type bElementType;
-
-  unsigned interleaveInfo;
-  unsigned instMDim = 16;
-  unsigned instNDim = 16;
 };
 } // namespace mlir
 

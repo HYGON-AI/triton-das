@@ -59,18 +59,6 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOp dot, int opIdx,
   auto bType = dot.getB().getType();
   auto dType = dot.getResult().getType();
   auto mfmaEncoding = dyn_cast<ttg::AMDMfmaEncodingAttr>(dType.getEncoding());
-  bool capFP8 = isa<mlir::FloatType>(aType.getElementType()) && aType.getElementType().getIntOrFloatBitWidth() == 8;
-  auto maybeMfmaInsn = MfmaIntrinsic::selectFor(dot.getLoc(),
-                                                mfmaEncoding.getVersionMajor(),
-                                                mfmaEncoding.getMDim(),
-                                                mfmaEncoding.getNDim(),
-                                                aType.getShape()[aType.getRank() - 1],
-                                                aType.getElementType(), bType.getElementType(),
-                                                false, false,
-                                                capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
-  if (failed(maybeMfmaInsn))
-    llvm::report_fatal_error("No match found in MFMA database\n");
-  auto mfmaInstK = maybeMfmaInsn->kDim;
 
   // get the mls shape info
   auto rank = matrixOp.getType().getRank();
@@ -81,7 +69,7 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOp dot, int opIdx,
 
   // Determine the kDim based on the matrix load and numWarps Info.
   unsigned kTile = 0;
-  unsigned nonKTile = opIdx == 0 ? mfmaEncoding.getMDim() : mfmaEncoding.getNDim();
+  unsigned nonKTile = opIdx == 0 ? mfmaEncoding.getMfmaTile()[0] : mfmaEncoding.getMfmaTile()[1];
   if (bitwidth == 16) {
     kTile = kMajor ? (blockK >= 64 ? 64 : 32) : 16;
     if (kTile == 64 && kTile * nonKTile * numWarps > blockK * blockNonK)
@@ -91,7 +79,7 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOp dot, int opIdx,
     if (kTile == 128 && kTile * nonKTile * numWarps > blockK * blockNonK)
       kTile = 64;
   }
-  auto altKind = static_cast<MlsInterleaveKind>(mfmaEncoding.getInterleaveKindForOperand(opIdx));
+  auto altKind = MlsInterleaveKind::InterleaveNone;
 
   // select the mls insn
   auto maybeMlsInsn = MlsInsn::selectOrGetMlsInsn(nonKTile, kTile, bitwidth,
@@ -228,8 +216,10 @@ public:
           kTile = 64;
       }
 
+      auto altKind = MlsInterleaveKind::InterleaveNone;
       auto mlsInsn = MlsInsn::selectOrGetMlsInsn(nonKTile, kTile, bitwidth,
-        opIdx, kMajor, static_cast<MlsInterleaveKind>(0), 1);
+                                                                     opIdx, kMajor,
+                                                                     altKind, 1);
       if (failed(mlsInsn))
         llvm::report_fatal_error("No match found in MLS database\n");
 
@@ -239,7 +229,6 @@ public:
       auto mlsTile = mlsInsn->getMlsTile();
       auto shape = matrixOp.getResult().getType().getShape();
       auto elemBitWidth = mlsInsn->getElemBitWidth();
-      auto altKind = mlsInsn->getAlt2Kind();
       auto version = mlsInsn->getMlsVersion();
       auto warpsPerCTA = warpsPerCTAMatrixLoad(shape, mlsTile, order, numWarps);
 
@@ -247,25 +236,45 @@ public:
       constexpr unsigned mfmaVersion = 3;
       auto maybeMfmaInsn = MfmaIntrinsic::selectFor(matrixOp.getLoc(),
                                                     mfmaVersion,
-                                                    nonKTile, 16,
+                                                    16, 16,
                                                     blockK, elemType,
                                                     elemType,
                                                     false, false,
-                                                    HCUISAFeature::MAMC_FP8, 0);
+                                                    HCUISAFeature::MAMC_FP8);
       if (failed(maybeMfmaInsn))
         llvm::report_fatal_error("No match found in MFMA database\n");
 
-      auto warpsPerCTAMfma =
-                    warpsPerCTAMatrixLoad(shape, {maybeMfmaInsn->mDim, 16}, {1, 0}, numWarps);
+      SmallVector<unsigned> tilesPerWarp = {1, 1};
+      SmallVector<unsigned> mfmaTiles = {16, 16};
+      SmallVector<unsigned> mfmaOrder = {1, 0};
+      if (rank == 3) {
+        tilesPerWarp.insert(tilesPerWarp.begin(), 1);
+        mfmaOrder.insert(mfmaOrder.begin(), 2);
+        mfmaTiles.insert(mfmaTiles.begin(), 1);
+      }
+
+      auto tileM = nonKTile;
+      auto tileN = kTile;
+
+      bool hasBatchDim = rank == 3;
+      int mIndex = 0 + hasBatchDim;
+      int nIndex = 1 + hasBatchDim;
+      tilesPerWarp[mIndex] = tileM/maybeMfmaInsn->mDim;
+      tilesPerWarp[nIndex] = tileN/maybeMfmaInsn->nDim;
+
+      SmallVector<unsigned> warpsPerCTAMfma = warpsPerCTAMatrixLoad(shape, mfmaTiles, mfmaOrder, numWarps);
       auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         matrixOp.getContext(),
-        /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerCTAMfma,
+        /*versionMajor*/ mfmaVersion,
+        warpsPerCTAMfma,
+        tilesPerWarp,
         /*instrShape*/ maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, /*isTransposed*/ false,
         ttg::getCTALayout(matrixOp.getType().getEncoding()),
-        ttg::MmacLayout::INTERLEAVE_TRANSPOSE, 0);
+        std::nullopt,
+        ttg::MmacLayout::INTERLEAVE_TRANSPOSE);
       auto dotAEncoding = ttg::DotOperandEncodingAttr::get(matrixOp.getContext(),
-                                                                  0, mfmaEnc,
-                                                                  maybeMfmaInsn->kBase);
+                                                          0, mfmaEnc,
+                                                          maybeMfmaInsn->kBase);
 
       // 4. create new matrix load op with new encoding and mls attr
       auto newEncoding = dotAEncoding;
@@ -283,12 +292,14 @@ public:
                               matrixOp.getIsVolatile());
       auto mlsEncoding = triton::amdgpu::MlsEncodingAttr::get(
                                                           matrixOp.getContext(), opIdx, mlsTile,
-                                                          elemBitWidth, altKind, version,
+                                                          elemBitWidth, static_cast<unsigned>(altKind), version,
                                                           order, warpsPerCTA);
       newMatrixOp->setAttr(triton::amdgpu::MlsEncodingAttr::getMnemonic(), mlsEncoding);
 
       // 5. replace the original op
-      auto convertedTensor = convertAndCastTensor(rewriter, newMatrixOp.getResult(), matrixOp.getType().getEncoding());
+      auto convertedTensor = convertAndCastTensor(rewriter,
+                                                        newMatrixOp.getResult(),
+                                                        matrixOp.getType().getEncoding());
       rewriter.replaceOp(matrixOp, convertedTensor);
     }
 

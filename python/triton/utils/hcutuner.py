@@ -18,7 +18,8 @@ from typing import Dict, Union, Generic
 from distutils.util import strtobool
 
 from triton.runtime.cache import FileCacheManager, _base32
-from triton.compiler.compiler import make_backend, triton_key, ASTSource, GPUTarget, AsmDict
+from triton.compiler.compiler import make_backend, ASTSource, GPUTarget, AsmDict
+from triton.runtime.cache import triton_key
 from triton.runtime.driver import driver
 from triton._C.libtriton import get_cache_invalidating_env_vars
 from triton.runtime.jit import mangle_type, DependenciesFinder, T

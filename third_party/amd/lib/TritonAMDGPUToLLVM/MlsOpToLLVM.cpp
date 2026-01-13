@@ -2,7 +2,6 @@
 #include "BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
-#include "SchedInstructions.h"
 #include "TargetInfo.h"
 #include "TritonAMDGPUTransforms/MlsGroup.h"
 #include "Utility.h"
@@ -727,17 +726,13 @@ private:
     auto opIdx = dotOperandLayout.getOpIdx();
     auto mfmaLayout = cast<AMDMfmaEncodingAttr>(dotOperandLayout.getParent());
     Value threadId = getThreadId(rewriter, loc);
-    if (mfmaLayout.isM16N16() || (opIdx == 0 && mfmaLayout.getMDim() == 16) || (opIdx == 1 && mfmaLayout.getNDim() == 16)) {
-      res = convertLayoutM16N16(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                                dotOperandLayout, smemObj, typeConverter, threadId);
+    if ((opIdx == 0 && mfmaLayout.getMfmaTile()[0] == mfmaLayout.getInstrShape()[0]) ||
+        (opIdx == 1 && mfmaLayout.getMfmaTile()[1] == mfmaLayout.getInstrShape()[1])) {
+      res = convertLayoutUnitTilesPerWarp(dotOperandLayout.getOpIdx(), rewriter, loc, src,
+                                          dotOperandLayout, smemObj, typeConverter, threadId);
     } else {
-      auto interleaveKind = static_cast<MlsInterleaveKind>(mfmaLayout.getInterleaveKindForOperand(opIdx));
-      if (interleaveKind != MlsInterleaveKind::Interleave4 && interleaveKind != MlsInterleaveKind::Interleave8) {
-        res = convertLayoutNonM16N16(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                                dotOperandLayout, smemObj, typeConverter, threadId);
-      } else {
-        assert(false && "not implemented for non-m16n16 interleave4/8 layout!");
-      }
+        res = convertLayoutMultiTilesPerWarp(dotOperandLayout.getOpIdx(), rewriter, loc, src,
+                                             dotOperandLayout, smemObj, typeConverter, threadId);
     }
 
     if (!res)
@@ -747,12 +742,12 @@ private:
   }
 
   Value
-  convertLayoutM16N16(int opIdx, ConversionPatternRewriter &rewriter,
-                      Location loc, Value tensor,
-                      DotOperandEncodingAttr encoding,
-                      const SharedMemoryObject &smemObj,
-                      const LLVMTypeConverter *typeConverter,
-                      Value thread) const {
+  convertLayoutUnitTilesPerWarp(int opIdx, ConversionPatternRewriter &rewriter,
+                                Location loc, Value tensor,
+                                DotOperandEncodingAttr encoding,
+                                const SharedMemoryObject &smemObj,
+                                const LLVMTypeConverter *typeConverter,
+                                Value thread) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
     auto tensorTy = cast<MemDescType>(tensor.getType());
@@ -764,9 +759,9 @@ private:
     int nonKDimIdx2D = opIdx == 0 ? 0 : 1;
 
     auto mfmaLayout = cast<AMDMfmaEncodingAttr>(encoding.getParent());
-    auto mDim = mfmaLayout.getMDim();
-    auto nDim = mfmaLayout.getNDim();
-    assert((opIdx==0 && mDim==16) || (opIdx==1 && nDim==16) && "only solve m16 or n16 mfma layout!");
+    assert(((opIdx==0 && mfmaLayout.getInstrsPerWarp()[0] == 1) ||
+            (opIdx==1 && mfmaLayout.getInstrsPerWarp()[1] == 1)) &&
+            "only support unit tiles per warp mfma layout!");
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
     auto elemTy = tensorTy.getElementType();
@@ -897,16 +892,6 @@ private:
                                   (dsInsnAttr.instrShape[kDimIdx2D] *
                                    dsInsnAttr.instrShape[nonKDimIdx2D] / iWarpSize));
 
-    for (auto op : tensor.getUsers()) {
-      if (auto localLoadOp = llvm::dyn_cast<triton::gpu::LocalLoadOp>(op)) {
-        const size_t numDsReadsCount = repB * offsets.size();
-        setNumGeneratedDsReads(localLoadOp, numDsReadsCount,
-                               getDsReadMatrixInsnResType(loc, rewriter, tensorTy,
-                                                          dsInsnAttr,
-                                                          mlsInsn->getElemBitWidth()));
-      }
-    }
-
     MLIRContext *ctx = mfmaLayout.getContext();
     Type structTy = LLVM::LLVMStructType::getLiteral(
         ctx, SmallVector<Type>(loadedValues.size(), loadedValues[0].getType()));
@@ -916,12 +901,12 @@ private:
   }
 
   Value
-  convertLayoutNonM16N16(int opIdx, ConversionPatternRewriter &rewriter,
-                         Location loc, Value tensor,
-                         DotOperandEncodingAttr encoding,
-                         const SharedMemoryObject &smemObj,
-                         const LLVMTypeConverter *typeConverter,
-                         Value thread) const {
+  convertLayoutMultiTilesPerWarp(int opIdx, ConversionPatternRewriter &rewriter,
+                                 Location loc, Value tensor,
+                                 DotOperandEncodingAttr encoding,
+                                 const SharedMemoryObject &smemObj,
+                                 const LLVMTypeConverter *typeConverter,
+                                 Value thread) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
     auto tensorTy = cast<MemDescType>(tensor.getType());
@@ -933,8 +918,6 @@ private:
     int nonKDimIdx2D = opIdx == 0 ? 0 : 1;
 
     auto mfmaLayout = cast<AMDMfmaEncodingAttr>(encoding.getParent());
-    auto mDim = mfmaLayout.getMDim();
-    auto nDim = mfmaLayout.getNDim();
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
     auto elemTy = tensorTy.getElementType();
@@ -1101,16 +1084,6 @@ private:
     }
 
     assert(loadedValues.size() == totalElemsMfma);
-
-    for (auto op : tensor.getUsers()) {
-      if (auto localLoadOp = llvm::dyn_cast<triton::gpu::LocalLoadOp>(op)) {
-        const size_t numDsReadsCount = repB * offsets.size();
-        setNumGeneratedDsReads(localLoadOp, numDsReadsCount,
-                               getDsReadMatrixInsnResType(loc, rewriter, tensorTy,
-                                                          dsInsnAttr,
-                                                          mlsInsn->getElemBitWidth()));
-      }
-    }
 
     MLIRContext *ctx = mfmaLayout.getContext();
     Type structTy = LLVM::LLVMStructType::getLiteral(

@@ -38,7 +38,7 @@
 
 #include "triton/Dialect/Distributed/IR/Dialect.h"
 #include "triton/Dialect/SIMT/IR/Dialect.h"
-#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#include "third_party/proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
 
 namespace {
 

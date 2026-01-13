@@ -49,6 +49,10 @@ MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
     (void)features;
   } else if (version <= 3 && isa<Float8E5M2Type, Float8E4M3FNType>(aET) &&
              isa<Float8E5M2Type, Float8E4M3FNType>(bET)) {
+    emitRemark(loc, "missing native support for fp8 variant on current "
+                    "architecture; emulated with fp16 so low performance");
+    if (version == 3)
+      emitRemark(loc, "for gfx942 please use native supported fp8 variants");
     // For the OCP FP8 E5M2/E4M3FN type, we don't have native support until
     // CDNA4. So emulate with FP16.
     aElemType = bElemType = aET = bET = b.getF16Type();
@@ -142,6 +146,7 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   }
 
   Builder b(context);
+  auto f64T = b.getF64Type();
   auto f32T = b.getF32Type();
   auto tf32T = b.getTF32Type();
   auto f16T = b.getF16Type();
@@ -182,50 +187,6 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // mmac_f32_16x16x32_bf8_bf8
       TRITON_MMAC(16, 16, ocpBf8T, ocpBf8T, mmac_f32_16x16x32_bf8_bf8, 32, 8),
   };
-
-  // Add non-m16n16 MMAC intrinsics using TRITON_MMAC_NON_M16N16 macro
-  {
-    unsigned mDims[] = {16, 32, 64};
-    unsigned nDims[] = {16, 32, 64};
-    for (unsigned mDim : mDims) {
-      for (unsigned nDim : nDims) {
-        if (mDim == 16 && nDim == 16)
-          continue; // skip (16,16)
-
-        // fp16
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, f16T, f16T, mmac_f32_16x16x16f16, 16, 4));
-
-        // bf16
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, bf16T, bf16T, mmac_f32_16x16x16bf16, 16, 4));
-      }
-    }
-
-    unsigned mDims8[] = {16, 64, 128};
-    unsigned nDims8[] = {16, 64, 128};
-    for (unsigned mDim : mDims8) {
-      for (unsigned nDim : nDims8) {
-        if (mDim == 16 && nDim == 16)
-          continue; // skip (16,16)
-
-        // int8
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, i8T, i8T, mmac_i32_16x16x32i8, 32, 8));
-
-        // fp8 * fp8
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpFp8T, ocpFp8T, mmac_f32_16x16x32_fp8_fp8, 32, 8));
-
-        // fp8 * bf8
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpFp8T, ocpBf8T, mmac_f32_16x16x32_fp8_bf8, 32, 8));
-
-        // bf8 * fp8
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpBf8T, ocpFp8T, mmac_f32_16x16x32_bf8_fp8, 32, 8));
-
-        // bf8 * bf8
-        mfmaMap.insert(TRITON_MMAC(mDim, nDim, ocpBf8T, ocpBf8T, mmac_f32_16x16x32_bf8_bf8, 32, 8));
-      }
-    }
-  }
-
-
 #if 0
   mfmaMap = {
       // f32 inputs
@@ -234,9 +195,8 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // mfma_f32_16x16x4f32
       TRITON_MFMA_v1to4(16, 16, f32T, f32T, mfma_f32_16x16x4f32, 4, 1),
       // mfma_f32_4x4x1f32 / mfma_f32_4x4x1_16B_f32
-      TRITON_MFMA_v1to4(4, 4, f32T, f32T, mfma_f32_4x4x1f32, 16, 1),
-      TRITON_MFMA_v1to4(4, 64, f32T, f32T, mfma_f32_4x4x1f32, 1, 1),
-      TRITON_MFMA_v1to4(64, 4, f32T, f32T, mfma_f32_4x4x1f32, 1, 1),
+      TRITON_MFMA_v1to4(4, 64, f32T, f32T, mfma_f32_4x4x1f32, 16, 1),
+      TRITON_MFMA_v1to4(64, 4, f32T, f32T, mfma_f32_4x4x1f32, 16, 1),
 
       // xf32
       // mfma.xf32.16x16x8xf32
@@ -256,9 +216,8 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // mfma_f32_16x16x16f16
       TRITON_MFMA_v1to3(16, 16, f16T, f16T, mfma_f32_16x16x16f16, 16, 4),
       // mfma_f32_4x4x4f16
-      TRITON_MFMA_v1to4(4, 4, f16T, f16T, mfma_f32_4x4x4f16, 64, 4),
-      TRITON_MFMA_v1to4(4, 64, f16T, f16T, mfma_f32_4x4x4f16, 4, 4),
-      TRITON_MFMA_v1to4(64, 4, f16T, f16T, mfma_f32_4x4x4f16, 4, 4),
+      TRITON_MFMA_v1to4(4, 64, f16T, f16T, mfma_f32_4x4x4f16, 64, 4),
+      TRITON_MFMA_v1to4(64, 4, f16T, f16T, mfma_f32_4x4x4f16, 64, 4),
 
       // bf16 inputs
       // mfma_f32_32x32x16_bf16 & mfma_f32_32x32x8_bf16_1K
@@ -280,11 +239,9 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // mfma_f32_16x16x8_bf16
       TRITON_MFMA_v(1, 16, 16, bf16T, bf16T, mfma_f32_16x16x8bf16, 8, 2),
       // mfma_f32_4x4x4_bf16_1K
-      TRITON_MFMA_v2to4(4, 4, bf16T, bf16T, mfma_f32_4x4x4bf16_1k, 64, 4),
-      TRITON_MFMA_v2to4(4, 64, bf16T, bf16T, mfma_f32_4x4x4bf16_1k, 4, 4),
-      TRITON_MFMA_v2to4(64, 4, bf16T, bf16T, mfma_f32_4x4x4bf16_1k, 4, 4),
+      TRITON_MFMA_v2to4(4, 64, bf16T, bf16T, mfma_f32_4x4x4bf16_1k, 64, 4),
+      TRITON_MFMA_v2to4(64, 4, bf16T, bf16T, mfma_f32_4x4x4bf16_1k, 64, 4),
       // mfma_f32_4x4x2_bf16
-      TRITON_MFMA_v(1, 4, 4, bf16T, bf16T, mfma_f32_4x4x2bf16, 32, 2),
       TRITON_MFMA_v(1, 4, 64, bf16T, bf16T, mfma_f32_4x4x2bf16, 2, 2),
       TRITON_MFMA_v(1, 64, 4, bf16T, bf16T, mfma_f32_4x4x2bf16, 2, 2),
 
@@ -344,9 +301,8 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // mfma_i32_16x16x16i8
       TRITON_MFMA_v1to2(16, 16, i8T, i8T, mfma_i32_16x16x16i8, 16, 4),
       // mfma_i32_4x4x4i8
-      TRITON_MFMA_v1to4(4, 4, i8T, i8T, mfma_i32_4x4x4i8, 64, 4),
-      TRITON_MFMA_v1to4(4, 64, i8T, i8T, mfma_i32_4x4x4i8, 4, 4),
-      TRITON_MFMA_v1to4(64, 4, i8T, i8T, mfma_i32_4x4x4i8, 4, 4),
+      TRITON_MFMA_v1to4(4, 64, i8T, i8T, mfma_i32_4x4x4i8, 64, 4),
+      TRITON_MFMA_v1to4(64, 4, i8T, i8T, mfma_i32_4x4x4i8, 64, 4),
 
       // Scaled mfma f8f6f4
       // mfma_scale_F32_16x16x128_F8F6F4
@@ -369,18 +325,13 @@ FailureOr<MfmaIntrinsic>
 MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
                          unsigned nDim, unsigned inputKDim, Type aElemType,
                          Type bElemType, bool withScale, bool useTF32,
-                         HCUISAFeature features, unsigned interleaveInfo) {
+                         HCUISAFeature features) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
   MfmaKey key = composeMfmaKeyFor(loc, version, mDim, nDim, aElemType,
                                   bElemType, withScale, useTF32, features);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())
-    return failure();
-
-  auto interleaveKind = MFMA_INTERLEAVE_GET_KIND(interleaveInfo);
-  auto interleaveOperand = MFMA_INTERLEAVE_GET_OPERAND(interleaveInfo);
-  if (interleaveKind != 0 && interleaveOperand != 0b00)
     return failure();
 
   const SmallVector<MfmaMapValue, 2> &values = it->second;

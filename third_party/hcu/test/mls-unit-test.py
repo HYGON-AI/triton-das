@@ -503,7 +503,10 @@ def matmul_kernel(
                 b = tl.load(b_ptrs)
 
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, b, accumulator)
+        if OUTPUT_DTYPE == "int32":
+            accumulator = tl.dot(a, b, accumulator, out_dtype=tl.int32)
+        else:
+            accumulator = tl.dot(a, b, accumulator)
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
