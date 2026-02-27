@@ -52,8 +52,9 @@ matmul_data = {
 }
 
 @pytest.mark.parametrize('M, N, K, dtype_str', [(M, N, K, dtype_str)
-                                                for M, N, K in matmul_data[ARCH_NAME].keys()
+                                                for M, N, K in matmul_data.get(ARCH_NAME, {}).keys()
                                                 for dtype_str in ['float16', 'float32']])
+@pytest.mark.skipif(ARCH_NAME != 'gfx928', reason='matmul performance regression only supports gfx928')
 def test_matmul(M, N, K, dtype_str):
     stream = torch.cuda.Stream()
     torch.cuda.set_stream(stream)

@@ -2,7 +2,7 @@
 
 CUR_PATH="$( cd $( dirname ${BASH_SOURCE} );pwd )"
 export SRC_HOME=${CUR_PATH}/../../
-export BUILD_DIR=${SRC_HOME}/python/build
+export BUILD_DIR=${SRC_HOME}/build
 export MAX_JOBS=8
 
 function run_pytest() {
@@ -124,12 +124,32 @@ function run_lit() {
     "${LIT_TEST_DIR}/Conversion/divide-by-0.mlir"
     "${LIT_TEST_DIR}/Conversion/minimize_alloc.mlir"
     "${LIT_TEST_DIR}/Conversion/tritongpu_to_llvm.mlir"
+    "${LIT_TEST_DIR}/Conversion/tma_to_llvm.mlir"
+    "${LIT_TEST_DIR}/Conversion/cvt_to_llvm.mlir"
+    "${LIT_TEST_DIR}/Conversion/AMDGPU/mfma-shortcut.mlir"
+    "${LIT_TEST_DIR}/Conversion/AMDGPU/ds_transpose.mlir"
     "${LIT_TEST_DIR}/TritonGPU/accelerate-matmul-cdna1.mlir"
     "${LIT_TEST_DIR}/TritonGPU/accelerate-matmul-cdna2.mlir"
     "${LIT_TEST_DIR}/TritonGPU/accelerate-matmul-cdna3.mlir"
     "${LIT_TEST_DIR}/TritonGPU/chain-dot.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/prefetch.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/combine.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/loop-pipeline-hip.mlir"
     "${LIT_TEST_DIR}/Conversion/tritongpu_to_llvm_hopper.mlir"
+    "${LIT_TEST_DIR}/Conversion/AMDGPU/math-denorm-handling.mlir"
+    "${LIT_TEST_DIR}/Conversion/AMDGPU/fp_to_fp.mlir"
     "${LIT_TEST_DIR}/TritonGPU/wsdecomposing.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/accelerate-amd-matmul-mfma.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/mfma-xf32.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/sink-setprio-mfma.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/amd-optimize-epilogue.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/accelerate-amd-matmul-mfma-gfx950.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/optimize-lds-usage.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/amd-reorder-instructions.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/amd-block-pingpong.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/amd-optimize-dot-operands.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/mfma-double-rate.mlir"
+    "${LIT_TEST_DIR}/Tools/tensor_layout_print.mlir"
   )
   # run all with exclude
   if [ $mode -eq 0 ]; then
@@ -217,7 +237,7 @@ function build_llvm() {
       -DCMAKE_BUILD_TYPE=Release  \
       -DLLVM_ENABLE_ASSERTIONS=ON  \
       -DLLVM_INSTALL_UTILS=ON  \
-      -DLLVM_ENABLE_PROJECTS="mlir;llvm"  \
+      -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld"  \
       -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"  \
       -DCMAKE_INSTALL_PREFIX=../${package_name}  \
       ../llvm

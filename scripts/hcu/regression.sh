@@ -4,7 +4,7 @@ set -e
 CUR_PATH="$( cd $( dirname ${BASH_SOURCE} );pwd )"
 
 function build_triton() {
-  cd ${SRC_HOME}/python
+  cd ${SRC_HOME}
   pip uninstall -y triton
   pip install -e .
   cd -
@@ -32,4 +32,4 @@ source ${CUR_PATH}/launch.sh
 build_llvm
 clean_cache
 build_triton
-# regression_for_test
+regression_for_test
