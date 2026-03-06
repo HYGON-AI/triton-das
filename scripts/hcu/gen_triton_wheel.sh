@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CUR_PATH="$( cd $( dirname ${BASH_SOURCE} );pwd )"
-cd $CUR_PATH/../../python
+cd $CUR_PATH/../../
 export DEBUG=OFF
 
 source ${CUR_PATH}/launch.sh
