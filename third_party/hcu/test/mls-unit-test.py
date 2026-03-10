@@ -1323,4 +1323,3 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
 
 # if __name__ == "__main__":
 #     pytest.main(["-v", "-s", "mls-unit-test.py::test_matrix_load_store_comprehensive[16-config_list11-col-dtype1-True-True]"])
-
