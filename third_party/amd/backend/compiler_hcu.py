@@ -91,6 +91,15 @@ class HIPOptions:
     #    - see get_options_args() to get more options.
     sched_latency: str = 'none'
 
+    # wasp options
+    wasp_enabled: bool = False
+    wdra_enabled: bool = False
+    wasp_num_load_warps: int = None
+    wasp_num_mma_warps: int = None
+    wdra_num_load_regs: int = None
+    wdra_num_mma_regs_main: int = None
+    wdra_num_mma_regs_tail: int = None
+
     def __post_init__(self):
         # gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
         # warp_size = 32 if gfx_major >= 10 else 64
@@ -160,6 +169,23 @@ class HIPBackend(BaseBackend):
 
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
+
+        if args["wasp_enabled"]:
+            if args["wdra_enabled"]:
+                assert args["wasp_num_load_warps"] == 4
+                assert args["wasp_num_mma_warps"] in [4, 8]
+            else:
+                args.pop("wdra_num_load_regs", None)
+                args.pop("wdra_num_mma_regs_main", None)
+                args.pop("wdra_num_mma_regs_tail", None)
+        else:
+            assert not args["wdra_enabled"], "wdra_enabled is only supported when wasp_enabled is True"
+            args.pop("wasp_num_load_warps", None)
+            args.pop("wasp_num_mma_warps", None)
+            args.pop("wdra_num_load_regs", None)
+            args.pop("wdra_num_mma_regs_main", None)
+            args.pop("wdra_num_mma_regs_tail", None)
+
         return HIPOptions(**args)
 
     def pack_metadata(self, metadata):
@@ -323,6 +349,7 @@ class HIPBackend(BaseBackend):
             "-mllvm=-disable-cluster-lds-memops=true",
             # Note: when register spill after ds_read_matrix, result is wrong for compiler backend. disable current.
             "-mllvm=-hcu-pre-emit-load-store-opt=false",
+            "-mllvm=-vgpr-greedy-alloc-mode=local-wave" if options.wdra_enabled else "",
             *options_args,
             "-O3",
         ]
@@ -393,8 +420,9 @@ class HIPBackend(BaseBackend):
 
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
 
-        amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
-                                               use_block_pingpong)
+        if not options.wasp_enabled:
+            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
+                                                use_block_pingpong)
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
@@ -411,6 +439,15 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_reorder_instructions(pm)
         if use_block_pingpong and options.num_stages > 1:
             amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
+
+        if options.wasp_enabled:
+            passes.ttgpuir.add_warp_specialize_hcu(pm, 2, options.wdra_enabled, options.wasp_num_load_warps, options.wasp_num_mma_warps)
+            amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack, options.mmac_layout_force)
+            passes.ttgpuir.add_remove_layout_conversions(pm)
+            if options.optimize_epilogue:
+                amd.passes.ttgpuir.add_optimize_epilogue(pm)
+            passes.ttgpuir.add_optimize_dot_operands(pm, True)
+            amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
 
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
@@ -482,6 +519,15 @@ class HIPBackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
 
+        if options.wasp_enabled:
+            amd.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch, options.wasp_num_load_warps, 
+                options.wasp_num_mma_warps, options.wdra_enabled, options.wdra_num_load_regs or 0, 
+                options.wdra_num_mma_regs_main or 0, options.wdra_num_mma_regs_tail or 0)
+            passes.convert.add_arith_to_llvmir(pm)
+            passes.common.add_canonicalizer(pm)
+            passes.common.add_cse(pm)
+            passes.common.add_symbol_dce(pm)
+
         if options.schedule_hint.lower() != "none":
             amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.arch, options.num_stages)
 
@@ -516,11 +562,18 @@ class HIPBackend(BaseBackend):
         amd.set_bool_control_constant(llvm_mod, "__oclc_unsafe_math_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_wavefrontsize64", options.warp_size == 64)
 
+        # WarpSpecialize Passes would set this attribute
+        total_num_warps = src.get_int_attr("ttg.total-num-warps")
+        total_num_warps = total_num_warps if total_num_warps is not None else options.num_warps
+
         # Set kernel attributes first given this may affect later optimizations.
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
+        # If wdra is enabled, this attribute is required by the LLVM backend.
+        if options.wdra_enabled:
+            fns[0].add_fn_attr("hcu-wdra-waves-per-tg", str(total_num_warps))
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{options.num_warps*options.warp_size}")
+        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{total_num_warps*options.warp_size}")
         # LLVM AMDGPU backend supports the attribute "amdgpu-waves-per-eu"="<min>[, <max>]".
         # This attribute may be attached to a kernel function definition and is an optimization hint.
         # <min> parameter specifies the requested minimum number of waves per EU, and optional <max> parameter
@@ -582,6 +635,9 @@ class HIPBackend(BaseBackend):
         metadata["profile_scratch_size"] = src.get_int_attr("ttg.profile_scratch_memory_size") or 0
         metadata["profile_scratch_align"] = src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
 
+        # warp-specialization mutates num_warps
+        metadata["num_warps"] = total_num_warps
+
         amd.cleanup_bitcode_metadata(llvm_mod)
         # Disable inlining of print related functions,
         # because inlining of these function could slow down compilation significantly
@@ -620,7 +676,10 @@ class HIPBackend(BaseBackend):
 
             # Compile to ASM
             asm_command = [clang_path] + clang_args + [llir_file, "-S", "-o", asm_file]
-            subprocess.run(asm_command, check=True, capture_output=True, text=True)
+            result = subprocess.run(asm_command, check=True, capture_output=True, text=True)
+            if options.wdra_enabled:
+                log = result.stdout + result.stderr
+                print(log, flush=True)
 
             with open(asm_file, "r") as fd_out:
                 amdgcn = fd_out.read()

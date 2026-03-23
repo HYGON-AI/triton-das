@@ -184,24 +184,24 @@ private:
                                                           scratchAlignment);
       return;
     }
-    if (auto ws = dyn_cast<gpu::WarpSpecializeOp>(op)) {
-      // `ttg.warp_specialize` needs memory to pass its explicit captures. Pack
-      // the captures like a struct.
-      auto [captureSize, captureAlign] = ws.getCaptureSizeAlign();
-      maybeAddScratchBuffer<BufferT::BufferKind::Scratch>(op, captureSize,
-                                                          captureAlign);
-      return;
-    }
-    if (auto func = dyn_cast<FunctionOpInterface>(op)) {
-      unsigned numWarpIndices = 0;
-      // Warp specialization communicates states over shared memory to each
-      // warp. Add space for an i8 for each warpgroup warp.
-      func.walk([&](gpu::WarpSpecializeOp op) {
-        numWarpIndices = std::max(numWarpIndices, op.getTotalPartitionWarps());
-      });
-      maybeAddScratchBuffer<BufferT::BufferKind::Scratch>(op, numWarpIndices);
-      return;
-    }
+    //if (auto ws = dyn_cast<gpu::WarpSpecializeOp>(op)) {
+    //  // `ttg.warp_specialize` needs memory to pass its explicit captures. Pack
+    //  // the captures like a struct.
+    //  auto [captureSize, captureAlign] = ws.getCaptureSizeAlign();
+    //  maybeAddScratchBuffer<BufferT::BufferKind::Scratch>(op, captureSize,
+    //                                                      captureAlign);
+    //  return;
+    //}
+    //if (auto func = dyn_cast<FunctionOpInterface>(op)) {
+    //  unsigned numWarpIndices = 0;
+    //  // Warp specialization communicates states over shared memory to each
+    //  // warp. Add space for an i8 for each warpgroup warp.
+    //  func.walk([&](gpu::WarpSpecializeOp op) {
+    //    numWarpIndices = std::max(numWarpIndices, op.getTotalPartitionWarps());
+    //  });
+    //  maybeAddScratchBuffer<BufferT::BufferKind::Scratch>(op, numWarpIndices);
+    //  return;
+    //}
     unsigned bytes = scratchSizeGetter(op);
     maybeAddScratchBuffer<BufferT::BufferKind::Scratch>(op, bytes,
                                                         scratchAlignment);

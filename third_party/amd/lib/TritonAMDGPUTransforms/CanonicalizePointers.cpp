@@ -977,6 +977,55 @@ public:
   }
 };
 
+/// Rewrite operands and partition region block arguments of
+/// triton::gpu::WarpSpecializeOp so that pointer-like operands are represented
+/// as fat pointers (base, offset) and this representation is propagated into
+/// all partition regions.
+class ConvertWarpSpecializeOp
+    : public PointerCanonicalizationPattern<triton::gpu::WarpSpecializeOp> {
+public:
+  using PointerCanonicalizationPattern::PointerCanonicalizationPattern;
+
+  LogicalResult
+  matchAndRewrite_(triton::gpu::WarpSpecializeOp wsOp,
+                   OneToNOpAdaptor adaptor,
+                   ConversionPatternRewriter &rewriter) const override {
+    ArrayRef<ValueRange> remappedOperands = adaptor.getOperands();
+
+    // Flatten remapped operands into the new operand list.
+    SmallVector<Value> flatOperands = flattenValues(remappedOperands);
+
+    // Update partition region block argument signatures to match remapped
+    // operands and propagate fat pointer attributes.
+    for (Region *region : wsOp.getPartitionRegions()) {
+      Block *entry = &region->front();
+      convertSimpleBlockSignature(entry, remappedOperands, rewriter, fatPtrs);
+    }
+
+    // Create a new WarpSpecializeOp with updated operands and the same result
+    // types and attributes, then move the regions over.
+    OperationState state(wsOp.getLoc(), wsOp->getName());
+    state.addOperands(flatOperands);
+    state.addTypes(wsOp->getResultTypes());
+    state.addAttributes(wsOp->getAttrs());
+    state.addRegion();
+    state.addRegion();
+
+    auto newOp =
+        cast<triton::gpu::WarpSpecializeOp>(rewriter.create(state));
+
+    rewriter.inlineRegionBefore(wsOp.getDefaultRegion(),
+                                newOp.getDefaultRegion(),
+                                newOp.getDefaultRegion().end());
+    rewriter.inlineRegionBefore(wsOp.getPartitionOpHolder(),
+                                newOp.getPartitionOpHolder(),
+                                newOp.getPartitionOpHolder().end());
+
+    rewriter.replaceOp(wsOp, newOp.getResults());
+    return success();
+  }
+};
+
 /// Rewrite with new operands.
 class ConvertSCFConditionOp
     : public PointerCanonicalizationPattern<scf::ConditionOp> {
@@ -1570,6 +1619,11 @@ static void getForwardSliceImpl(OpOperand *use, Operation *op,
                     /*useOffset*/ 1);
     addBlockArgUses(condBranchOp.getFalseDest()->getArguments(),
                     /*argOffset*/ 0, /*useOffset*/ 1);
+  } else if (auto wsOp = llvm::dyn_cast<triton::gpu::WarpSpecializeOp>(op)) {
+    // Each operand of WarpSpecializeOp is forwarded as the corresponding
+    // argument to every partition region; propagate uses accordingly.
+    for (Region *region : wsOp.getPartitionRegions())
+      addBlockArgUses(region->getArguments());
   } else if (auto yield = llvm::dyn_cast<scf::YieldOp>(op)) {
     forwardSlice->insert(yield);
     if (auto ifOp = llvm::dyn_cast<scf::IfOp>(yield->getParentOp()))
@@ -1679,6 +1733,7 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
       MaterializeFatPointerVariadic<tt::PrintOp>, ConvertSCFForOp,
       ConvertExpandDims, ConvertSCFYieldOp, ConvertSCFIfOp,
       ConvertSCFConditionOp, ConvertSCFWhileOp, ConvertCFCondBranch,
+      ConvertWarpSpecializeOp,
       ConvertCFBranch, ConvertArithSelectOp, ConvertReturnOp>(
       patterns.getContext(), opsToRewrite, fatPrs);
   if (failed(applyPartialConversion(func, target, std::move(patterns), config)))

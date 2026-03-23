@@ -194,6 +194,30 @@ bool verifyNonNegativeExpr(
   // Recurse if the operation is defined
   Operation *op = expr.getDefiningOp();
   if (!op) {
+    // Try to trace block arguments of certain region-carrying ops back to
+    // their corresponding operands so we can reuse existing facts.
+    if (auto blockArg = dyn_cast<BlockArgument>(expr)) {
+      Block *blk = blockArg.getOwner();
+      Operation *parentOp = blk->getParentOp();
+      // For ttg.warp_specialize, each partition region's block arguments
+      // correspond 1-1 (by index) with the op operands. The block arguments
+      // live in regions owned by the hidden ttg.warp_specialize.partitions op,
+      // which in turn is nested under the ttg.warp_specialize op.
+      if (auto partsOp = dyn_cast<ttg::WarpSpecializePartitionsOp>(parentOp)) {
+        if (auto wsOp =
+                partsOp->getParentOfType<ttg::WarpSpecializeOp>()) {
+          Region *region = blk->getParent();
+          for (Region *partRegion : wsOp.getPartitionRegions()) {
+            if (partRegion == region) {
+              unsigned argIdx = blockArg.getArgNumber();
+              if (argIdx < wsOp->getNumOperands())
+                return verifyNonNegativeExpr(wsOp->getOperand(argIdx),
+                                             assumptions, solver);
+            }
+          }
+        }
+      }
+    }
     LDBG("  No defining op, assuming possibly negative");
     return false;
   }

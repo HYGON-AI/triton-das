@@ -377,10 +377,10 @@ Value getThreadId(OpBuilder &rewriter, Location loc) {
 
   // If this is being created inside a warp specialize op, compute the relative
   // thread ID within the warp group.
-  if (std::optional<int> startId =
-          getWarpGroupStartThreadId(rewriter.getInsertionBlock())) {
-    tid = rewriter.create<arith::SubIOp>(loc, tid, b.i32_val(*startId));
-  }
+  //if (std::optional<int> startId =
+  //  getWarpGroupStartThreadId(rewriter.getInsertionBlock())) {
+  //  tid = rewriter.create<arith::SubIOp>(loc, tid, b.i32_val(*startId));
+  //}
 
   assert(llvm::isPowerOf2_32(upperBound));
   // help LLVM's known bits analysis:

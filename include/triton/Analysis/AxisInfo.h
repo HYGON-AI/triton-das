@@ -229,17 +229,32 @@ public:
   }
 
   AxisInfo *getAxisInfo(Value value) {
-    auto funcOp =
-        value.getParentRegion()->getParentOfType<FunctionOpInterface>();
-    auto *axisInfoMap = getFuncData(funcOp);
-    if (!axisInfoMap) {
-      return nullptr;
+    // First, try to get the function through the normal path
+    auto *parentRegion = value.getParentRegion();
+    if (parentRegion) {
+      auto funcOp =
+          parentRegion->getParentOfType<FunctionOpInterface>();
+      auto *axisInfoMap = getFuncData(funcOp);
+      if (axisInfoMap) {
+        auto it = axisInfoMap->find(value);
+        if (it != axisInfoMap->end()) {
+          return &(it->second);
+        }
+      }
     }
-    auto it = axisInfoMap->find(value);
-    if (it == axisInfoMap->end()) {
-      return nullptr;
+    
+    // If the normal path fails (e.g., block was deleted during conversion),
+    // search through all functions' axisInfoMap. This can happen when a
+    // BlockArgument's block is deleted but the Value is still used in
+    // conversion patterns.
+    for (auto &[funcOp, axisInfoMap] : funcMap) {
+      auto it = axisInfoMap.find(value);
+      if (it != axisInfoMap.end()) {
+        return &(it->second);
+      }
     }
-    return &(it->second);
+    
+    return nullptr;
   }
 
   unsigned getContiguity(Value value);

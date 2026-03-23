@@ -7,6 +7,7 @@ add_triton_library(TritonGPUTransforms
   DecomposeScaledBlocked.cpp
   HoistTMEMAlloc.cpp
   ReduceDataDuplication.cpp
+  ConvertLayoutThroughShared.cpp
   OptimizeAccumulatorInit.cpp
   OptimizeDotOperands.cpp
   OptimizeThreadLocality.cpp
@@ -21,6 +22,7 @@ add_triton_library(TritonGPUTransforms
   Pipeliner/TMAStoresPipeline.cpp
   Pipeliner/MMAv5PipelineUtility.cpp
   Pipeliner/PipeliningUtility.cpp
+  Pipeliner/AbarrierIdManager.cpp
   Pipeliner/Schedule.cpp
   Prefetch.cpp
   RemoveLayoutConversions.cpp
@@ -35,12 +37,21 @@ add_triton_library(TritonGPUTransforms
   WarpSpecialization/PartitionLoops.cpp
   WarpSpecialization/PartitionScheduling.cpp
   WarpSpecialization/RewritePartitionDependencies.cpp
+  WarpSpecializationHCU/AutomaticWarpSpecialization.cpp
+  WarpSpecializationHCU/LoadMMASpecialization.cpp
+  WarpSpecializationHCU/OptimizePartitionWarps.cpp
+  WarpSpecializationHCU/PartitionLoops.cpp
+  WarpSpecializationHCU/PartitionScheduling.cpp
+  WarpSpecializationHCU/RewritePartitionDependencies.cpp
+  WarpSpecializationHCU/DataPartition.cpp
+  WarpSpecializationHCU/SplitMmaPartitions.cpp
   DEPENDS
   TritonGPUTransformsIncGen
 
   LINK_LIBS PUBLIC
   MLIRTransforms
   MLIRTransformUtils
+  MLIRROCDLDialect
   TritonAnalysis
   TritonIR
   TritonTransforms

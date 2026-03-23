@@ -264,7 +264,7 @@ struct CanonicalizeConvertFromConvert
     auto srcType = op.getSrc().getType();
     auto dstType = op.getType();
     if (mlir::isa<DotOperandEncodingAttr>(dstType.getEncoding()) &&
-        mlir::isa<NvidiaMmaEncodingAttr>(srcType.getEncoding()))
+        srcType.getEncoding() && mlir::isa<NvidiaMmaEncodingAttr>(srcType.getEncoding()))
       return failure();
 
     Operation *arg = op.getSrc().getDefiningOp();

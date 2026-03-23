@@ -194,6 +194,169 @@ def TritonGPULoadMMASpecialization : Pass<"tritongpu-load-mma-specialization", "
   ];
 }
 
+def TritonGPUAutomaticWarpSpecializationHCU : Pass<"tritongpu-automatic-warp-specialization-hcu", "mlir::ModuleOp"> {
+  let summary = "automatic warp specialization of loops (HCU)";
+
+  let description = [{
+    The `tritongpu-automatic-warp-specialization-hcu` pass applies automatic
+    warp specialization to eligible loops in the module. The pass will analyze
+    the loops in the kernel and attempt to create a partition schedule, which
+    if successful lowers the loop by duplicating it into `ttg.warp_specialize`
+    partition regions.
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::gpu::TritonGPUDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+    "triton::nvws::NVWSDialect"
+  ];
+
+  let options = [
+    Option<"numStages", "num-stages", "int32_t", /*default*/"3",
+           "number of pipeline stages">,
+    Option<"wdraEnabled", "wdra-enabled",
+           "bool", /*default*/"false",
+           "flag to indicate wdra is enabled">,
+    Option<"waspNumLoadWarps", "wasp-num-load-warps",
+           "int32_t", /*default*/"4",
+           "total num of warps for load when wasp is enabled">,
+    Option<"waspNumMmaWarps", "wasp-num-mma-warps",
+           "int32_t", /*default*/"8",
+           "total num of warps for mma when wasp is enabled">,
+  ];
+}
+
+def TritonGPURewritePartitionDependenciesHCU : Pass<"tritongpu-rewrite-partition-dependencies-hcu", "mlir::ModuleOp"> {
+  let summary = "test pass for rewriting partition dependencies (HCU)";
+
+  let description = [{
+    The `tritongpu-rewrite-partition-dependencies-hcu` pass analyzes the partitions
+    assigned to a loop and their SSA dependencies. It rewrites the dependencies
+    to be passed through shared memory, applying multi-buffering according to
+    the assigned stages of the partitions.
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::gpu::TritonGPUDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+    "mlir::triton::nvws::NVWSDialect"
+  ];
+}
+
+def TritonGPUPartitionLoopsHCU : Pass<"tritongpu-partition-loops-hcu", "mlir::ModuleOp"> {
+  let summary = "split scheduled loops into `ttg.warp_specialize` (HCU)";
+
+  let description = [{
+    The `tritongpu-partition-loops-hcu` pass will analyze the loops in the module
+    that have been scheduled for warp specialization and split them into
+    `ttg.warp_specialize` partition regions. This requires no SSA dependencies
+    between any of the partitions.
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::gpu::TritonGPUDialect",
+    "triton::nvws::NVWSDialect"
+  ];
+}
+
+def TritonGPUOptimizePartitionWarpsHCU : Pass<"tritongpu-optimize-partition-warps-hcu", "mlir::ModuleOp"> {
+  let summary = "optimize the number of warps assigned to partitions (HCU)";
+
+  let description = [{
+    The `tritongpu-optimize-partition-warps-hcu` pass will analyze the partitions
+    of `ttg.warp_specialize` ops and attempts to reduce the number of warps
+    assigned to them and optimize the register usage of the partitions.
+  }];
+
+  let options = [
+    Option<"wdraEnabled", "wdra-enabled", "bool", /*default*/"false",
+           "flag to indicate wdra is enabled">,
+    Option<"waspNumLoadWarps", "wasp-num-load-warps", "int32_t", /*default*/"4",
+           "total num of warps for load when wasp is enabled">,
+    Option<"waspNumMmaWarps", "wasp-num-mma-warps", "int32_t", /*default*/"8",
+           "total num of warps for mma when wasp is enabled">
+  ];
+
+}
+
+def TritonGPUPartitionSchedulingHCU : Pass<"tritongpu-partition-scheduling-hcu", "mlir::ModuleOp"> {
+  let summary = "warp specialization partitioning pass (HCU)";
+
+  let description = [{
+    The `tritongpu-partition-scheduling-hcu` analyzes the loads, MMAs, and other
+    operations in a loop that is meant to be warp specialized and determines
+    which partitions to assign to each operation.
+  }];
+}
+
+def TritonGPULoadMMASpecializationHCU : Pass<"tritongpu-load-mma-specialization-hcu", "mlir::ModuleOp"> {
+  let summary = "load MMA specialization (HCU)";
+
+  let description = [{
+    The `tritongpu-load-mma-specialization-hcu` pass looks for matmul loops in the
+    module and attempts to create a partition schedule, separating async loads
+    and async MMAs into separate partitions.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"];
+
+  let options = [
+    Option<"numStages", "num-stages", "int32_t", /*default*/"3",
+           "number of pipeline stages">,
+    Option<"wdraEnabled", "wdra-enabled", "bool", /*default*/"false",
+           "flag to indicate wdra is enabled">,
+    Option<"waspNumLoadWarps", "wasp-num-load-warps", "int32_t", /*default*/"4",
+           "total num of warps for load when wasp is enabled">,
+    Option<"waspNumMmaWarps", "wasp-num-mma-warps", "int32_t", /*default*/"8",
+           "total num of warps for mma when wasp is enabled">,
+  ];
+}
+
+def TritonGPUDataPartition : Pass<"tritongpu-data-partition", "mlir::ModuleOp"> {
+  let summary = "partition warp-specialized MMA work along the data dimension";
+
+  let description = [{
+    The `tritongpu-data-partition` pass partitions warp-specialized matmul
+    computations along a data dimension into multiple consumer groups. This is
+    used by the HCU warp specialization pipeline to split an MMA partition into
+    multiple smaller warp groups, which can help satisfy hardware constraints
+    on the number of warps per branch when using set_vgpr-like mechanisms.
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::gpu::TritonGPUDialect",
+    "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def TritonGPUSplitMmaPartitions
+    : Pass<"tritongpu-split-mma-partitions", "mlir::ModuleOp"> {
+  let summary = "split an MMA partition into multiple partitions by async task id";
+
+  let description = [{
+    The `tritongpu-split-mma-partitions` pass refines an existing warp
+    specialization partitioning by splitting a single MMA partition into
+    multiple partitions according to async task ids. This is intended for the
+    HCU warp specialization pipeline, where data partitioning has already
+    assigned distinct async task ids to different MMA consumer groups. The
+    resulting additional partitions allow the loop-partitioning pass to
+    materialize separate warp-group branches.
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::gpu::TritonGPUDialect",
+    "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
 def TritonGPUF32DotTC : Pass<"tritongpu-F32DotTC", "mlir::ModuleOp"> {
   let summary = "3xTF32 trick";
 
@@ -333,6 +496,17 @@ def TritonGPUReduceDataDuplication: Pass<"tritongpu-reduce-data-duplication", "m
                 "into convert[distributed -> shared -> dotOperand]";
 
   let description = "Decomposing conversions this way makes it possible to use CSE and reuse #shared tensors";
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+}
+
+def TritonGPUConvertLayoutThroughShared: Pass<"tritongpu-convert-layout-through-shared", "mlir::ModuleOp"> {
+  let summary = "Force convert[distributed -> dotOperand] through shared memory (LocalAlloc + LocalLoad)";
+
+  let description = "Like tritongpu-reduce-data-duplication but applies the shared-memory decomposition for "
+                    "every matching ConvertLayoutOp without consulting cvtNeedsSharedMemory. Used ahead of "
+                    "warp specialization partitioning.";
 
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
                            "mlir::triton::TritonDialect"];

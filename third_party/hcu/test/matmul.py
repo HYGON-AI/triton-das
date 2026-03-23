@@ -1,37 +1,12 @@
-
 import torch
 import pytest
 import triton
 import triton.language as tl
+import os
+import json
+import argparse
+os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
 
-def get_hip_autotune_config():
-    return [
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 8},
-            num_warps=4, num_stages=2),
-    ]
-
-# `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator, which consumes:
-#   - A list of `triton.Config` objects that define different configurations of
-#       meta-parameters (e.g., `BLOCK_SIZE_M`) and compilation options (e.g., `num_warps`) to try
-#   - An auto-tuning *key* whose change in values will trigger evaluation of all the
-#       provided configs
-@triton.autotune(
-    configs=get_hip_autotune_config(),
-    key=['M', 'N', 'K'],
-)
 @triton.jit
 def matmul_kernel(
         # Pointers to matrices
@@ -52,6 +27,12 @@ def matmul_kernel(
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
@@ -66,6 +47,9 @@ def matmul_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
+    tl.assume(pid_m > 0)
+    tl.assume(pid_n > 0)
+
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
     # We will advance this pointer as we move in the K direction
@@ -76,8 +60,10 @@ def matmul_kernel(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    offs_a = offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
+    offs_b = offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+    a_ptrs = a_ptr + offs_a
+    b_ptrs = b_ptr + offs_b
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -85,11 +71,13 @@ def matmul_kernel(
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), warp_specialize=True):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
         # We accumulate along the K dimension.
         accumulator = tl.dot(a, b, accumulator)
         # Advance the ptrs to the next K block.
@@ -108,6 +96,7 @@ def matmul_kernel(
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
+    #tl.store(c_ptrs, c)
 
 
 # We can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `matmul_kernel`.
@@ -115,7 +104,7 @@ def matmul_kernel(
 def leaky_relu(x):
     return tl.where(x >= 0, x, 0.01 * x)
 
-def matmul(a, b, activation=""):
+def matmul(a, b, activation="", json_config_path=None, compile_only=False):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
@@ -123,60 +112,90 @@ def matmul(a, b, activation=""):
     K, N = b.shape
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+    
+    # Load JSON config if provided
+    config = {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "wasp_enabled": True,
+        "wasp_num_load_warps": 4,
+        "wasp_num_mma_warps": 4,
+        "wdra_enabled": False,
+        "wdra_num_load_regs": 100,
+        "wdra_num_mma_regs_main": 100,
+        "wdra_num_mma_regs_tail": 100,
+    }
+    if json_config_path is not None:
+        with open(json_config_path, 'r') as f:
+            config.update(json.load(f))
+
+    #'''
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
-    matmul_kernel[grid](
+    if compile_only:
+        matmul_kernel.warmup(
+            a, b, c,  #
+            M, N, K,  #
+            a.stride(0), a.stride(1),  #
+            b.stride(0), b.stride(1),  #
+            c.stride(0), c.stride(1),  #
+            ACTIVATION=activation,
+            grid=grid,
+            **config
+        )
+    else:
+        matmul_kernel[grid](
+            a, b, c,  #
+            M, N, K,  #
+            a.stride(0), a.stride(1),  #
+            b.stride(0), b.stride(1),  #
+            c.stride(0), c.stride(1),  #
+            ACTIVATION=activation,
+            **config
+        )
+    #'''
+
+    '''
+    grid = lambda META: (min(
+                    48,
+                    triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+                ), )
+    kernel_gemm_persistent[grid](
         a, b, c,  #
         M, N, K,  #
         a.stride(0), a.stride(1),  #
         b.stride(0), b.stride(1),  #
         c.stride(0), c.stride(1),  #
-        ACTIVATION=activation  #
+        ACTIVATION=activation,
+        NUM_SMS=48,
+        **config
     )
+    '''
     return c
-
 
 # %%
 # Unit Test
 # ---------
 #
-@pytest.mark.parametrize('M, N, K', [
-    (128, 128, 64),
-    (512, 512, 64),
-])
-def test_matmul(M, N, K):
+def test_matmul(M, N, K, json_config_path=None, compile_only=False):
     torch.manual_seed(0)
-    a = torch.randn((M, N), device='cuda', dtype=torch.float16)
-    b = torch.randn((M, N), device='cuda', dtype=torch.float16)
-    triton_output = matmul(a, b)
+    a = torch.randn((M, K), device='cpu', dtype=torch.float16)
+    b = torch.randn((N, K), device='cpu', dtype=torch.float16).transpose(1, 0)
+    triton_output = matmul(a.to("cuda"), b.to("cuda"), json_config_path=json_config_path, compile_only=compile_only).to("cpu")
+    if compile_only:
+        return
     torch_output = torch.matmul(a, b)
     rtol = 1e-2
     torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=rtol)
 
-# Benchmark
-configs = []
-configs.append(
-    triton.testing.Benchmark(
-        x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-        x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
-        line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
-        line_vals=["triton"],
-        line_names=["Triton"],
-        args={},
-        styles=[("green", "-")],
-        ylabel="TFLOPS",  # Label name for the y-axis
-        plot_name="matmul-performance-fp16",
-    ))
-
-@triton.testing.perf_report(configs)
-def benchmark(M, N, K, provider):
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-    quantiles = [0.5, 0.2, 0.8]
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
-    return perf(ms), perf(max_ms), perf(min_ms)
-
 if __name__ == "__main__":
-    benchmark.run(show_plots=True, print_data=True)
+    parser = argparse.ArgumentParser(description='Test matmul with optional JSON config')
+    parser.add_argument('--json-config', type=str, default=None, help='Path to JSON config file')
+    parser.add_argument('--compile-only', action='store_true', default=False, help='Only compile the kernel')
+    args = parser.parse_args()
+    
+    for (M, N, K) in [(128, 128, 4096)]:
+        test_matmul(M, N, K, json_config_path=args.json_config, compile_only=args.compile_only)
+    print("Test done!")

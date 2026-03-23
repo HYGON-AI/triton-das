@@ -29,6 +29,7 @@ add_triton_library(TritonAMDGPUToLLVM
     DotOpToLLVM/MMAC.cpp
     ElementwiseOpHCUToLLVM.cpp
     MlsOpToLLVM.cpp
+    ConvertWarpSpecializeToLLVM.cpp
 
     DEPENDS
     TritonAMDGPUConversionPassIncGen
