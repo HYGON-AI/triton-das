@@ -170,8 +170,8 @@ class HIPBackend(BaseBackend):
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
 
-        if args["wasp_enabled"]:
-            if args["wdra_enabled"]:
+        if args.get("wasp_enabled"):
+            if args.get("wdra_enabled"):
                 assert args["wasp_num_load_warps"] == 4
                 assert args["wasp_num_mma_warps"] in [4, 8]
             else:
@@ -179,7 +179,7 @@ class HIPBackend(BaseBackend):
                 args.pop("wdra_num_mma_regs_main", None)
                 args.pop("wdra_num_mma_regs_tail", None)
         else:
-            assert not args["wdra_enabled"], "wdra_enabled is only supported when wasp_enabled is True"
+            assert not args.get("wdra_enabled"), "wdra_enabled is only supported when wasp_enabled is True"
             args.pop("wasp_num_load_warps", None)
             args.pop("wasp_num_mma_warps", None)
             args.pop("wdra_num_load_regs", None)
