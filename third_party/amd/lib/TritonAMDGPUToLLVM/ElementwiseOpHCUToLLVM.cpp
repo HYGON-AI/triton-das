@@ -1186,8 +1186,15 @@ ConverterT Fp8E5M2_to_Fp16(AMD::ISAFamily isaFamily, bool capFP8FP16) {
 
 static Value convertBf16ToFp32(Location loc,
                                ConversionPatternRewriter &rewriter,
-                               const Value &v) {
+                               const Value &v, bool capBF16F32) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
+  if (capBF16F32) {
+    auto as_int16 = b.bitcast(v, i16_ty);
+    auto as_int32 = b.zext(i32_ty, as_int16);
+    return rewriter.create<ROCDL::HCUCvtF32Bf16Op>(
+        loc, f32_ty, as_int32, b.false_val(), b.i32_val(0), b.false_val());
+  }
+
   auto as_int16 = b.bitcast(v, i16_ty);
   auto as_int32 = b.zext(i32_ty, as_int16);
   auto shifted = b.shl(i32_ty, as_int32, b.i32_val(16));
@@ -1196,8 +1203,17 @@ static Value convertBf16ToFp32(Location loc,
 
 static Value convertFp32ToBf16(Location loc,
                                ConversionPatternRewriter &rewriter,
-                               const Value &v, const RoundingMode rounding) {
+                               const Value &v, const RoundingMode rounding,
+                               bool capBF16F32) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
+  // TODO: switch back to the inline-asm path after the backend can insert
+  // hazard snoops automatically for this conversion sequence.
+  if (capBF16F32 && rounding == RoundingMode::RTNE) {
+    auto val = rewriter.create<ROCDL::HCUCvtBf16F32Op>(
+        loc, i16_ty, v, b.false_val(), b.false_val());
+    return b.bitcast(val, bf16_ty);
+  }
+
   auto as_int32 = b.bitcast(v, i32_ty);
   if (rounding == RoundingMode::RTZ) {
     auto shifted = b.lshr(i32_ty, as_int32, b.i32_val(16));
@@ -1497,8 +1513,8 @@ Fp8E4M3FNUZ_to_Bf16(Location loc, ConversionPatternRewriter &rewriter,
                     const SmallVector<Value> &v) {
   assert(v.size() == 2);
   auto ret = cvtFp8ToFp32(loc, rewriter, v[0], v[1], "fp8");
-  ret[0] = convertFp32ToBf16(loc, rewriter, ret[0], RoundingMode::RTZ);
-  ret[1] = convertFp32ToBf16(loc, rewriter, ret[1], RoundingMode::RTZ);
+  ret[0] = convertFp32ToBf16(loc, rewriter, ret[0], RoundingMode::RTZ, false);
+  ret[1] = convertFp32ToBf16(loc, rewriter, ret[1], RoundingMode::RTZ, false);
   return ret;
 }
 
@@ -1507,8 +1523,8 @@ static SmallVector<Value>
 Bf16_to_Fp8E4M3FNUZ(Location loc, ConversionPatternRewriter &rewriter,
                     const SmallVector<Value> &v) {
   assert(v.size() == 2);
-  auto v0 = convertBf16ToFp32(loc, rewriter, v[0]);
-  auto v1 = convertBf16ToFp32(loc, rewriter, v[1]);
+  auto v0 = convertBf16ToFp32(loc, rewriter, v[0], false);
+  auto v1 = convertBf16ToFp32(loc, rewriter, v[1], false);
   return cvtFp32ToFp8(loc, rewriter, v0, v1, "fp8");
 }
 
@@ -1518,8 +1534,8 @@ Fp8E5M2FNUZ_to_Bf16(Location loc, ConversionPatternRewriter &rewriter,
                     const SmallVector<Value> &v) {
   assert(v.size() == 2);
   auto ret = cvtFp8ToFp32(loc, rewriter, v[0], v[1], "bf8");
-  ret[0] = convertFp32ToBf16(loc, rewriter, ret[0], RoundingMode::RTZ);
-  ret[1] = convertFp32ToBf16(loc, rewriter, ret[1], RoundingMode::RTZ);
+  ret[0] = convertFp32ToBf16(loc, rewriter, ret[0], RoundingMode::RTZ, false);
+  ret[1] = convertFp32ToBf16(loc, rewriter, ret[1], RoundingMode::RTZ, false);
   return ret;
 }
 
@@ -1528,8 +1544,8 @@ static SmallVector<Value>
 Bf16_to_Fp8E5M2FNUZ(Location loc, ConversionPatternRewriter &rewriter,
                     const SmallVector<Value> &v) {
   assert(v.size() == 2);
-  auto v0 = convertBf16ToFp32(loc, rewriter, v[0]);
-  auto v1 = convertBf16ToFp32(loc, rewriter, v[1]);
+  auto v0 = convertBf16ToFp32(loc, rewriter, v[0], false);
+  auto v1 = convertBf16ToFp32(loc, rewriter, v[1], false);
   return cvtFp32ToFp8(loc, rewriter, v0, v1, "bf8");
 }
 
@@ -1667,24 +1683,46 @@ struct ElementwiseOpConversion
   }
 };
 
-// Attempts to use vectorized conversions via inline PTX when possible.
-struct FpToFpOpConversion
-    : public ElementwiseOpConversionBase<triton::FpToFpOp, FpToFpOpConversion> {
-  using ElementwiseOpConversionBase<
-      triton::FpToFpOp, FpToFpOpConversion>::ElementwiseOpConversionBase;
+template <typename SourceOp, typename Derived>
+struct ElementwiseOpConversionWithTargetInfoBase
+    : public ElementwiseOpConversionBase<SourceOp, Derived> {
+  using Base = ElementwiseOpConversionBase<SourceOp, Derived>;
 
-  explicit FpToFpOpConversion(LLVMTypeConverter &typeConverter,
-                              ModuleAxisInfoAnalysis &axisAnalysisPass,
-                              AMD::ISAFamily isaFamily,
-                              llvm::AMDGPU::GPUKind gpuKind,
-                              PatternBenefit benefit = patternBenefitDefault)
-      : ElementwiseOpConversionBase(typeConverter, axisAnalysisPass, benefit),
-        isaFamily(isaFamily), gpuKind(gpuKind) {
-    capFP8F32  = gpuKind == llvm::AMDGPU::GPUKind::GK_GFX938 ||
+  ElementwiseOpConversionWithTargetInfoBase(
+      LLVMTypeConverter &typeConverter,
+      ModuleAxisInfoAnalysis &axisAnalysisPass, AMD::ISAFamily isaFamily,
+      llvm::AMDGPU::GPUKind gpuKind,
+      PatternBenefit benefit = patternBenefitDefault)
+      : Base(typeConverter, axisAnalysisPass, benefit), isaFamily(isaFamily),
+        gpuKind(gpuKind) {
+    capFP8F32 = gpuKind == llvm::AMDGPU::GPUKind::GK_GFX938 ||
+                gpuKind == llvm::AMDGPU::GPUKind::GK_GFX92A ||
+                gpuKind == llvm::AMDGPU::GPUKind::GK_GFX946;
+    capFP8FP16 = false;
+    capBF16F32 = gpuKind == llvm::AMDGPU::GPUKind::GK_GFX938 ||
                  gpuKind == llvm::AMDGPU::GPUKind::GK_GFX92A ||
                  gpuKind == llvm::AMDGPU::GPUKind::GK_GFX946;
-    capFP8FP16 = false;
   }
+
+protected:
+  AMD::ISAFamily isaFamily;
+  llvm::AMDGPU::GPUKind gpuKind;
+
+  /* HCU only support fp8|bf8 <-> f32,
+   * not support fp8|bf8 <-> fp16|bf16 which is supported by CDNA4 */
+  bool capFP8F32;
+  bool capFP8FP16;
+  bool capBF16F32;
+};
+
+// Attempts to use vectorized conversions via inline PTX when possible.
+struct FpToFpOpConversion
+    : public ElementwiseOpConversionWithTargetInfoBase<triton::FpToFpOp,
+                                                       FpToFpOpConversion> {
+  using Base = ElementwiseOpConversionWithTargetInfoBase<triton::FpToFpOp,
+                                                         FpToFpOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   static Value convertFp16ToFp32(Location loc,
                                  ConversionPatternRewriter &rewriter,
@@ -1790,8 +1828,9 @@ struct FpToFpOpConversion
       SmallVector<Value> outVals;
       outVals.reserve(operands[0].size());
       for (Value v : operands[0]) {
-        outVals.push_back(
-            convertFp32ToBf16(loc, rewriter, v, roundingMode.value()));
+        outVals.push_back(convertFp32ToBf16(loc, rewriter, v,
+                                            roundingMode.value(),
+                                            capBF16F32));
       }
       return outVals;
     }
@@ -1864,7 +1903,8 @@ struct FpToFpOpConversion
         if (isSrcFP16)
           outVals.push_back(convertFp16ToFp32(loc, rewriter, v));
         else
-          outVals.push_back(convertBf16ToFp32(loc, rewriter, v));
+          outVals.push_back(convertBf16ToFp32(loc, rewriter, v,
+                                              capBF16F32));
       }
       return outVals;
     }
@@ -1874,7 +1914,7 @@ struct FpToFpOpConversion
                           roundingMode.value_or(RoundingMode::RTNE));
     if (hcuUseF32IntermediateSrc)
       for (Value &v : inVals)
-        v = isSrcBF16 ? convertBf16ToFp32(loc, rewriter, v)
+        v = isSrcBF16 ? convertBf16ToFp32(loc, rewriter, v, capBF16F32)
                       : convertFp16ToFp32(loc, rewriter, v);
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     inVals.resize(numElements, b.undef(typeConverter->convertType(srcType)));
@@ -1905,15 +1945,6 @@ struct FpToFpOpConversion
     // Pack values
     return outVals;
   }
-
-private:
-  AMD::ISAFamily isaFamily;
-  llvm::AMDGPU::GPUKind gpuKind;
-
-  /* HCU only support fp8|bf8 <-> f32,
-   * not support fp8|bf8 <-> fp16|bf16 which is supported by CDNA4 */
-  bool capFP8F32;
-  bool capFP8FP16;
 };
 
 // HCU code end
@@ -1924,16 +1955,23 @@ private:
 template <typename OP>
 Value EmitDualBF16ElementwiseOp(Location loc,
                                 ConversionPatternRewriter &rewriter,
-                                MultipleOperandsRange operands) {
-  auto v0 = convertBf16ToFp32(loc, rewriter, operands[0][0]);
-  auto v1 = convertBf16ToFp32(loc, rewriter, operands[0][1]);
+                                MultipleOperandsRange operands,
+                                bool capBF16F32) {
+  auto v0 = convertBf16ToFp32(loc, rewriter, operands[0][0], capBF16F32);
+  auto v1 = convertBf16ToFp32(loc, rewriter, operands[0][1], capBF16F32);
   auto result = rewriter.create<OP>(loc, f32_ty, v0, v1);
-  return convertFp32ToBf16(loc, rewriter, result, RoundingMode::RTNE);
+  return convertFp32ToBf16(loc, rewriter, result, RoundingMode::RTNE,
+                           capBF16F32);
 }
 
 struct FDivOpConversion
-    : ElementwiseOpConversionBase<arith::DivFOp, FDivOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::DivFOp,
+                                                FDivOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::DivFOp,
+                                                FDivOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::DivFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -1946,8 +1984,13 @@ struct FDivOpConversion
 };
 
 struct FMulOpConversion
-    : ElementwiseOpConversionBase<arith::MulFOp, FMulOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::MulFOp,
+                                                FMulOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::MulFOp,
+                                                FMulOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::MulFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -1956,7 +1999,8 @@ struct FMulOpConversion
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {EmitDualBF16ElementwiseOp<LLVM::FMulOp>(loc, rewriter, operands)};
+      return {EmitDualBF16ElementwiseOp<LLVM::FMulOp>(loc, rewriter, operands,
+                                                      capBF16F32)};
     } else {
       return {rewriter.create<LLVM::FMulOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
@@ -1965,8 +2009,13 @@ struct FMulOpConversion
 };
 
 struct FAddOpConversion
-    : ElementwiseOpConversionBase<arith::AddFOp, FAddOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::AddFOp,
+                                                FAddOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::AddFOp,
+                                                FAddOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::AddFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -1975,7 +2024,8 @@ struct FAddOpConversion
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {EmitDualBF16ElementwiseOp<LLVM::FAddOp>(loc, rewriter, operands)};
+      return {EmitDualBF16ElementwiseOp<LLVM::FAddOp>(loc, rewriter, operands,
+                                                      capBF16F32)};
     } else {
       return {rewriter.create<LLVM::FAddOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
@@ -1984,8 +2034,13 @@ struct FAddOpConversion
 };
 
 struct FSubOpConversion
-    : ElementwiseOpConversionBase<arith::SubFOp, FSubOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::SubFOp,
+                                                FSubOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::SubFOp,
+                                                FSubOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::SubFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -1994,7 +2049,8 @@ struct FSubOpConversion
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {EmitDualBF16ElementwiseOp<LLVM::FSubOp>(loc, rewriter, operands)};
+      return {EmitDualBF16ElementwiseOp<LLVM::FSubOp>(loc, rewriter, operands,
+                                                      capBF16F32)};
     } else {
       return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
@@ -2016,8 +2072,13 @@ static SmallVector<Value> S8_to_Bf16(Location loc,
 }
 
 struct SIToFPOpConversion
-    : ElementwiseOpConversionBase<arith::SIToFPOp, SIToFPOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::SIToFPOp,
+                                                SIToFPOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::SIToFPOp,
+                                                SIToFPOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::SIToFPOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -2033,7 +2094,8 @@ struct SIToFPOpConversion
       return outVals;
     } else if (outElemTy.isBF16()) {
       auto value = rewriter.create<LLVM::SIToFPOp>(loc, f32_ty, operands[0][0]);
-      return {convertFp32ToBf16(loc, rewriter, value, RoundingMode::RTNE)};
+      return {convertFp32ToBf16(loc, rewriter, value, RoundingMode::RTNE,
+                                capBF16F32)};
     } else {
       return {rewriter.create<LLVM::SIToFPOp>(loc, elemTy, operands[0][0])};
     }
@@ -2041,8 +2103,13 @@ struct SIToFPOpConversion
 };
 
 struct FPToSIOpConversion
-    : ElementwiseOpConversionBase<arith::FPToSIOp, FPToSIOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::FPToSIOp,
+                                                FPToSIOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::FPToSIOp,
+                                                FPToSIOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::FPToSIOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -2050,7 +2117,8 @@ struct FPToSIOpConversion
                                    Location loc) const {
     auto inElemTy = getElementType(op.getIn());
     if (inElemTy.isBF16()) {
-      auto value = convertBf16ToFp32(loc, rewriter, operands[0][0]);
+      auto value = convertBf16ToFp32(loc, rewriter, operands[0][0],
+                                     capBF16F32);
       return {rewriter.create<LLVM::FPToSIOp>(loc, elemTy, value)};
     } else {
       return {rewriter.create<LLVM::FPToSIOp>(loc, elemTy, operands[0][0])};
@@ -2059,8 +2127,13 @@ struct FPToSIOpConversion
 };
 
 struct ExtFOpConversion
-    : ElementwiseOpConversionBase<arith::ExtFOp, ExtFOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+    : ElementwiseOpConversionWithTargetInfoBase<arith::ExtFOp,
+                                                ExtFOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::ExtFOp,
+                                                ExtFOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::ExtFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -2070,7 +2143,7 @@ struct ExtFOpConversion
     if (inElemTy.isBF16()) {
       auto outElemTy = getElementType(op.getOut());
       assert(outElemTy.isF32() && "unsupported conversion");
-      return {convertBf16ToFp32(loc, rewriter, operands[0][0])};
+      return {convertBf16ToFp32(loc, rewriter, operands[0][0], capBF16F32)};
     } else {
       return {rewriter.create<LLVM::FPExtOp>(loc, elemTy, operands[0][0])};
     }
@@ -2078,15 +2151,13 @@ struct ExtFOpConversion
 };
 
 struct TruncFOpConversion
-    : ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion> {
-  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
-
-  explicit TruncFOpConversion(LLVMTypeConverter &typeConverter,
-                              ModuleAxisInfoAnalysis &axisAnalysisPass,
-                              AMD::ISAFamily isaFamily,
-                              PatternBenefit benefit = patternBenefitDefault)
-      : ElementwiseOpConversionBase(typeConverter, axisAnalysisPass, benefit),
-        isaFamily(isaFamily) {}
+    : ElementwiseOpConversionWithTargetInfoBase<arith::TruncFOp,
+                                                TruncFOpConversion> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<arith::TruncFOp,
+                                                TruncFOpConversion>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
 
   SmallVector<Value> createDestOps(arith::TruncFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -2104,15 +2175,12 @@ struct TruncFOpConversion
     if (outElemTy.isBF16()) {
       auto inElemTy = getElementType(op.getIn());
       assert(inElemTy.isF32() && "unsupported conversion");
-      return {
-          convertFp32ToBf16(loc, rewriter, operands[0][0], RoundingMode::RTNE)};
+      return {convertFp32ToBf16(loc, rewriter, operands[0][0],
+                                RoundingMode::RTNE, capBF16F32)};
     } else {
       return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
     }
   }
-
-private:
-  AMD::ISAFamily isaFamily;
 };
 
 struct ExpOpConversionApprox
@@ -2386,16 +2454,31 @@ void populateElementwiseOpToLLVMPatterns(
   patterns.add<ElementwiseOpConversion<triton::PreciseDivFOp, LLVM::FDivOp>>(
       typeConverter, axisInfoAnalysis, benefit);
 
-  patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<FSubOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<FAddOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<FMulOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis,
+                                 targetInfo.getISAFamily(),
+                                 targetInfo.getGPUKind(), benefit);
+  patterns.add<FSubOpConversion>(typeConverter, axisInfoAnalysis,
+                                 targetInfo.getISAFamily(),
+                                 targetInfo.getGPUKind(), benefit);
+  patterns.add<FAddOpConversion>(typeConverter, axisInfoAnalysis,
+                                 targetInfo.getISAFamily(),
+                                 targetInfo.getGPUKind(), benefit);
+  patterns.add<FMulOpConversion>(typeConverter, axisInfoAnalysis,
+                                 targetInfo.getISAFamily(),
+                                 targetInfo.getGPUKind(), benefit);
 
-  patterns.add<ExtFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<ExtFOpConversion>(typeConverter, axisInfoAnalysis,
+                                 targetInfo.getISAFamily(),
+                                 targetInfo.getGPUKind(), benefit);
   patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis,
-                                   targetInfo.getISAFamily(), benefit);
-  patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+                                   targetInfo.getISAFamily(),
+                                   targetInfo.getGPUKind(), benefit);
+  patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis,
+                                   targetInfo.getISAFamily(),
+                                   targetInfo.getGPUKind(), benefit);
+  patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis,
+                                   targetInfo.getISAFamily(),
+                                   targetInfo.getGPUKind(), benefit);
   patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis,
                                    targetInfo.getISAFamily(),
                                    targetInfo.getGPUKind(), benefit);
