@@ -246,8 +246,19 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def path_to_rocm():
-        rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
-        return rocm_path
+        rocm_path = os.getenv("ROCM_PATH")
+        if rocm_path is not None:
+            return rocm_path
+
+        default_rocm_path = "/opt/rocm"
+        if Path(default_rocm_path).is_dir():
+            return default_rocm_path
+
+        fallback_rocm_path = "/opt/dtk"
+        if Path(fallback_rocm_path).is_dir():
+            return fallback_rocm_path
+
+        return default_rocm_path
 
     @staticmethod
     def path_to_rocm_lld():
