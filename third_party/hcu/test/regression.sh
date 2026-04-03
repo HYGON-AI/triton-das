@@ -2,19 +2,32 @@
 set -e
 
 CUR_PATH="$( cd $( dirname ${BASH_SOURCE} );pwd )"
-export SRC_HOME=${CUR_PATH}/../../../
+
+# CUR_PATH为脚本所在路径，进一步获取triton项目根路径
+export SRC_HOME=$(realpath "${CUR_PATH}/../../../")
+
+hcu_file_path=${SRC_HOME}/third_party/hcu/test
+hcu_test_cmds=(
+  "pytest ${hcu_file_path}/matmul.py"
+  "pytest ${hcu_file_path}/rmsnorm.py"
+  "python ${hcu_file_path}/vector-add.py --no_benchmark"
+  "python ${hcu_file_path}/fused-softmax.py --no_benchmark"
+  "python ${hcu_file_path}/matrix-multiplication.py --no_benchmark"
+  "python ${hcu_file_path}/low-memory-dropout.py"
+  "python ${hcu_file_path}/layer-norm.py --no_benchmark"
+  # "pytest ${hcu_file_path}/fused-attention.py"  need double check
+  "python ${hcu_file_path}/extern-functions.py"
+  "python ${hcu_file_path}/grouped-gemm.py --no_benchmark"
+  "python ${hcu_file_path}/persistent-matmul.py --no_benchmark"
+)
 
 function run_pytest() {
-  test_files=(
-    "matmul.py"
-    "rmsnorm.py"
-  )
-  file_path=${SRC_HOME}/third_party/hcu/test
-  for f in ${test_files[@]}; do
-    pytest_file=${file_path}/${f}
-    pytest ${pytest_file}
+  for cmd in "${hcu_test_cmds[@]}"; do
+    echo "$cmd .........."
+    eval "$cmd"
     ret=$?
     if [ $ret -ne 0 ]; then
+      echo "test hcu triton case ${cmd} failed!!"
       return $ret
     fi
   done
@@ -25,4 +38,3 @@ function run_pytest() {
 
 # pytest
 run_pytest
-# TODO: benchmark
