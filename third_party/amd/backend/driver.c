@@ -18,7 +18,6 @@ static const char *hipLibSearchPaths[] = {"/*py_libhip_search_path*/"};
 // |FOR_EACH_STR_FN| is a macro to process APIs that return const char *.
 #define HIP_SYMBOL_LIST(FOR_EACH_ERR_FN, FOR_EACH_STR_FN)                      \
   FOR_EACH_STR_FN(hipGetErrorString, hipError_t hipError)                      \
-  FOR_EACH_ERR_FN(hipGetDeviceProperties, hipDeviceProp_t *prop, int deviceId) \
   FOR_EACH_ERR_FN(hipModuleLoadDataEx, hipModule_t *module, const void *image, \
                   unsigned int numOptions, hipJitOption *options,              \
                   void **optionValues)                                         \
@@ -66,6 +65,10 @@ struct HIPSymbolTable {
 };
 
 static struct HIPSymbolTable hipSymbolTable;
+// HCU: compatiable with DTK, hipDeviceProp_t -> hipDeviceProp_tR0600, hipGetDevicePropertiesR0600 for ROCM
+//                                            -> hipDeviceProp_t_v2,   hipGetDeviceProperties_v2   for DTK
+static hipError_t (*hipGetDevicePropertiesCompat)(hipDeviceProp_t *prop,
+                                                  int deviceId);
 
 static int checkDriverVersion(void *lib) {
   int hipVersion = -1;
@@ -163,6 +166,23 @@ bool initSymbolTable() {
 
   HIP_SYMBOL_LIST(QUERY_EACH_FN, QUERY_EACH_FN)
 
+  status = hipGetProcAddress("hipGetDevicePropertiesR0600",
+                             (void **)&hipGetDevicePropertiesCompat, hipVersion,
+                             hipFlags, &symbolStatus);
+  if (status != hipSuccess) {
+    status = hipGetProcAddress("hipGetDeviceProperties_v2",
+                               (void **)&hipGetDevicePropertiesCompat,
+                               hipVersion, hipFlags, &symbolStatus);
+  }
+  if (status != hipSuccess) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "cannot get address for any supported HIP 6.x device "
+                    "properties symbol from "
+                    "libamdhip64.so");
+    dlclose(lib);
+    return false;
+  }
+
   return true;
 }
 
@@ -196,8 +216,9 @@ static PyObject *getDeviceProperties(PyObject *self, PyObject *args) {
   if (!PyArg_ParseTuple(args, "i", &device_id))
     return NULL;
 
-  hipDeviceProp_t props;
-  HIP_CHECK(hipSymbolTable.hipGetDeviceProperties(&props, device_id));
+  hipDeviceProp_t props = {0};
+  HIP_CHECK(hipGetDevicePropertiesCompat(&props, device_id));
+  props.gcnArchName[sizeof(props.gcnArchName) - 1] = '\0';
 
   // create a struct to hold device properties
   return Py_BuildValue(
