@@ -15,6 +15,7 @@ import re
 import functools
 import os
 import time
+import copy
 
 # - ^\s*tt\.func\s+ : match the start of the string, any leading whitespace, the keyword func,
 #    and any following whitespace
@@ -121,7 +122,11 @@ class IRSource:
         if self.ext == "ttgir":
             num_warps = self.module.get_int_attr("ttg.num-warps")
             assert num_warps is not None, "Unable to parse ttg.num-warps attribute"
-            return {'num_warps': num_warps}
+            options = {'num_warps': num_warps}
+            num_ctas = self.module.get_int_attr("ttg.num-ctas")
+            if num_ctas is not None:
+                options['num_ctas'] = num_ctas
+            return options
         return dict()
 
 
@@ -346,17 +351,6 @@ def compile(src, target=None, options=None, _env_vars=None):
     metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
                                                              binary=False)
     fn_cache_manager.put_group(metadata_filename, metadata_group)
-    # Compilation completed, disabling multithreading in context.
-    # This is needed to safely finalize threads pool inside context: if current process forks before
-    # python GC deletes context object, thread pool in child process will be invalid, which could
-    # lead to child crash or hang.
-    #
-    # However disabling multithreading causes the code to hang if the ASAN pass is enabled
-    # this is likely due to the llvm-symbolizer forking a process
-    # TODO: Reconcile the difference here between the ASAN and non-ASAN path with enabling
-    # multithreading in the MLIR context
-    if not knobs.compilation.enable_asan:
-        context.disable_multithreading()
 
     # notify any listener
     if compilation_listener:
@@ -404,7 +398,7 @@ class AsmDict(dict):
 
 
 def _raise_error(err, *args, **kwargs):
-    raise err
+    raise copy.deepcopy(err)
 
 
 class CompiledKernel:
@@ -413,7 +407,6 @@ class CompiledKernel:
         from collections import namedtuple
         metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
         metadata = json.loads(metadata_path.read_text())
-        metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
         # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
         target = metadata['target']
         metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
@@ -446,7 +439,13 @@ class CompiledKernel:
             return
 
         def raise_(err):
-            self._run = functools.partial(_raise_error, err)
+            # clone the exception object so that the one saved in the closure
+            # of the partial function below doesn't get assigned a stack trace
+            # after the subsequent raise. otherwise, the CompiledKernel instance
+            # saved in the (global) kernel cache will keep references to all the
+            # locals in the traceback via the exception instance in the closure.
+            cloned_err = copy.deepcopy(err)
+            self._run = functools.partial(_raise_error, cloned_err)
             raise err
 
         device = driver.active.get_current_device()

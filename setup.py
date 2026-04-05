@@ -217,14 +217,10 @@ def get_llvm_package_info():
                 # Ubuntu 22 LTS (v2.35)
                 # Ubuntu 20 LTS (v2.31)
                 system_suffix = "ubuntu-x64"
-            elif vglibc > 217:
+            else:
                 # Manylinux_2.28 (v2.28)
                 # AlmaLinux 8 (v2.28)
                 system_suffix = "almalinux-x64"
-            else:
-                # Manylinux_2014 (v2.17)
-                # CentOS 7 (v2.17)
-                system_suffix = "centos-x64"
         else:
             print(
                 f"LLVM pre-compiled image is not available for {system}-{arch}. Proceeding with user-configured LLVM from source build."
@@ -243,7 +239,7 @@ def get_llvm_package_info():
     name = f"llvm-{rev}-{system_suffix}"
     # Create a stable symlink that doesn't include revision
     sym_name = f"llvm-{system_suffix}"
-    # url = f"https://oaitriton.blob.core.windows.net/public/llvm-builds/{name}.tar.gz"
+    #url = f"https://oaitriton.blob.core.windows.net/public/llvm-builds/{name}.tar.gz"
     url = f"http://10.65.42.71/builds/ai_compiler/llvm4triton/{name}.tar.gz"
     return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH", sym_name=sym_name)
 
@@ -310,7 +306,14 @@ def get_thirdparty_packages(packages: list):
                         file.extractall(path=package_root_dir)
                 else:
                     with tarfile.open(fileobj=response, mode="r|*") as file:
-                        file.extractall(path=package_root_dir)
+                        # Use extractall without filter for Python version < 3.12 compatibility
+                        if hasattr(tarfile, 'data_filter'):
+                            file.extractall(path=package_root_dir, filter="data")
+                        else:
+                            file.extractall(path=package_root_dir)
+            # write version url to package_dir
+            with open(os.path.join(package_dir, "version.txt"), "w") as f:
+                f.write(p.url)
         if p.include_flag:
             thirdparty_cmake_args.append(f"-D{p.include_flag}={package_dir}/include")
         if p.lib_flag:
@@ -349,8 +352,12 @@ def download_and_copy(name, src_func, dst_path, variable, version, url_func):
         download = download or curr_version.group(1) != version
     if download:
         print(f'downloading and extracting {url} ...')
-        file = tarfile.open(fileobj=open_url(url), mode="r|*")
-        file.extractall(path=tmp_path)
+        with open_url(url) as url_file, tarfile.open(fileobj=url_file, mode="r|*") as tar_file:
+            # Use extractall without filter for Python version < 3.12 compatibility
+            if hasattr(tarfile, 'data_filter'):
+                tar_file.extractall(path=tmp_path, filter="data")
+            else:
+                tar_file.extractall(path=tmp_path)
     os.makedirs(os.path.split(dst_path)[0], exist_ok=True)
     print(f'copy {src_path} to {dst_path} ...')
     if os.path.isdir(src_path):
@@ -541,6 +548,17 @@ def download_and_copy_dependencies():
         url_func=lambda system, arch, version:
         f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
     )
+
+    # We download a separate ptxas for blackwell, since there are some bugs when using it for hopper
+    download_and_copy(
+        name="nvcc",
+        src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas{exe_extension}",
+        dst_path="bin/ptxas-blackwell",
+        variable="TRITON_PTXAS_BLACKWELL_PATH",
+        version=NVIDIA_TOOLCHAIN_VERSION["ptxas-blackwell"],
+        url_func=lambda system, arch, version:
+        f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
+    )
     download_and_copy(
         name="cuobjdump",
         src_func=lambda system, arch, version:
@@ -561,14 +579,15 @@ def download_and_copy_dependencies():
         url_func=lambda system, arch, version:
         f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvdisasm/{system}-{arch}/cuda_nvdisasm-{system}-{arch}-{version}-archive.tar.xz",
     )
+    crt = "crt" if int(NVIDIA_TOOLCHAIN_VERSION["cudacrt"].split(".")[0]) >= 13 else "nvcc"
     download_and_copy(
         name="nvcc",
-        src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/include",
+        src_func=lambda system, arch, version: f"cuda_{crt}-{system}-{arch}-{version}-archive/include",
         dst_path="include",
         variable="TRITON_CUDACRT_PATH",
         version=NVIDIA_TOOLCHAIN_VERSION["cudacrt"],
         url_func=lambda system, arch, version:
-        f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
+        f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_{crt}/{system}-{arch}/cuda_{crt}-{system}-{arch}-{version}-archive.tar.xz",
     )
     download_and_copy(
         name="cudart",
@@ -772,11 +791,22 @@ def get_git_version_suffix():
         return get_git_commit_hash()
 
 
+def get_triton_version_suffix():
+    # Either "" or "+<githash>", "<githash>" itself does not contain any plus-characters.
+    git_sfx = get_git_version_suffix()
+    # Should start with "+" that will replaced with "-" if needed
+    env_sfx = os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", "+staging")
+    # version suffix can only contain one plus-character
+    if "+" in git_sfx and "+" in env_sfx:
+        env_sfx = env_sfx.replace("+", "-")
+    return git_sfx + env_sfx
+
+
 # keep it separate for easy substitution
-TRITON_VERSION = "3.4.0" + get_git_version_suffix() + os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", "")
+TRITON_VERSION = "3.6.0" + get_triton_version_suffix()
 
 # Dynamically define supported Python versions and classifiers
-MIN_PYTHON = (3, 9)
+MIN_PYTHON = (3, 10)
 MAX_PYTHON = (3, 14)
 
 PYTHON_REQUIRES = f">={MIN_PYTHON[0]}.{MIN_PYTHON[1]},<{MAX_PYTHON[0]}.{MAX_PYTHON[1] + 1}"

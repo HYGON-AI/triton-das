@@ -195,11 +195,13 @@ struct TritonExpandDimsPattern
     std::iota(retOrder.begin(), retOrder.end(), 0);
 
     auto argCTALayout = argEncoding.getCTALayout();
-    auto retCTAsPerCGA = insertOne(argCTALayout.getCTAsPerCGA(), op.getAxis());
+    auto retCTAsPerCGA =
+        insertOne(ArrayRef<unsigned>(argCTALayout.getCTAsPerCGA()), op.getAxis());
     auto retCTASplitNum =
-        insertOne(argCTALayout.getCTASplitNum(), op.getAxis());
-    auto retCTAOrder = insertOrder(argCTALayout.getCTAOrder(), op.getAxis());
-    auto retCTALayout = triton::gpu::CTALayoutAttr::get(
+        insertOne(ArrayRef<unsigned>(argCTALayout.getCTASplitNum()), op.getAxis());
+    auto retCTAOrder =
+        insertOrder(ArrayRef<unsigned>(argCTALayout.getCTAOrder()), op.getAxis());
+    auto retCTALayout = triton::gpu::CTAEncodingAttr::fromSplitParams(
         getContext(), retCTAsPerCGA, retCTASplitNum, retCTAOrder);
 
     triton::gpu::BlockedEncodingAttr retEncoding =
@@ -415,15 +417,16 @@ struct TritonSplitOpPattern : public OpConversionPattern<triton::SplitOp> {
         return res;
       };
 
+      auto defaultCTALayout = defaultEnc.getCTALayout();
       srcEnc = BlockedEncodingAttr::get(
           getContext(), append(defaultEnc.getSizePerThread(), 2),
           append(defaultEnc.getThreadsPerWarp(), 1),
           append(defaultEnc.getWarpsPerCTA(), 1),
           prepend(defaultEnc.getOrder(), rank - 1),
-          CTALayoutAttr::get(getContext(),
-                             append(defaultEnc.getCTAsPerCGA(), 1),
-                             append(defaultEnc.getCTASplitNum(), 1),
-                             prepend(defaultEnc.getCTAOrder(), rank - 1)));
+          CTAEncodingAttr::fromSplitParams(
+              getContext(), append(defaultCTALayout.getCTAsPerCGA(), 1),
+              append(defaultCTALayout.getCTASplitNum(), 1),
+              prepend(defaultCTALayout.getCTAOrder(), rank - 1)));
       srcTy = RankedTensorType::get(srcTy.getShape(), srcTy.getElementType(),
                                     srcEnc);
       src = rewriter.create<ConvertLayoutOp>(op.getLoc(), srcTy, src);
@@ -454,7 +457,7 @@ static RankedTensorType getNewIndicesType(RankedTensorType type,
   std::array<unsigned, 2> warpsPerCta = {1, numWarps};
 
   MLIRContext *ctx = type.getContext();
-  auto ctaLayout = CTALayoutAttr::getDefault(ctx, /*rank=*/2);
+  auto ctaLayout = CTAEncodingAttr::getDefault(ctx, /*rank=*/2);
   auto parentEncoding = BlockedEncodingAttr::get(
       ctx, sizePerThread, threadsPerWarp, warpsPerCta, order, ctaLayout);
   auto newEncoding = SliceEncodingAttr::get(ctx, /*dim=*/0, parentEncoding);

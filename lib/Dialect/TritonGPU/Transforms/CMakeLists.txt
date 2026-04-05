@@ -29,14 +29,14 @@ add_triton_library(TritonGPUTransforms
   ReorderInstructions.cpp
   CoalesceAsyncCopy.cpp
   Utility.cpp
+  CoalesceUtils.cpp
+  LayoutPropagationUtility.cpp
   WarpSpecialization/AutomaticWarpSpecialization.cpp
-  WarpSpecialization/LoadMMASpecialization.cpp
   WarpSpecialization/Partition.cpp
   WarpSpecialization/OptimizePartitionWarps.cpp
   WarpSpecialization/PartitionBuilder.cpp
   WarpSpecialization/PartitionLoops.cpp
   WarpSpecialization/PartitionScheduling.cpp
-  WarpSpecialization/RewritePartitionDependencies.cpp
   WarpSpecializationHCU/AutomaticWarpSpecialization.cpp
   WarpSpecializationHCU/LoadMMASpecialization.cpp
   WarpSpecializationHCU/OptimizePartitionWarps.cpp
@@ -45,13 +45,13 @@ add_triton_library(TritonGPUTransforms
   WarpSpecializationHCU/RewritePartitionDependencies.cpp
   WarpSpecializationHCU/DataPartition.cpp
   WarpSpecializationHCU/SplitMmaPartitions.cpp
+
   DEPENDS
   TritonGPUTransformsIncGen
 
   LINK_LIBS PUBLIC
   MLIRTransforms
   MLIRTransformUtils
-  MLIRROCDLDialect
   TritonAnalysis
   TritonIR
   TritonTransforms
@@ -62,5 +62,6 @@ add_triton_library(TritonGPUTransforms
   TritonToTritonGPU
   TritonInstrumentIR
   MLIRTransformUtils
+  MLIRROCDLDialect
   DistributedIR
 )

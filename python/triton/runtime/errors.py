@@ -43,3 +43,13 @@ class HSACOError(TritonError):
     def __str__(self) -> str:
         error_message = self.error_message or ""
         return f"HSACO error: {error_message}"
+
+
+class AutotunerError(TritonError):
+
+    def __init__(self, error_message: Optional[str] = None):
+        self.error_message = error_message
+
+    def __str__(self) -> str:
+        error_message = self.error_message or ""
+        return f"Autotuner error: {error_message}"

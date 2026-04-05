@@ -229,8 +229,8 @@ struct DotOpMFMAConversionHelper {
         } else {
           auto multiplierAttr =
               rewriter.getFloatAttr(dstElemTy, 1.0 / duplicationRate);
-          auto multiplierVal =
-              rewriter.create<LLVM::ConstantOp>(loc, dstElemTy, multiplierAttr);
+          auto multiplierVal = LLVM::ConstantOp::create(
+              rewriter, loc, dstElemTy, multiplierAttr);
           accElem = tb.fmul(accElem, multiplierVal);
         }
       }
@@ -259,11 +259,11 @@ struct DotOpMFMAConversionHelper {
     auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
 
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
-    auto mDim = mfmaLayout.getMDim();
-    auto nDim = mfmaLayout.getNDim();
+    auto mnkDim = mfmaLayout.getInstrShape();
+    auto mDim = mnkDim[0];
+    auto nDim = mnkDim[1];
+    auto kDim = mnkDim[2];
     auto mfmaVersion = mfmaLayout.getVersion();
-    assert((mDim == nDim && (mDim == 32 || mDim == 16)) ||
-           (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
     Value a = op.getA();
     Value b = op.getB();
@@ -282,7 +282,7 @@ struct DotOpMFMAConversionHelper {
                   aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        op.getLoc(), mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
+        op.getLoc(), mfmaVersion, mDim, nDim, kDim, elemTyA, elemTyB,
         /*withScale=*/false, allowXF32,
         capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
     if (failed(maybeMfmaIntrinsic))
@@ -446,21 +446,9 @@ struct DotOpMFMAConversionHelper {
     // Now we have a vector of kBase elements of desired type.
     // Then we need to prepare vec for results.
     if (type.getIntOrFloatBitWidth() == 8) {
-      if (1 == kBase) {
+      if (1 == kBase)
         // This is only for the scale operands of scaled mfma on CDNA4
-        if (isConstantScale) {
-          // If the scale is constant(created by arith::ConstantOp), it will
-          // be put in a sgpr instead of vgpr. In that case, instead of
-          // vgpr[7:0], the instruction reads sgpr[30:23] as the scale value.
-          // So we need to manually left shift the scale by 23 bits to meet
-          // the requirement.
-          results = b.shl(i32_ty, b.zext(i32_ty, b.bitcast(vec, i8_ty)),
-                          b.i32_val(23));
-        } else {
           results = b.zext(i32_ty, b.bitcast(vec, i8_ty));
-        }
-      }
-
       if (2 == kBase)
         // This case can occur during scale tensor packing when there aren't
         // enough elements to fill all 4 opSel slots. For example, with an A
@@ -539,7 +527,6 @@ struct DotOpMFMAConversionHelper {
           } else {
             Value vals;
             if (type.isF32() && allowXF32) {
-              assert(!isHCUMmac && "XF32 is not supported for HCU");
               vals = prepareOperands(rawElems, kBase, f32_ty, preserveBF16, isHCUMmac);
             } else if (type.getIntOrFloatBitWidth() == 8) {
               vals = prepareOperands(rawElems, kBase, i8_ty, preserveBF16, isHCUMmac,
@@ -611,11 +598,11 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
 
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
-    auto mDim = mfmaLayout.getMDim();
-    auto nDim = mfmaLayout.getNDim();
+    auto mnkDim = mfmaLayout.getInstrShape();
+    auto mDim = mnkDim[0];
+    auto nDim = mnkDim[1];
+    auto kDim = mnkDim[2];
     auto mfmaVersion = mfmaLayout.getVersion();
-    assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
-           (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
     Value a = op.getA();
     Value b = op.getB();
@@ -653,10 +640,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto ctx = op.getContext();
     constexpr bool allowXF32 = false;
-    FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        op.getLoc(), mfmaVersion, mDim, nDim,
-        aElemType == ScaleDotElemType::E2M1 ? kDimOperandSize * 2
-                                            : kDimOperandSize,
+    FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic =
+        MfmaIntrinsic::get(op.getLoc(), mfmaVersion, mDim, nDim, kDim,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
         scaleDotElemTypeToMLIRType(ctx, bElemType),
         /*withScale=*/true, allowXF32, HCUISAFeature::NONE);
@@ -781,9 +766,9 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         for (int n = 0; n < numRepN; ++n) {
             // Insert pingpong cluster barrier when needed.
             if (is2Step && currIter++ == halfPoint) {
-              rewriter.create<ROCDL::SchedBarrier>(loc, 0);
-              rewriter.create<ROCDL::SBarrierOp>(loc);
-              rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+              ROCDL::SchedBarrier::create(rewriter, loc, 0);
+              ROCDL::SBarrierOp::create(rewriter, loc);
+              ROCDL::SchedBarrier::create(rewriter, loc, 0);
             }
           Value acc = tb.undef(vecTy);
           for (unsigned v = 0; v < elemsPerVec; ++v) {

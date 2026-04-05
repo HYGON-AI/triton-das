@@ -263,14 +263,17 @@ public:
       tilesPerWarp[nIndex] = tileN/maybeMfmaInsn->nDim;
 
       SmallVector<unsigned> warpsPerCTAMfma = warpsPerCTAMatrixLoad(shape, mfmaTiles, mfmaOrder, numWarps);
+      unsigned mfmaElementBitWidth = elemType.isF64() ? 64 : 32;
       auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         matrixOp.getContext(),
         /*versionMajor*/ mfmaVersion,
         warpsPerCTAMfma,
-        tilesPerWarp,
-        /*instrShape*/ maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, /*isTransposed*/ false,
+        /*instrShape=*/SmallVector<unsigned>{maybeMfmaInsn->mDim, maybeMfmaInsn->nDim,
+                                             maybeMfmaInsn->kDim},
+        /*isTransposed=*/false,
         ttg::getCTALayout(matrixOp.getType().getEncoding()),
-        std::nullopt,
+        tilesPerWarp,
+        mfmaElementBitWidth,
         ttg::MmacLayout::INTERLEAVE_TRANSPOSE);
       auto dotAEncoding = ttg::DotOperandEncodingAttr::get(matrixOp.getContext(),
                                                           0, mfmaEnc,

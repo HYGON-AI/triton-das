@@ -1,5 +1,6 @@
 from triton.language import core
 
+
 @core.extern
 def abs(arg0, _semantic=None):
     return core.extern_elementwise(

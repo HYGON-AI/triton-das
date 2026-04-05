@@ -33,16 +33,16 @@ def is_in_thread_transpose_enabled(arch):
 @dataclass(frozen=True)
 class HIPOptions:
     num_warps: int = 4
-    waves_per_eu: int = 1
+    waves_per_eu: int = 0
     num_stages: int = 2
     num_ctas: int = 1
     extern_libs: dict = None
-    cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     sanitize_overflow: bool = True
     arch: str = None
     # We have native support for OCP fp8 variants since CDNA4/RDNA4. For earlier generations,
     # we software emulate the support for them.
+    # For leagcy HCU, enable software emulation for fp8e4nv conversions.
     supported_fp8_dtypes: Tuple[str] = ("fp8e4nv", "fp8e5")
     deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
     default_dot_input_precision: str = "ieee"
@@ -80,12 +80,17 @@ class HIPOptions:
     # attention: enables a bunch of optimizations for attention kernels, including:
     #            - iglp 2 and sched.barrier around it
     #            - sink-insts-to-avoid-spills flag to avoid register spills
-    # Extend options for HCU:
-    # llvm-iglp-8: injects `llvm.amdgcn.iglp_opt` intrinsic call with value `8` to the GEMM's
-    #              k-loop; i.e., "interleave DS and MFMA instructions for common GEMM kernels".
+    # memory-bound-attention: enables custom scheduling strategy in llvm backend,
+    #            This option targets special FA variant, which is memory bound and
+    #            has a lot of elementwise operations from fused operand dequantizations.
+    #            Note that this option is highly experimental,
+    #            and will be removed as soon as default sceduler algorithm is fixed.
+    #
+    # Option allows to set multiple variants divided by commas:
+    # schedule_hint="attention,memory-bound-attention"
     schedule_hint: str = 'none'
 
-    # Extend options for HCU, used for old arch like gfx928, gfx936
+    # Extend options for HCU(legacy), used for old arch like gfx928, gfx936
     # 1. set scheduling latency for mmac and ds:
     #    - none: use default scheduling latency which equal mmac1-ds5
     #    - see get_options_args() to get more options.
@@ -101,12 +106,11 @@ class HIPOptions:
     wdra_num_mma_regs_tail: int = None
 
     def __post_init__(self):
-        # gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
-        # warp_size = 32 if gfx_major >= 10 else 64
-        warp_size = 64  # Default and fixed warp size for HCUs.
+        gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
+        warp_size = 32 if gfx_major >= 10 else 64
         object.__setattr__(self, 'warp_size', warp_size)
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
-               "num_warps must be a power of 2"
+            "num_warps must be a power of 2"
 
         if (self.arch == 'gfx950') and (self.kpack != 1):
             warnings.warn(
@@ -132,6 +136,7 @@ class HIPOptions:
 
 class HIPBackend(BaseBackend):
     instrumentation = None
+    supports_native_tensor_specialization = False
 
     @staticmethod
     def supports_target(target: GPUTarget):
@@ -148,8 +153,8 @@ class HIPBackend(BaseBackend):
     def parse_options(self, opts) -> Any:
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
-        if opts.get("num_ctas", 1) > 1:
-            raise ValueError("num_ctas > 1 not supported for AMD GPUs")
+        if opts.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(self.target.arch):
+            raise ValueError(f"num_ctas > 1 not supported on {self.target.arch}")
 
         # Enable XF32 (TF32) for CDNA3 GPUs
         if self.target.arch == 'gfx942':
@@ -162,10 +167,14 @@ class HIPBackend(BaseBackend):
 
         if self.target.arch == 'gfx950':
             deprecated_fp8_dot_operand_dtypes = set(HIPOptions.deprecated_fp8_dot_operand_dtypes)
+            deprecated_fp8_dot_operand_dtypes.update({"fp8e5b16", "fp8e4b8"})
+            args["deprecated_fp8_dot_operand_dtypes"] = tuple(sorted(deprecated_fp8_dot_operand_dtypes))
+
         if "enable_fp_fusion" not in opts:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
 
-        args["optimize_epilogue"] = False if self.target.arch in ('gfx928', 'gfx936') else True
+        if "optimize_epilogue" not in opts:
+            args["optimize_epilogue"] = knobs.amd.optimize_epilogue
 
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
@@ -193,9 +202,6 @@ class HIPBackend(BaseBackend):
             metadata.num_warps,
             metadata.num_ctas,
             metadata.shared,
-            metadata.cluster_dims[0],
-            metadata.cluster_dims[1],
-            metadata.cluster_dims[2],
         )
 
     def get_codegen_implementation(self, options):
@@ -236,11 +242,9 @@ class HIPBackend(BaseBackend):
         return ret
 
     @staticmethod
-    def get_arg_specialization(arg, ty, **kwargs):
-        ret = BaseBackend.get_arg_specialization(arg, ty, **kwargs)
-        # Only attempt to do buffer ops specialization if buffer ops are enabled.
-        # Otherwise the is_within_2gb check is unnecessary overhead.
-        if knobs.amd.use_buffer_ops and ty == "tensor" and HIPBackend.is_within_2gb(arg):
+    def get_tensor_specialization(arg, **kwargs):
+        ret = BaseBackend.get_tensor_specialization(arg, **kwargs)
+        if knobs.amd.use_buffer_ops and HIPBackend.is_within_2gb(arg):
             ret += "S"
         return ret
 
@@ -381,7 +385,7 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
-        pm.run(mod)
+        pm.run(mod, 'make_ttir')
         return mod
 
     @staticmethod
@@ -393,10 +397,12 @@ class HIPBackend(BaseBackend):
         # TritonDistributed Extension
         # distributed.passes.ttir.add_convert_to_ttgpuir_ext(pm, f"hip:{options.arch}", options.num_warps,
         #                                                    options.warp_size, options.num_ctas)
-        pm.run(mod)
+        pm.run(mod, 'make_ttgir_early')
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
+        emuTF32 = False
         passes.ttgpuir.add_coalesce(pm)
+        passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
         amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch,
@@ -418,8 +424,8 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
 
-        global_prefetch = knobs.amd.global_prefetch
-        local_prefetch = knobs.amd.local_prefetch
+        global_prefetch = getattr(knobs.amd, "global_prefetch", 0)
+        local_prefetch = getattr(knobs.amd, "local_prefetch", 0)
         use_async_copy = knobs.amd.use_async_copy
 
         # The `local-prefetch` scheduling variant requires turning on buffer ops.
@@ -430,15 +436,21 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, async_copy_single_buffer)
 
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
+        amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
 
         if not options.wasp_enabled:
-            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
-                                                use_block_pingpong)
+            if hasattr(amd.passes.ttgpuir, "add_stream_pipeline"):
+                amd.passes.ttgpuir.add_stream_pipeline(
+                    pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy, use_block_pingpong
+                )
+            else:
+                amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, use_block_pingpong)
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
         if options.schedule_hint.lower() != "none":
-            amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.schedule_hint)
+            for hint in options.schedule_hint.split(","):
+                amd.passes.ttgpuir.insert_instruction_sched_hints(pm, hint)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 
         amd.passes.ttgpuir.add_mls_lowering_pass(pm)
@@ -463,7 +475,12 @@ class HIPBackend(BaseBackend):
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
             passes.common.add_canonicalizer(pm)
-            amd.passes.ttgpuir.add_convert_to_buffer_ops(pm, options.arch, knobs.amd.use_buffer_atomics)
+            amd.passes.ttgpuir.add_convert_to_buffer_ops(
+                pm,
+                options.arch,
+                knobs.amd.use_buffer_atomics,
+                knobs.amd.buffer_ops_analyze_small_tensor_range,
+            )
 
         amd.passes.ttgpuir.add_fold_true_cmpi(pm)
         passes.common.add_canonicalizer(pm)
@@ -471,7 +488,8 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         if 1:#use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
-        pm.run(mod)
+        pm.run(mod, 'make_ttgir')
+        metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
     @staticmethod
@@ -487,7 +505,8 @@ class HIPBackend(BaseBackend):
         passes.gluon.add_canonicalizer(pm)
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
 
-        pm.run(mod)
+        pm.run(mod, 'gluon_to_ttgir')
+        metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
     @staticmethod
@@ -496,6 +515,7 @@ class HIPBackend(BaseBackend):
         # TritonGPU -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
+        amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         # custom_lds_size is an experimental parameter that defines amount of LDS available
         # for one thread block. Measured in bytes.
         #
@@ -504,6 +524,7 @@ class HIPBackend(BaseBackend):
         custom_lds_size = 0
         amd.passes.ttgpuir.add_optimize_lds_usage(pm, options.arch, custom_lds_size)
         passes.convert.add_scf_to_cf(pm)
+        passes.gluon.add_inliner(pm)
         passes.convert.add_index_to_llvmir(pm)
 
         amd.passes.ttgpuir.add_allocate_shared_memory(pm)
@@ -531,8 +552,8 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
 
         if options.wasp_enabled:
-            amd.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch, options.wasp_num_load_warps, 
-                options.wasp_num_mma_warps, options.wdra_enabled, options.wdra_num_load_regs or 0, 
+            amd.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch, options.wasp_num_load_warps,
+                options.wasp_num_mma_warps, options.wdra_enabled, options.wdra_num_load_regs or 0,
                 options.wdra_num_mma_regs_main or 0, options.wdra_num_mma_regs_tail or 0)
             passes.convert.add_arith_to_llvmir(pm)
             passes.common.add_canonicalizer(pm)
@@ -546,13 +567,31 @@ class HIPBackend(BaseBackend):
         if HIPBackend.instrumentation:
             HIPBackend.instrumentation.patch("llvmir_to_llvm", pm, mod.context)
 
-        if not knobs.compilation.disable_line_info:
+        if not knobs.compilation.disable_line_info and not knobs.compilation.dump_ir_extract_di_local_variables:
             passes.llvmir.add_di_scope(pm)
 
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)
         # TritonDistributed Extension: libdevice -> llvm
         distributed.passes.ttgpuir.amd.add_lib_device_to_llvmir(pm, __HIP_FTZ)
-        pm.run(mod)
+        pm.run(mod, 'make_llir')
+
+        if knobs.compilation.dump_ir_extract_di_local_variables:
+            # comments below on why separate it
+            if not knobs.compilation.disable_line_info:
+                pm = ir.pass_manager(mod.context)
+                pm.enable_debug()
+                passes.llvmir.add_di_scope(pm)
+                pm.run(mod, 'make_llir.disable_line_info')
+
+            # insert dbg intrinsic with several DI Attribute including source
+            # var name and type info note: unknown reason for now, but this
+            # pass and add_di_scope has to be run separately, otherwise if we
+            # put them into previous pipline, it trigger a segmentfault without
+            # any error message; could be due to a bug in mlir or pybind11
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            passes.llvmir.add_di_local_variable(pm)
+            pm.run(mod, 'make_llir.dump_ir_extract_di_local_variables')
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
@@ -584,15 +623,20 @@ class HIPBackend(BaseBackend):
             fns[0].add_fn_attr("hcu-wdra-waves-per-tg", str(total_num_warps))
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{total_num_warps*options.warp_size}")
+        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{options.num_warps*options.warp_size}")
+        if "memory-bound-attention" in options.schedule_hint.split(','):
+            fns[0].add_fn_attr("amdgpu-sched-strategy", "iterative-ilp")
+        fns[0].add_fn_attr("uniform-work-group-size", "true")
         # LLVM AMDGPU backend supports the attribute "amdgpu-waves-per-eu"="<min>[, <max>]".
         # This attribute may be attached to a kernel function definition and is an optimization hint.
         # <min> parameter specifies the requested minimum number of waves per EU, and optional <max> parameter
-        # specifies the requested maximum number of waves per EU (must be greater than <min> if specified).
+        # specifies the requested maximum number of waves per EU (must be >= <min> if specified).
         # If <max> is omitted, then there is no restriction on the maximum number of waves per EU other than
         # the one dictated by the hardware for which the kernel is compiled. Passing 0, 0 as <min>, <max>
         # implies the default behavior (no limits).
-        fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}")
+        # Specifying N, N forces LLVM to focus on a single register count, simplifies some heuristics
+        # and may improve scheduling.
+        fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}, {options.waves_per_eu}")
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
         if knobs.compilation.enable_asan:
@@ -645,9 +689,6 @@ class HIPBackend(BaseBackend):
         metadata["shared"] = src.get_int_attr("ttg.shared")
         metadata["profile_scratch_size"] = src.get_int_attr("ttg.profile_scratch_memory_size") or 0
         metadata["profile_scratch_align"] = src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
-
-        # warp-specialization mutates num_warps
-        metadata["num_warps"] = total_num_warps
 
         amd.cleanup_bitcode_metadata(llvm_mod)
         # Disable inlining of print related functions,
@@ -752,6 +793,8 @@ class HIPBackend(BaseBackend):
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
         stages["amdgcn"] = lambda src, metadata: self.make_amdgcn(src, metadata, options)
         stages["hsaco"] = lambda src, metadata: self.make_hsaco(src, metadata, options)
+        if knobs.runtime.add_stages_inspection_hook is not None:
+            knobs.runtime.add_stages_inspection_hook(self, stages, options, language, None)
 
     @functools.lru_cache()
     def hash(self):

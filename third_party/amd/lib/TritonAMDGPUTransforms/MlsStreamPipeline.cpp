@@ -1191,7 +1191,7 @@ struct MlsPipelinePass : impl::TritonAMDGPUMlsStreamPipelineBase<MlsPipelinePass
 
     // NOTE: Leave empty for now, until we utilize customEpiloguePeeling
     DenseSet<ttg::MaskOp> peeledMaskOps;
-    tt::resolveMaskOp(moduleOp, peeledMaskOps);
+    tt::resolveMaskOp(moduleOp);
 
     if (useAsyncCopy) {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
