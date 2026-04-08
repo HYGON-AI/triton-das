@@ -151,6 +151,7 @@ class HIPBackend(BaseBackend):
         return f"hip:{options.arch}"
 
     def parse_options(self, opts) -> Any:
+        legacy_sched_variant = opts.pop("instruction_sched_variant", None)
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
         if opts.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(self.target.arch):
@@ -178,6 +179,11 @@ class HIPBackend(BaseBackend):
 
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
+
+        # Consume the legacy `instruction_sched_variant` option and map it to
+        # `schedule_hint`. If both are present, keep the explicit schedule_hint.
+        if args.get("schedule_hint", "none") == "none" and legacy_sched_variant is not None:
+            args["schedule_hint"] = legacy_sched_variant
 
         if args.get("wasp_enabled"):
             if args.get("wdra_enabled"):
@@ -254,19 +260,22 @@ class HIPBackend(BaseBackend):
         if rocm_path is not None:
             return rocm_path
 
-        default_rocm_path = "/opt/rocm"
-        if Path(default_rocm_path).is_dir():
-            return default_rocm_path
+        candidates = [Path("/opt/rocm"), Path("/opt/dtk")]
+        for candidate in candidates:
+            if candidate.is_dir():
+                return str(candidate)
 
-        fallback_rocm_path = "/opt/dtk"
-        if Path(fallback_rocm_path).is_dir():
-            return fallback_rocm_path
+        return str(candidates[0])
 
-        return default_rocm_path
+    @staticmethod
+    def path_to_rocm_llvm():
+        rocm_path = Path(HIPBackend.path_to_rocm())
+        llvm_subdir = "aillvm" if rocm_path.name == "dtk" else "llvm"
+        return rocm_path / llvm_subdir
 
     @staticmethod
     def path_to_rocm_lld():
-        rocm_path = HIPBackend.path_to_rocm()
+        llvm_path = HIPBackend.path_to_rocm_llvm()
         # Check env path for ld.lld
         lld_env_path = knobs.amd.lld_path
         if lld_env_path is not None:
@@ -277,32 +286,38 @@ class HIPBackend(BaseBackend):
         lld = Path(__file__).parent / "llvm/bin/ld.lld"
         if lld.is_file():
             return lld
-        lld = Path(f"{rocm_path}/llvm/bin/ld.lld")
+        lld = llvm_path / "bin/ld.lld"
         if lld.is_file():
             return lld
         lld = Path("/usr/bin/ld.lld")
         if lld.is_file():
             return lld
-        raise Exception(f"ROCm linker {rocm_path}/llvm/bin/ld.lld not found. Set 'TRITON_HIP_LLD_PATH' to its path.")
+        raise Exception(
+            f"ROCm linker not found under {llvm_path}/bin/ld.lld. "
+            "Set 'TRITON_HIP_LLD_PATH' to its path."
+        )
 
     @staticmethod
     def path_to_rocm_clang():
-        rocm_path = HIPBackend.path_to_rocm()
+        llvm_path = HIPBackend.path_to_rocm_llvm()
         # Check env path for clang
         clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH",
                                     # By default, use clang-18
-                                   f"{rocm_path}/llvm/bin/clang-18")
+                                   str(llvm_path / "bin/clang-18"))
         if clang_env_path is not None:
             clang = Path(clang_env_path)
             if clang.is_file():
                 return clang
-        clang = Path(f"{rocm_path}/llvm/bin/clang")
+        clang = llvm_path / "bin/clang"
         if clang.is_file():
             return clang
         clang = Path("/usr/bin/clang")
         if clang.is_file():
             return clang
-        raise Exception(f"ROCm compiler {rocm_path}/llvm/bin/clang not found. Set 'TRITON_HIP_CLANG_PATH' to its path.")
+        raise Exception(
+            f"ROCm compiler not found under {llvm_path}/bin/clang. "
+            "Set 'TRITON_HIP_CLANG_PATH' to its path."
+        )
 
     @staticmethod
     def _get_clang_args(metadata, options):
@@ -350,12 +365,6 @@ class HIPBackend(BaseBackend):
                 options_args.extend(sched_latency_args[options.sched_latency])
             else:
                 raise ValueError(f"Unsupported scheduling latency: {options.sched_latency}")
-
-        if options.schedule_hint == "llvm-iglp-8":
-            if (options.num_warps >= 4 and metadata["shared"] <= 32*1024):
-                options_args.extend(["-mllvm=-amdgpu-iglp8-advance-sched-group-cnt=2"])
-            if options.kpack == 2:
-                options_args.extend(["-mllvm=-amdgpu-iglp8-interleave-ds-cnt-per-mfma=1"])
 
         clang_args = [
             "-target", amd.TARGET_TRIPLE,
