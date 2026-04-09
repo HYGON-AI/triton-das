@@ -13,7 +13,7 @@ import functools
 import warnings
 import os
 from pathlib import Path
-
+ 
 
 def get_min_dot_size(target: GPUTarget):
     # We fallback to use FMA and cast arguments if certain configurations is
