@@ -684,6 +684,10 @@ bool TargetInfo::supportsClusterLoadBitWidth(int biwWidth) const {
   return false;
 }
 
+bool TargetInfo::useAsyncMarks() const {
+  return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
+                            getISAFamily());
+}
 void TargetInfo::localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
                                        Operation *llLoadOp) const {
   if (requiresAliasInfoForAsyncOps())
