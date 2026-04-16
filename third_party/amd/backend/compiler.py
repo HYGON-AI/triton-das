@@ -161,6 +161,16 @@ class HIPBackend(BaseBackend):
             HIPBackend.instrumentation.load_dialects(ctx)
 
     @staticmethod
+    def get_tensor_physical_size(t) -> int:
+        # calculate tensor's physical continues bytes size
+        if t.numel() == 0:
+            return 0
+
+        offset = sum((size_i - 1) * stride_i for size_i, stride_i in zip(t.shape, t.stride()))
+        elements = offset + 1
+        return elements * t.element_size()
+
+    @staticmethod
     def is_within_2gb(arg):
         import torch
 
@@ -168,7 +178,10 @@ class HIPBackend(BaseBackend):
         if hasattr(arg, "ptr_range"):
             return arg.ptr_range() <= MAX_INT_32
         if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
-            return arg.untyped_storage().size() <= MAX_INT_32
+            # return arg.untyped_storage().size() <= 2**31 - 1
+            # Use the tensor's physical span so views do not inherit the full backing storage size.
+            return HIPBackend.get_tensor_physical_size(arg) <= 2**31 - 1
+
         return False
 
     @staticmethod
