@@ -1154,9 +1154,10 @@ struct MlsPipelinePass : impl::TritonAMDGPUMlsStreamPipelineBase<MlsPipelinePass
 
     // check numStages
     if (globalPrefetch < 0 || globalPrefetch >= numStages) {
-      moduleOp.emitError("global prefetch control must be in [0, ")
-          << numStages << "); " << globalPrefetch << " is out of range";
-      return signalPassFailure();
+      moduleOp.emitWarning("global prefetch control must be in [0, ")
+          << numStages << "); " << globalPrefetch
+          << " is out of range, fallback to 0";
+      globalPrefetch = 0;
     }
 
     constexpr int localPrefetch = 0;
