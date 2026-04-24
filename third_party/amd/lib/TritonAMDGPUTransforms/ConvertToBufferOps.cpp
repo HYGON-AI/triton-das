@@ -79,11 +79,12 @@ void collectAssumptionsForFuncArgPtr(ModuleOp mod, DenseMap<Value, SetVector<Ope
 
 bool isFuncArgPtrWithNonNegativeAssumption(mlir::Value value,
   const DenseMap<Value, SetVector<Operation *>> &assumptions) {
+
   while (value.getDefiningOp() && isa<triton::AddPtrOp>(value.getDefiningOp())) {
     value = value.getDefiningOp<triton::AddPtrOp>().getPtr();
   }
 
-  if (value.getDefiningOp())
+  if (value.getDefiningOp() || !isa<mlir::BlockArgument>(value))
     return false;
 
   mlir::BlockArgument blockArg = mlir::cast<mlir::BlockArgument>(value);
@@ -91,11 +92,20 @@ bool isFuncArgPtrWithNonNegativeAssumption(mlir::Value value,
   auto funcOp = dyn_cast_or_null<tt::FuncOp>(blk->getParentOp());
 
   if (funcOp && blk == &funcOp->getRegion(0).front()) {
-    for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
-      if (arg != value)
+    if (assumptions.contains(value))
+      return true;
+
+    // compatibility with 3.2.x to support easy gen buffer ops for triton.
+    // i.e. if any ptr function argument has non-negative assumption, consider
+    // this ptr as non-negative as well.
+    for (Value arg : funcOp.getArguments()) {
+      if (!isa<triton::PointerType>(arg.getType()))
         continue;
-      return assumptions.contains(value);
+      if (assumptions.contains(arg))
+        return true;
     }
+
+    return false;
   }
 
   if (auto forOp = llvm::dyn_cast<scf::ForOp>(blk->getParentOp())) {
@@ -231,10 +241,6 @@ bool canUseBufferOps(Value ptr,
       cast<RankedTensorType>(offset.getType()).getElementTypeBitWidth();
   LLVM_DEBUG(llvm::dbgs() << "offset bits:" << ofstBit << "\n");
 
-
-  if (isFuncArgPtrWithNonNegativeAssumption(maybeSplatOp.getSrc(), assumptions))
-    return true;
-
   // TODO: step 3 and 4 can be reversed to further optimize for performance.
   // When the base-ptr is func argument and has tt.pointer_range=32 attribute,
   // it's safe to promote the mem-op into buffer-op even if offset is a 64-bit
@@ -253,6 +259,10 @@ bool canUseBufferOps(Value ptr,
     LDBG("base-ptr as tt.pointer_range=32 attribute");
     return true;
   }
+
+  // Note: seeem unnecessary to check this here. current reserve this feature and need remove in future ?
+  if (isFuncArgPtrWithNonNegativeAssumption(maybeSplatOp.getSrc(), assumptions))
+    return true;
 
   return isByteOffsetSmallerThan2GB(addPtrOp, std::move(solver));
 }
