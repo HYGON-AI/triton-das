@@ -4,6 +4,7 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 #include "TritonAMDGPUToLLVM/MembarUtility.h"
+#include "TritonAMDGPUToLLVM/WaitCntHCUUtility.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
@@ -146,6 +147,8 @@ struct ConvertTritonAMDGPUToLLVM
     ModuleMembarAnalysis membarPass(&allocation,
                                     mlir::triton::AMD::membarFilter);
     membarPass.run();
+
+    AMD::addWaitCntHCU(mod);
 
     // Lower functions
     {

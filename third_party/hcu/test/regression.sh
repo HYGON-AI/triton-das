@@ -14,7 +14,7 @@ hcu_test_cmds=(
   "python ${hcu_file_path}/fused-softmax.py --no_benchmark"
   "python ${hcu_file_path}/matrix-multiplication.py --no_benchmark"
   "python ${hcu_file_path}/low-memory-dropout.py"
-  #"python ${hcu_file_path}/layer-norm.py --no_benchmark" TODO: need check on bmz
+  "python ${hcu_file_path}/layer-norm.py --no_benchmark"
   "pytest ${hcu_file_path}/fused-attention.py"
   "python ${hcu_file_path}/extern-functions.py"
   "python ${hcu_file_path}/grouped-gemm.py --no_benchmark"
