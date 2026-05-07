@@ -9,10 +9,12 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Conversion/MLIRTypes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "TritonAMDGPUTransforms/MlsGroup.h"
 #include "Utility.h"
 
 using namespace mlir;
@@ -34,10 +36,17 @@ namespace {
  *
  * to:
  *     %40 = ttg.local_alloc %39
- *     %token = rocl.matrix_load_to_local %47, %40
+ *     %token = ttg.matrix_load_to_local %47, %40
  *     %commit = ttg.async_commit_group %token
  *     %wait = ttg.async_wait %commit
  *     %50 = ttg.local_load %40
+ *
+ * or:
+ *     %40 = ttg.local_alloc %39
+ *     %token = ttg.matrix_load_to_local %47, %40
+ *     %commit = ttg.async_commit_group %token
+ *     %wait = ttg.async_wait %commit
+ *     %50 = ttg.local_load_packed_mls_shared %40
  *
  **/
 class MlsMatrixLoadLowering : public OpRewritePattern<tt::MatrixLoadOp> {
@@ -57,7 +66,9 @@ public:
     auto ctaLayout = ttg::getCTALayout(matrixTy.getEncoding());
     auto mlsSharedEncoding = ttg::AMDMlsSharedEncodingAttr::get(
                                   matrixOp.getContext(), mlsAttr.getOpIdx(), mlsAttr.getMlsTile(),
-                                  mlsAttr.getElemBitWidth(), mlsAttr.getAlt2Kind(),
+                                  mlsAttr.getElemBitWidth(),
+                                  static_cast<ttg::MlsElemBitTyKind>(mlsAttr.getElemBitTyKind()),
+                                  mlsAttr.getAlt2Kind(),
                                   mlsAttr.getVersion(), mlsAttr.getOrder(),
                                   ctaLayout);
     auto sharedMemDescType = ttg::MemDescType::get(
@@ -77,7 +88,7 @@ public:
     matrixLoadToLocalOp->setAttr(tta::MlsEncodingAttr::getMnemonic(), mlsAttr);
 
     auto commitOp = rewriter.create<ttg::AsyncCommitGroupOp>(loc,
-                                                             matrixLoadToLocalOp->getResult(0));
+                                                            matrixLoadToLocalOp->getResult(0));
     ttg::AsyncWaitOp waitOp = rewriter.create<ttg::AsyncWaitOp>(loc, commitOp->getResult(0), 0);
 
     // 3. create local load op

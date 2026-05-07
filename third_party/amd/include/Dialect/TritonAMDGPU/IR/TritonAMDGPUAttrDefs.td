@@ -71,7 +71,8 @@ def TritonAMDGPU_MlsEncoding : TritonAMDGPU_Attr<"MlsEncoding"> {
     it include two parts: mls info(to restore matrix_load info)  and warpsPerCTA info.
       opIdx       :  the operand index for dot operation.
       mlsTile     :  the mls tile shape. opIdx == 0 ? [nonKTile, kTile] : [kTile, nonKTile]
-      elemBitWidth:  the element bit width of the mls encoding attribute.
+      elemBitWidth:  the share memory elem bit width, for bit 4|6, it is 8;
+      elemBitTyKind: share memory elem type kind which need to distinguish. 0: no need, 1: b4, 2: b4mix, 3: i4, 4: u4, 5: f4, 6: f6;
       alt2Kind    :  the alt2 kind of the mls encoding attribute.
       version     :  the version of the mls encoding attribute.
       order       :  the order of the tensor, the fastest-changing axis first.
@@ -81,6 +82,7 @@ def TritonAMDGPU_MlsEncoding : TritonAMDGPU_Attr<"MlsEncoding"> {
   let parameters = (ins "unsigned":$opIdx,  // or nonKTileIdx
                         ArrayRefParameter<"unsigned">:$mlsTile,
                         "unsigned":$elemBitWidth,
+                        "unsigned":$elemBitTyKind,
                         "unsigned":$alt2Kind,
                         "unsigned":$version,
                         ArrayRefParameter<"unsigned">:$order,
@@ -88,6 +90,7 @@ def TritonAMDGPU_MlsEncoding : TritonAMDGPU_Attr<"MlsEncoding"> {
   let assemblyFormat = "`opIdx` `=` $opIdx `,` "
                        "`mlsTile` `=` `[` $mlsTile `]` `,` "
                        "`elemBitWidth` `=` $elemBitWidth `,` "
+                       "`elemBitTyKind` `=` $elemBitTyKind `,` "
                        "`alt2Kind` `=` $alt2Kind `,` "
                        "`version` `=` $version `,` "
                        "`order` `=` `[` $order `]` `,` "

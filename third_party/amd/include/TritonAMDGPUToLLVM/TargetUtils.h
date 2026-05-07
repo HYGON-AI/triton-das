@@ -48,15 +48,35 @@ enum class HCUISAFeature : uint64_t{
   MMAC_FP6FP4   = 1 << 2,
   MMAC_SCALE    = 1 << 3,
   MLS           = 1 << 4,
+  MLS_FP6FP4    = MMAC_FP6FP4,
+  MLS_B4        = MMAC_SCALE,
   CVT_FP8F32    = 1 << 5,
   CVT_FP8F16    = 1 << 6,
+  MMAC_ACC_FP16 = 1 << 7,
+  MMAC_ACC_BF16 = 1 << 8,
 };
 
-inline constexpr bool operator&(HCUISAFeature lhs, HCUISAFeature rhs) {
-  return static_cast<uint64_t>(lhs) & static_cast<uint64_t>(rhs);
+inline constexpr HCUISAFeature operator~(HCUISAFeature feature) {
+  return static_cast<HCUISAFeature>(~static_cast<uint64_t>(feature));
+}
+
+// Proxy for (features & flag) so that "if (features & HCUISAFeature::X)" works directly.
+struct HCUISAFeatureMask {
+  uint64_t bits;
+  operator bool() const { return bits != 0; }
+  HCUISAFeature operator|(HCUISAFeature rhs) const {
+    return static_cast<HCUISAFeature>(bits | static_cast<uint64_t>(rhs));
+  }
+};
+inline constexpr HCUISAFeatureMask operator&(HCUISAFeature lhs, HCUISAFeature rhs) {
+  return {static_cast<uint64_t>(lhs) & static_cast<uint64_t>(rhs)};
 }
 inline constexpr HCUISAFeature operator|(HCUISAFeature lhs, HCUISAFeature rhs) {
   return static_cast<HCUISAFeature>(static_cast<uint64_t>(lhs) | static_cast<uint64_t>(rhs));
+}
+inline constexpr HCUISAFeature &operator&=(HCUISAFeature &lhs, HCUISAFeature rhs) {
+  lhs = static_cast<HCUISAFeature>(static_cast<uint64_t>(lhs) & static_cast<uint64_t>(rhs));
+  return lhs;
 }
 HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch);
 bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature);

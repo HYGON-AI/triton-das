@@ -51,39 +51,79 @@ SmallVector<unsigned> getMatrixLoadTensorOrder(triton::MatrixLoadOp matrixOp, in
 }
 
 // Chooses a proper MLS instruction
-FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOp dot, int opIdx,
+FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
                                         triton::MatrixLoadOp matrixOp, bool kMajor,
-                                        int version, int numWarps) {
-  // get mfma encoding info
-  auto aType = dot.getA().getType();
-  auto bType = dot.getB().getType();
-  auto dType = dot.getResult().getType();
+                                        int mlsVersion, int numWarps) {
+  // Get MFMA encoding info.
+  auto dType = cast<RankedTensorType>(dot.getOperation()->getResult(0).getType());
   auto mfmaEncoding = dyn_cast<ttg::AMDMfmaEncodingAttr>(dType.getEncoding());
 
-  // get the mls shape info
+  // Tensor-level shapes stay in logic space. Here we derive the elem-space
+  // tile selection inputs needed by MLS / MMAC instructions.
   auto rank = matrixOp.getType().getRank();
-  auto elemType = matrixOp.getType().getElementType();
-  auto bitwidth = elemType.getIntOrFloatBitWidth();
+  auto matrixElemType = matrixOp.getType().getElementType();
+  unsigned bitwidth = matrixElemType.getIntOrFloatBitWidth();
   auto blockK = matrixOp.getType().getShape()[(rank - 1) - opIdx];
-  auto blockNonK = matrixOp.getType().getShape()[(rank - 2) + opIdx];
+  auto blockNonK = dType.getShape()[(rank - 2) + opIdx];
 
-  // Determine the kDim based on the matrix load and numWarps Info.
-  unsigned kTile = 0;
-  unsigned nonKTile = opIdx == 0 ? mfmaEncoding.getMfmaTile()[0] : mfmaEncoding.getMfmaTile()[1];
-  if (bitwidth == 16) {
-    kTile = kMajor ? (blockK >= 64 ? 64 : 32) : 16;
-    if (kTile == 64 && kTile * nonKTile * numWarps > blockK * blockNonK)
-      kTile = 32;
-  } else if (bitwidth == 8) {
-    kTile = kMajor ? (blockK >= 128 ? 128 : 64) : 32;
-    if (kTile == 128 && kTile * nonKTile * numWarps > blockK * blockNonK)
-      kTile = 64;
+  // `matrix_load` and `dot` tensor shapes are logic shapes. Derive the expanded
+  // elem-space dimensions used by MLS tile selection from those logic shapes.
+  int64_t logicalK = blockK;
+  int64_t logicalNonK = blockNonK;
+
+  MlsElemBitTyKind mlsElemBitTyKind = MlsElemBitTyKind::None;
+  if (auto dotScaled = dyn_cast<tt::DotScaledOp>(dot.getOperation())) {
+    auto dotScaledOp = cast<tt::DotScaledOp>(dot);
+    auto scaledElemType = opIdx == 0 ? dotScaled.getAElemType() : dotScaled.getBElemType();
+    if (scaledElemType == ScaleDotElemType::E2M1 && kMajor)
+      logicalK *= 2;
+
+    auto dotEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(
+        (opIdx == 0 ? dotScaledOp.getA().getType() : dotScaledOp.getB().getType())
+            .getEncoding());
+    auto mlsScaledExt = dotEncoding.getMlsScaledExt();
+    mlsElemBitTyKind = getMlsElemBitTyKind(mlsScaledExt);
+    if (scaledElemType != ScaleDotElemType::E2M1) {
+      bool isF4Padding = isMlsPaddedBit4ElemTyKind(mlsElemBitTyKind);
+      mlsElemBitTyKind =
+          scaleDotElemTypeToMlsElemBitTyKind(scaledElemType, isF4Padding);
+    }
   }
+
   auto altKind = MlsInterleaveKind::InterleaveNone;
 
-  // select the mls insn
+  // Try candidate MLS elems tiles first (same strategy as
+  // chooseMfmaInstructionWithMLS): pick the largest valid candidate.
+  unsigned nonKTile = opIdx == 0 ? mfmaEncoding.getMfmaTile()[0]
+                                 : mfmaEncoding.getMfmaTile()[1];
+  unsigned kTile = 0;
+  auto tileCandidates = MlsInsn::getMlsElemsTileCandidates(opIdx,
+                                                           kMajor,
+                                                           bitwidth,
+                                                           mlsElemBitTyKind,
+                                                           mlsVersion,
+                                                           altKind);
+
+  for (int i = tileCandidates.size() - 1; i >= 0; --i) {
+    unsigned candNonK = tileCandidates[i].first;
+    unsigned candK = tileCandidates[i].second;
+    if (candNonK == nonKTile &&
+        candNonK <= static_cast<unsigned>(logicalNonK) &&
+        candK <= static_cast<unsigned>(logicalK) &&
+        logicalNonK % candNonK == 0 && logicalK % candK == 0) {
+      kTile = candK;
+
+      if (candNonK * candK * numWarps <= static_cast<unsigned>(logicalNonK * logicalK))
+        break;
+    }
+  }
+
+  assert(kTile != 0 && "pre select mls tile failed, no candidate survived\n");
+
+  // Select the MLS instruction.
   auto maybeMlsInsn = MlsInsn::selectOrGetMlsInsn(nonKTile, kTile, bitwidth,
-                                                  opIdx, kMajor, altKind, version);
+                                                                      mlsElemBitTyKind,
+                                                                      opIdx, kMajor, mlsVersion, altKind);
   if (failed(maybeMlsInsn))
     llvm::report_fatal_error("No match found in MLS database\n");
 
@@ -130,9 +170,10 @@ Value convertAndCastTensor(OpBuilder &builder, Value value,
 }
 
 struct MlsEncodingInsertion : public OpRewritePattern<triton::MatrixLoadOp> {
+  int mlsVersion;
 public:
-  MlsEncodingInsertion(MLIRContext *context)
-      : OpRewritePattern(context, 1) {}
+  MlsEncodingInsertion(MLIRContext *context, int mlsVersion)
+      : OpRewritePattern(context, 1), mlsVersion(mlsVersion) {}
 
   LogicalResult matchAndRewrite(triton::MatrixLoadOp matrixOp, PatternRewriter &rewriter) const override {
     RankedTensorType oldRetType = matrixOp.getType();
@@ -145,23 +186,29 @@ public:
       auto opIdx = maybeDotOpIdxPair.value().second;
 
       // 1. choose the mls instruction for matrixOp
-      assert(isa<ttg::AMDMfmaEncodingAttr>(dotOp.getType().getEncoding()));
+      auto dotRetType =
+          cast<RankedTensorType>(dotOp.getOperation()->getResult(0).getType());
+      assert(isa<ttg::AMDMfmaEncodingAttr>(dotRetType.getEncoding()));
       auto order = getMatrixLoadTensorOrder(matrixOp, opIdx);
       bool kMajor = opIdx == 0 ? order[0] == 1 : order[0] == 0;
       auto numWarps = triton::gpu::lookupNumWarps(matrixOp);
-      auto mlsInsn = chooseMlsInstruction(dotOp, opIdx, matrixOp, kMajor, 1, numWarps);
+      auto mlsInsn = chooseMlsInstruction(dotOp, opIdx, matrixOp, kMajor, mlsVersion, numWarps);
+      if (failed(mlsInsn))
+        return failure();
 
       // 2. warps per tile calculate
       auto mlsTile = mlsInsn->getMlsTile();
+      auto mlsTileGlobal = mlsInsn->getMlsTile(MlsTileKind::Global);
       auto shape = matrixOp.getResult().getType().getShape();
       auto elemBitWidth = mlsInsn->getElemBitWidth();
       auto altKind = mlsInsn->getAlt2Kind();
       auto version = mlsInsn->getMlsVersion();
-      auto warpsPerCTA = warpsPerCTAMatrixLoad(shape, mlsTile, order, numWarps);
+      auto warpsPerCTA = warpsPerCTAMatrixLoad(shape, mlsTileGlobal, order, numWarps);
 
       // 3. create new matrix load op with new encoding and mls attr
-      auto newEncoding = opIdx == 0 ? dotOp.getA().getType().getEncoding()
-                                               : dotOp.getB().getType().getEncoding();
+      auto newEncoding = opIdx == 0
+                             ? cast<RankedTensorType>(dotOp.getA().getType()).getEncoding()
+                             : cast<RankedTensorType>(dotOp.getB().getType()).getEncoding();
       if (dyn_cast<ttg::DotOperandEncodingAttr>(newEncoding).getKWidth() != mlsInsn->getDotLayoutKWidth()) {
         newEncoding = ttg::DotOperandEncodingAttr::get(matrixOp.getContext(),
                                                        opIdx,
@@ -181,8 +228,12 @@ public:
                               matrixOp.getBoundaryCheck(), matrixOp.getCache(), matrixOp.getEvict(),
                               matrixOp.getIsVolatile());
       auto mlsEncoding = triton::amdgpu::MlsEncodingAttr::get(
-                                                          matrixOp.getContext(), opIdx, mlsTile,
-                                                          elemBitWidth, altKind, version,
+                                                          matrixOp.getContext(),
+                                                          opIdx,
+                                                          mlsTile,
+                                                          elemBitWidth,
+                                                          mlsInsn->getElemBitTyKind(),
+                                                          altKind, version,
                                                           order, warpsPerCTA);
       newMatrixOp->setAttr(triton::amdgpu::MlsEncodingAttr::getMnemonic(), mlsEncoding);
 
@@ -204,22 +255,32 @@ public:
 
       unsigned kTile = 0;
       unsigned nonKTile = 0;
-      if (bitwidth == 16) {
-        nonKTile = kMajor ? 16 : (blockNonK >= 64 ? 64 : 32);
-        kTile = kMajor ? (blockK >= 64 ? 64 : 32) : 16;
-        if (kTile == 64 && kTile * nonKTile * numWarps > blockK * blockNonK)
-          kTile = 32;
-      } else if (bitwidth == 8) {
-        nonKTile = kMajor ? 16 : (blockNonK >= 128 ? 128 : 64);
-        kTile = kMajor ? (blockK >= 128 ? 128 : 64) : 32;
-        if (kTile == 128 && kTile * nonKTile * numWarps > blockK * blockNonK)
-          kTile = 64;
+      if (mlsVersion == 1) {
+        if (bitwidth == 16) {
+          nonKTile = kMajor ? 16 : (blockNonK >= 64 ? 64 : 32);
+          kTile = kMajor ? (blockK >= 64 ? 64 : 32) : 16;
+          if (kTile == 64 && kTile * nonKTile * numWarps > blockK * blockNonK)
+            kTile = 32;
+        } else if (bitwidth == 8) {
+          nonKTile = kMajor ? 16 : (blockNonK >= 128 ? 128 : 64);
+          kTile = kMajor ? (blockK >= 128 ? 128 : 64) : 32;
+          if (kTile == 128 && kTile * nonKTile * numWarps > blockK * blockNonK)
+            kTile = 64;
+        }
+      } else if (mlsVersion >= 2) {
+        if (bitwidth == 16) {
+          nonKTile = kMajor ? 16 : 32;
+          kTile = kMajor ? 32 : 16;
+        } else if (bitwidth == 8) {
+          nonKTile = kMajor ? 16 : 64;
+          kTile = kMajor ? 64 : 32;
+        }
       }
 
       auto altKind = MlsInterleaveKind::InterleaveNone;
-      auto mlsInsn = MlsInsn::selectOrGetMlsInsn(nonKTile, kTile, bitwidth,
-                                                                     opIdx, kMajor,
-                                                                     altKind, 1);
+      auto mlsInsn = MlsInsn::selectOrGetMlsInsn(nonKTile, kTile,
+                                                 bitwidth, MlsElemBitTyKind::None,
+                                                 opIdx, kMajor, mlsVersion, altKind);
       if (failed(mlsInsn))
         llvm::report_fatal_error("No match found in MLS database\n");
 
@@ -295,7 +356,8 @@ public:
                               matrixOp.getIsVolatile());
       auto mlsEncoding = triton::amdgpu::MlsEncodingAttr::get(
                                                           matrixOp.getContext(), opIdx, mlsTile,
-                                                          elemBitWidth, static_cast<unsigned>(altKind), version,
+                                                          elemBitWidth, mlsInsn->getElemBitTyKind(),
+                                                          static_cast<unsigned>(altKind), version,
                                                           order, warpsPerCTA);
       newMatrixOp->setAttr(triton::amdgpu::MlsEncodingAttr::getMnemonic(), mlsEncoding);
 
@@ -331,8 +393,12 @@ public:
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
+    auto arch = getAMDArch(mod);
+    assert(arch.has_value() && "expected arch");
+    auto features = triton::AMD::deduceHCUISAFeature(*arch);
+    auto mlsVersion = getMlsVersionFromFeatures(features);
     mlir::RewritePatternSet patterns(context);
-    patterns.add<MlsEncodingInsertion>(context);
+    patterns.add<MlsEncodingInsertion>(context, mlsVersion);
     if (mlir::applyPatternsGreedily(mod, std::move(patterns)).failed())
       signalPassFailure();
   }

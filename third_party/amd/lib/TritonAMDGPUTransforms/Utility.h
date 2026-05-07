@@ -19,7 +19,7 @@ using namespace mlir;
 int deduceMinCountOnDefChain(Value defValue, Operation *consumerOp,
                              llvm::function_ref<int(Operation *)> countFunc);
 
-FailureOr<std::pair<triton::DotOp, unsigned>>
+FailureOr<std::pair<triton::DotOpInterface, unsigned>>
 getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp);
 
 // Returns a padded shared encoding minimizing bank conflicts for the given

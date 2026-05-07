@@ -558,6 +558,30 @@ Swizzling examples (matrix is filled with numbers 0, 1, 2, .. columns*rows-1):
   let hasCustomAssemblyFormat = 1;
 }
 
+def TTG_MlsElemBitTyKindEnum : I32EnumAttr<
+    "MlsElemBitTyKind", "",
+    [
+        I32EnumAttrCase<"None", 0, "none">,
+        I32EnumAttrCase<"B4", 1, "b4">,        // global 4bit --> shared 4bit --> dot operand 4bit
+        I32EnumAttrCase<"B4Mix", 2, "b4mix">,  // global 4bit --> shared 4bit --> dot operand padded 8bit
+        I32EnumAttrCase<"I4", 3, "i4">,        // global 4bit --> shared padded 8bit --> dot operand 8bit
+        I32EnumAttrCase<"U4", 4, "u4">,        // global 4bit --> shared padded 8bit --> dot operand 8bit
+        I32EnumAttrCase<"F4", 5, "f4">,        // global 4bit --> shared padded 8bit --> dot operand 8bit
+        I32EnumAttrCase<"F6", 6, "f6">,        // global 4bit --> shared padded 8bit --> dot operand 8bit
+    ]> {
+    let cppNamespace = "::mlir::triton::gpu";
+}
+
+def TTG_MlsTileKindEnum : I32EnumAttr<
+    "MlsTileKind", "",
+    [
+        I32EnumAttrCase<"Elems", 0, "elems">,
+        I32EnumAttrCase<"Global", 1, "global">,
+        I32EnumAttrCase<"Shared", 2, "shared">
+    ]> {
+    let cppNamespace = "::mlir::triton::gpu";
+}
+
 def AMDMlsSharedEncodingAttr :
   TritonGPU_Attr<"AMDMlsSharedEncoding", "hcu_mls_shared_encoding",
                 [SharedEncodingTrait, LayoutEncodingTrait]> {
@@ -568,7 +592,8 @@ def AMDMlsSharedEncodingAttr :
 
   let parameters = (ins "unsigned":$opIdx,  // or nonKTileIdx
                         ArrayRefParameter<"unsigned">:$mlsTile,
-                        "unsigned":$elemBitWidth,
+                        "unsigned":$elemBitWidth,       // share memory elem bit width, for bit 4|6, it is 8;
+                        "MlsElemBitTyKind":$elemBitTyKind,
                         "unsigned":$alt2Kind,
                         "unsigned":$version,
                         ArrayRefParameter<"unsigned">:$order,
@@ -577,10 +602,11 @@ def AMDMlsSharedEncodingAttr :
   let assemblyFormat = "`<` `opIdx` `=` $opIdx `,` "
                        "`mlsTile` `=` `[` $mlsTile `]` `,` "
                        "`elemBitWidth` `=` $elemBitWidth `,` "
+                       "`elemBitTyKind` `=` $elemBitTyKind `,` "
                        "`alt2Kind` `=` $alt2Kind `,` "
                        "`version` `=` $version `,` "
                        "`order` `=` `[` $order `]` `,` "
-                       "`CTAEncodingAttr` `=` $CTALayout `>`";
+                       "`CTALayout` `=` $CTALayout `>`";
 }
 
 //===----------------------------------------------------------------------===//
@@ -1090,7 +1116,7 @@ w2 w2 w3 w3
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
     SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
-    SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
+    SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape /* elem shape */, int kWidth, int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
 
     // Check if tilesPerWarp is 1 in every dimension.
@@ -1122,6 +1148,32 @@ w2 w2 w3 w3
       else
         ret[rank - 1] = std::max<unsigned>(1, ret[rank - 1] / getInstrsPerWarp()[1]);
       return ret;
+    }
+    unsigned getScaledOperandKWidth(unsigned dotOperandKWidth, MlsElemBitTyKind elemBitTyKind) const {
+      return elemBitTyKind == MlsElemBitTyKind::B4 ? dotOperandKWidth * 2
+                                                   : dotOperandKWidth;
+    }
+    SmallVector<int64_t> getInstrShapeForScaledOperand(unsigned dotOperandKWidth,
+                                                       MlsElemBitTyKind elemBitTyKind,
+                                                       int opIdx) const {
+      return getInstrShapeForOperand(getScaledOperandKWidth(dotOperandKWidth, elemBitTyKind),
+                                     opIdx);
+    }
+    SmallVector<int64_t> getRepForScaledOperand(ArrayRef<int64_t> operandShape,
+                                                unsigned dotOperandKWidth,
+                                                MlsElemBitTyKind elemBitTyKind,
+                                                int opIdx) const {
+      return getRepForOperand(operandShape,
+                              getScaledOperandKWidth(dotOperandKWidth, elemBitTyKind),
+                              opIdx);
+    }
+    SmallVector<unsigned> getMfmaTileRepForScaledOperand(ArrayRef<int64_t> operandShape,
+                                                         unsigned dotOperandKWidth,
+                                                         MlsElemBitTyKind elemBitTyKind,
+                                                         int opIdx) const {
+      return getMfmaTileRepForOperand(operandShape,
+                                      getScaledOperandKWidth(dotOperandKWidth, elemBitTyKind),
+                                      opIdx);
     }
   }];
 
@@ -1493,7 +1545,11 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
     ins
     "unsigned":$opIdx,
     "Attribute":$parent,
-    DefaultValuedParameter<"unsigned", "0">:$kWidth
+    DefaultValuedParameter<"unsigned", "0">:$kWidth,
+
+    // HCU: MLS-specific extension for scaled dot.
+    // LSB: 4bit MlsElemBitTyKind + 1bit isNonKPack.
+    DefaultValuedParameter<"unsigned", "0">:$mlsScaledExt
   );
 
   let builders = [
@@ -1502,15 +1558,30 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
                      "Type":$eltTy), [{
       NvidiaMmaEncodingAttr parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent);
       if (!parentAttr || (!parentAttr.isAmpere() && !parentAttr.isHopper()))
-        return $_get(context, opIdx, parent, 0);
+        return $_get(context, opIdx, parent, 0, 0);
       // For MMAV2 and V3
       unsigned bitwidth = eltTy.getIntOrFloatBitWidth();
       unsigned kWidth = std::max(32 / bitwidth, 1u);
-      return $_get(context, opIdx, parent, kWidth);
-    }]>
+      return $_get(context, opIdx, parent, kWidth, 0);
+    }]>,
+
+    // Keep legacy call sites unchanged after adding mlsScaledExt.
+    AttrBuilder<(ins "unsigned":$opIdx,
+                     "Attribute":$parent,
+                     "unsigned":$kWidth), [{
+      return $_get(context, opIdx, parent, kWidth, 0);
+    }]>,
+
   ];
 
-  let assemblyFormat = "`<` `{` struct(params) `}` `>`";
+  // let assemblyFormat = "`<` `{` struct(params) `}` `>`";
+  let assemblyFormat = "`<` `{` "
+                       "`opIdx` `=` $opIdx `,` "
+                       "`parent` `=` $parent `,` "
+                       "`kWidth` `=` $kWidth "
+                       "(`,` `mlsScaledExt` `=` $mlsScaledExt^)? "
+                       "`}` `>`";
+
   let genVerifyDecl = 1;
   let extraClassDeclaration = extraDistributedDeclaration;
 }

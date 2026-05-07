@@ -13,6 +13,12 @@ def is_hcu_support_mls():
     target = triton.runtime.driver.active.get_current_target()
     return target.backend == 'hip' and (target.arch == 'gfx938' or target.arch == 'gfx946' or target.arch == 'gfx92a')
 
+def is_hcu_support_mmac_layout():
+    target = triton.runtime.driver.active.get_current_target()
+    if target is None:
+        return False
+    return target.backend == 'hip' and (target.arch == 'gfx938' or target.arch == 'gfx946')
+
 
 regression_run = True
 
@@ -864,6 +870,10 @@ def test_mls_comprehensive(dtype, config_list, layout_combination,
         pytest.skip("skip: not support mls")
         return
 
+    if not is_hcu_support_mmac_layout() and mmac_layout_force != 1:
+        pytest.skip("skip: not support mmac_layout")
+        return
+
     print(f"config_list={config_list}")
     print(f"dtype={dtype}")
 
@@ -907,7 +917,6 @@ def test_mls_comprehensive(dtype, config_list, layout_combination,
         pytest.skip(f"skip: [{M},{N},{K}] with num_stages={num_stages} and async_copy_use_single_buffer={async_copy_use_single_buffer}")
     if (num_stages == 1 and schedule_hint == "local-prefetch"):
         pytest.skip(f"skip: [{M},{N},{K}] with num_stages={num_stages} and schedule_hint={schedule_hint}")
-
     if boundary_check or use_mask:
         if (mix_load != 0b11):
             pytest.skip(f"skip: [{M},{N},{K}] with boundary_check=True and mix_load=0b11")
@@ -1069,23 +1078,23 @@ torch.manual_seed(0)
 # result1 = run_layout_combination_test(a1, b1, 'row', 'row', 0b00, True, True, "Case 1: A(row) × B(row)", config1)
 
 
-# 测试用例2: A(row) × B(col)
-M = 16
-N = 16
-K = 40
-dtype = torch.float16
+# # 测试用例2: A(row) × B(col)
+# M = 16
+# N = 16
+# K = 40
+# dtype = torch.float16
 
-config2 = {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 64, 'num_warps': 1, "GROUP_SIZE_M": 1}
-config2['optimize_epilogue'] = 1
-config2['num_stages'] = 2
-config2['async_copy_use_single_buffer'] = True
-# config2['schedule_hint'] = "local-prefetch"
+# config2 = {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 64, 'num_warps': 1, "GROUP_SIZE_M": 1}
+# config2['optimize_epilogue'] = 1
+# config2['num_stages'] = 2
+# config2['async_copy_use_single_buffer'] = True
+# # config2['schedule_hint'] = "local-prefetch"
 
-print(f"\n{'='*60}")
-print(f"测试用例2: A(row) × B(col), config={config2}")
-print(f"A: [{M}, {K}] 行主序, B: [{K}, {N}] 行主序但逻辑上是[{N}, {K}]列主序")
-a2, b2 = create_test_matrices(M, K, N, 'row', 'col', dtype)
-result2 = run_layout_combination_test(a2, b2, 'row', 'col', 0b11, False, True, "Case 2: A(row) × B(col)", config2)
+# print(f"\n{'='*60}")
+# print(f"测试用例2: A(row) × B(col), config={config2}")
+# print(f"A: [{M}, {K}] 行主序, B: [{K}, {N}] 行主序但逻辑上是[{N}, {K}]列主序")
+# a2, b2 = create_test_matrices(M, K, N, 'row', 'col', dtype)
+# result2 = run_layout_combination_test(a2, b2, 'row', 'col', 0b11, False, True, "Case 2: A(row) × B(col)", config2)
 
 
 
@@ -1321,5 +1330,5 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
 #     benchmark_matmul_mls.run(show_plots=True, print_data=True)
 
 
-# if __name__ == "__main__":
-#     pytest.main(["-v", "-s", "mls-unit-test.py::test_matrix_load_store_comprehensive[16-config_list11-col-dtype1-True-True]"])
+if __name__ == "__main__":
+    pytest.main(["-v", "-s", "mls-unit-test.py::test_mls_comprehensive[1-16-config_list0-layout_combination1-dtype0-1-True-none-True-1-False-False]"])

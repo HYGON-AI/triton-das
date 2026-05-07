@@ -15,7 +15,7 @@ namespace {
 // The tuple used as key to query MFMA intrinsic map.
 using MfmaKey =
     std::tuple<unsigned /*version*/, unsigned /*mDim*/, unsigned /*nDim*/,
-               TypeID /*aElemType*/, TypeID /*bElemType*/>;
+               TypeID /*aElemType*/, TypeID /*bElemType*/, TypeID /*cElemType*/>;
 
 // Returns a key for querying an MFMA intrinsic for the given parameters.
 // Updates the passed-in A/B element type to the chosen MFMA intrinsic's A/B
@@ -43,7 +43,7 @@ MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
     // In the MFMA map we use the proper TF32 type. So "fix" it here.
     assert(version == 3);
     aET = bET = b.getType<FloatTF32Type>();
-  } else if (version <= 3 && capFP8 &&
+  } else if (version >= 3 && capFP8 &&
              isa<Float8E4M3FNType, Float8E5M2Type>(aET) &&
              isa<Float8E4M3FNType, Float8E5M2Type>(bET)) {
     (void)features;
@@ -57,7 +57,17 @@ MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
     // CDNA4. So emulate with FP16.
     aElemType = bElemType = aET = bET = b.getF16Type();
   }
-  return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID()};
+
+  bool cETIsI8 = isa<IntegerType>(aET) && isa<IntegerType>(bET) &&
+                 cast<IntegerType>(aET).getWidth() == 8 &&
+                 cast<IntegerType>(bET).getWidth() == 8;
+  bool cETIsFP16 = features & HCUISAFeature::MMAC_ACC_FP16;
+  bool cETIsBF16 = features & HCUISAFeature::MMAC_ACC_BF16;
+  auto cETID = cETIsI8 ? b.getI32Type().getTypeID() :
+              cETIsFP16 ? b.getType<Float16Type>().getTypeID() :
+              cETIsBF16 ? b.getType<BFloat16Type>().getTypeID() :
+              b.getType<Float32Type>().getTypeID();
+  return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID(), cETID};
 }
 
 //===----------------------------------------------------------------------===//
@@ -138,10 +148,25 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 //        Now we always mock us as CDNA3 MFMA intrinsics to reuse the existing
 //        code, but it should be noted that this is a workaround and we should
 //        fix it later.
-#define TRITON_MMAC(m, n, aET, bET, symbol, k, kBase)                          \
+#define TRITON_MMAC_v(v, m, n, aET, bET, cET, symbol, k, kBase)                \
   {                                                                            \
-    /*key=*/{3, m, n, aET.getTypeID(), bET.getTypeID()}, /*value=*/{           \
+    /*key=*/{v, m, n, aET.getTypeID(), bET.getTypeID(), cET.getTypeID()},      \
+    /*value=*/{                                                                \
       {ROCDL::symbol::getOperationName(), k, kBase},                           \
+    }                                                                          \
+  }
+
+#define TRITON_MMAC_v3to4(m, n, aET, bET, cET, symbol, k, kBase)               \
+  TRITON_MMAC_v(3, m, n, aET, bET, cET, symbol, k, kBase),                     \
+      TRITON_MMAC_v(4, m, n, aET, bET, cET, symbol, k, kBase)
+
+#define TRITON_MMAC_v4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,         \
+                             symbol2, k2, kBase2)                              \
+  {                                                                            \
+    /*key=*/{4, m, n, aET.getTypeID(), bET.getTypeID(), cET.getTypeID()},      \
+    /*value=*/{                                                                \
+      {ROCDL::symbol1::getOperationName(), k1, kBase1},                        \
+      {ROCDL::symbol2::getOperationName(), k2, kBase2},                        \
     }                                                                          \
   }
 
@@ -152,6 +177,7 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   auto f16T = b.getF16Type();
   auto bf16T = b.getBF16Type();
   auto i8T = b.getI8Type();
+  auto i32T = b.getI32Type();
   auto amdFp8T = b.getType<Float8E4M3FNUZType>();
   auto amdBf8T = b.getType<Float8E5M2FNUZType>();
   auto ocpFp8T = b.getType<Float8E4M3FNType>();
@@ -161,31 +187,43 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   mfmaMap = {
       // f32 inputs
       // mmac_f32_16x16x8f32
-      TRITON_MMAC(16, 16, f32T, f32T, mmac_f32_16x16x8f32, 8, 2),
+      TRITON_MMAC_v3to4(16, 16, f32T, f32T, f32T, mmac_f32_16x16x8f32, 8, 2),
       // mmac_f32_16x16x4f32
-      TRITON_MMAC(16, 16, f32T, f32T, mmac_f32_16x16x4f32, 4, 1),
+      TRITON_MMAC_v3to4(16, 16, f32T, f32T, f32T, mmac_f32_16x16x4f32, 4, 1),
 
       // f16 inputs
       // mmac_f32_16x16x16xf16
-      TRITON_MMAC(16, 16, f16T, f16T, mmac_f32_16x16x16f16, 16, 4),
+      TRITON_MMAC_v3to4(16, 16, f16T, f16T, f32T, mmac_f32_16x16x16f16, 16, 4),
 
       // bf16 inputs
       // mmac_f32_16x16x16xbf16
-      TRITON_MMAC(16, 16, bf16T, bf16T, mmac_f32_16x16x16bf16, 16, 4),
+      TRITON_MMAC_v3to4(16, 16, bf16T, bf16T, f32T, mmac_f32_16x16x16bf16, 16, 4),
 
       // int8 inputs
       // mmac_i32_16x16x32i8
-      TRITON_MMAC(16, 16, i8T, i8T, mmac_i32_16x16x32i8, 32, 8),
+      TRITON_MMAC_v3to4(16, 16, i8T, i8T, i32T, mmac_i32_16x16x32i8, 32, 8),
 
       // fp8/bf8 inputs
       // mmac_f32_16x16x32_fp8_fp8
-      TRITON_MMAC(16, 16, ocpFp8T, ocpFp8T, mmac_f32_16x16x32_fp8_fp8, 32, 8),
+      TRITON_MMAC_v3to4(16, 16, ocpFp8T, ocpFp8T, f32T, mmac_f32_16x16x32_fp8_fp8, 32, 8),
       // mmac_f32_16x16x32_fp8_bf8
-      TRITON_MMAC(16, 16, ocpFp8T, ocpBf8T, mmac_f32_16x16x32_fp8_bf8, 32, 8),
+      TRITON_MMAC_v3to4(16, 16, ocpFp8T, ocpBf8T, f32T, mmac_f32_16x16x32_fp8_bf8, 32, 8),
       // mmac_f32_16x16x32_bf8_fp8
-      TRITON_MMAC(16, 16, ocpBf8T, ocpFp8T, mmac_f32_16x16x32_bf8_fp8, 32, 8),
+      TRITON_MMAC_v3to4(16, 16, ocpBf8T, ocpFp8T, f32T, mmac_f32_16x16x32_bf8_fp8, 32, 8),
       // mmac_f32_16x16x32_bf8_bf8
-      TRITON_MMAC(16, 16, ocpBf8T, ocpBf8T, mmac_f32_16x16x32_bf8_bf8, 32, 8),
+      TRITON_MMAC_v3to4(16, 16, ocpBf8T, ocpBf8T, f32T, mmac_f32_16x16x32_bf8_bf8, 32, 8),
+
+      // fp4
+      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_f32_16x16x64_fp4, 64, 16,
+                          mmac_f32_16x16x32_f8f6f4, 32, 8),
+      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f16T, mmac_f16_16x16x64_fp4, 64, 16,
+                          mmac_f16_16x16x32_f8f6f4, 32, 8),
+      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, bf16T, mmac_bf16_16x16x64_fp4, 64, 16,
+                          mmac_bf16_16x16x32_f8f6f4, 32, 8),
+
+      // scaled fp4
+      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_scale_f32_16x16x64_fp4, 64, 16,
+                          mmac_scale_f32_16x16x32_f8f6f4, 32, 8),
   };
 #if 0
   mfmaMap = {
@@ -338,8 +376,9 @@ MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
 
   // If We have more than one instrinsics, prefer those with a larger K.
   for (const auto [symbol, k, kBase] : llvm::drop_end(values)) {
-    if (inputKDim >= k)
+    if (inputKDim >= k) {
       return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType);
+    }
   }
 
   // We always have one choice--the only / smallest-K intrinsic.

@@ -237,6 +237,10 @@ SmallVector<int64_t> getAllocationShapePerCTA(Attribute layout,
                                               ArrayRef<int64_t> shape);
 SmallVector<int64_t> getAllocationShapePerCTA(Type type);
 
+// HCU: extend to support mls f8f6f4 different tile kinds view.
+SmallVector<int64_t> getMlsExpandedShape(Attribute layout, ArrayRef<int64_t> shape,
+                                         MlsTileKind tileKind = MlsTileKind::Elems);
+
 unsigned getNumCTAs(Attribute layout);
 
 // Return the order that represents that the batch is in row-major or

@@ -339,7 +339,9 @@ getMlsEncIfAllUsersAreDotEnc(Value val) {
   auto ctaLayout = ttg::getCTALayout(matrixTy.getEncoding());
   auto attr = ttg::AMDMlsSharedEncodingAttr::get(
                             matrixOp.getContext(), mlsAttr.getOpIdx(), mlsAttr.getMlsTile(),
-                            mlsAttr.getElemBitWidth(), mlsAttr.getAlt2Kind(),
+                            mlsAttr.getElemBitWidth(),
+                            static_cast<ttg::MlsElemBitTyKind>(mlsAttr.getElemBitTyKind()),
+                            mlsAttr.getAlt2Kind(),
                             mlsAttr.getVersion(), mlsAttr.getOrder(),
                             ctaLayout);
   return attr;

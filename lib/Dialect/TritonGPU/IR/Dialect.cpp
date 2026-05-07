@@ -74,12 +74,26 @@ LinearEncodingAttr toLinearEncoding(RankedTensorType type) {
 }
 
 unsigned getTotalElemsPerThread(Attribute layout, ArrayRef<int64_t> shape) {
+  // HCU: For 4bit padded scaled-dot operands, compute element counts on the
+  // expanded shape so canonicalization does not trim away padding-backed elems.
+  if (auto dotLayout = dyn_cast<DotOperandEncodingAttr>(layout);
+      dotLayout && dotLayout.getMlsScaledExt() != 0) {
+    auto shapeL = getMlsExpandedShape(dotLayout, shape, MlsTileKind::Elems);
+    return toLinearEncoding(dotLayout, shapeL).getTotalElemsPerThread(shapeL);
+  }
   return toLinearEncoding(cast<DistributedEncodingTrait>(layout), shape)
       .getTotalElemsPerThread(shape);
 }
 
 SmallVector<unsigned> getElemsPerThread(Attribute layout,
                                         ArrayRef<int64_t> shape) {
+  // HCU: For 4bit padded scaled-dot operands, compute element counts on the
+  // expanded shape so canonicalization does not trim away padding-backed elems.
+  if (auto dotLayout = dyn_cast<DotOperandEncodingAttr>(layout);
+      dotLayout && dotLayout.getMlsScaledExt() != 0) {
+    auto shapeL = getMlsExpandedShape(dotLayout, shape, MlsTileKind::Elems);
+    return toLinearEncoding(dotLayout, shapeL).getElemsPerThread(shapeL);
+  }
   return toLinearEncoding(cast<DistributedEncodingTrait>(layout), shape)
       .getElemsPerThread(shape);
 }
@@ -323,6 +337,8 @@ SmallVector<int64_t> getAllocationShapePerCTA(Attribute layout,
       auto packedAxis = getOrder(sharedMMALayout, shapeLogical)[0];
       shape[packedAxis] *= 2;
     }
+  } else if (auto paddedEnc = dyn_cast<AMDMlsSharedEncodingAttr>(layout)) {
+    shape = getMlsExpandedShape(paddedEnc, shapeLogical, MlsTileKind::Shared);
   }
   return getShapePerCTA(layout, shape);
 }
@@ -336,6 +352,85 @@ SmallVector<int64_t> getAllocationShapePerCTA(Type type) {
   auto tensorType = cast<TensorOrMemDesc>(type);
   return getAllocationShapePerCTA(tensorType.getEncoding(),
                                   tensorType.getShape());
+}
+
+// HCU: extend to support mls f8f6f4 different tile kinds view.
+SmallVector<int64_t> getMlsExpandedShape(Attribute layout,
+                                         ArrayRef<int64_t> shape,
+                                         MlsTileKind tileKind) {
+  enum class MlsFlowView : unsigned {
+    Shared = 0,
+    DotOperand = 1,
+  };
+  auto isMlsBit4ElemTyKindLocal = [](MlsElemBitTyKind elemBitTyKind) {
+    return elemBitTyKind == MlsElemBitTyKind::B4 ||
+           elemBitTyKind == MlsElemBitTyKind::B4Mix ||
+           elemBitTyKind == MlsElemBitTyKind::I4 ||
+           elemBitTyKind == MlsElemBitTyKind::U4 ||
+           elemBitTyKind == MlsElemBitTyKind::F4;
+  };
+  auto isMlsPaddedBit4ElemTyKindLocal = [](MlsElemBitTyKind elemBitTyKind) {
+    return elemBitTyKind == MlsElemBitTyKind::I4 ||
+           elemBitTyKind == MlsElemBitTyKind::U4 ||
+           elemBitTyKind == MlsElemBitTyKind::F4;
+  };
+  auto expandsMlsShapeInDialectView =
+      [&](MlsElemBitTyKind elemBitTyKind, MlsFlowView view) {
+        if (!isMlsBit4ElemTyKindLocal(elemBitTyKind))
+          return false;
+        if (view == MlsFlowView::Shared)
+          return isMlsPaddedBit4ElemTyKindLocal(elemBitTyKind);
+        return elemBitTyKind != MlsElemBitTyKind::B4;
+      };
+  SmallVector<int64_t> retShape(shape.begin(), shape.end());
+  if (tileKind == MlsTileKind::Global)
+    return retShape;
+
+  if (auto sharedLayout = dyn_cast<AMDMlsSharedEncodingAttr>(layout)) {
+    assert(tileKind == MlsTileKind::Elems || tileKind == MlsTileKind::Shared);
+    auto elemBitTyKind = sharedLayout.getElemBitTyKind();
+    auto view = tileKind == MlsTileKind::Shared ? MlsFlowView::Shared
+                                                : MlsFlowView::DotOperand;
+    bool expandsShape = tileKind == MlsTileKind::Elems
+                            ? isMlsBit4ElemTyKindLocal(elemBitTyKind)
+                            : expandsMlsShapeInDialectView(elemBitTyKind, view);
+    if (sharedLayout.getElemBitWidth() != 8 || !expandsShape)
+      return retShape;
+
+    unsigned opIdx = sharedLayout.getOpIdx();
+    auto order = sharedLayout.getOrder();
+    unsigned rank = order.size();
+    unsigned fullRank = retShape.size();
+    assert(fullRank >= rank && "expanded MLS shape rank must be >= encoding rank");
+    unsigned rankOffset = fullRank - rank;
+    unsigned kDimIdx = opIdx == 0 ? rank - 1 : rank - 2;
+    bool kMajor = order[0] == kDimIdx;
+    unsigned packDimIdx = kMajor ? (1 - opIdx) : opIdx;
+    // For pipelined allocations, `retShape` can be [num_stages, ...logical_dims].
+    // Expand only the logical matrix dimension; never the leading stage dim.
+    retShape[rankOffset + packDimIdx] *= 2;
+    return retShape;
+  }
+
+  if (auto dotLayout = dyn_cast<DotOperandEncodingAttr>(layout)) {
+    assert(tileKind == MlsTileKind::Elems);
+    if (retShape.size() < 2)
+      return retShape;
+
+    unsigned mlsScaledExt = dotLayout.getMlsScaledExt();
+    auto elemBitTyKind = static_cast<MlsElemBitTyKind>(mlsScaledExt & 0xFu);
+    if (!expandsMlsShapeInDialectView(elemBitTyKind,
+                                      MlsFlowView::DotOperand))
+      return retShape;
+
+    int rank = static_cast<int>(retShape.size());
+    int kDim = dotLayout.getOpIdx() == 0 ? rank - 1 : rank - 2;
+    int nonKDim = dotLayout.getOpIdx() == 0 ? rank - 2 : rank - 1;
+    bool isNonKPack = ((mlsScaledExt >> 4) & 0x1u) != 0;
+    retShape[isNonKPack ? nonKDim : kDim] *= 2;
+  }
+
+  return retShape;
 }
 
 unsigned getNumCTAs(Attribute layout) {
@@ -2483,7 +2578,8 @@ CTAEncodingAttr DotOperandEncodingAttr::getCTALayout() const {
 }
 LogicalResult DotOperandEncodingAttr::verify(
     ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
-    unsigned opIdx, Attribute parent, unsigned kWidth) {
+    unsigned opIdx, Attribute parent, unsigned kWidth, unsigned mlsScaledExt) {
+  (void)mlsScaledExt;
   if (opIdx != 0 && opIdx != 1) {
     return emitError() << "ttg.dot_op opIdx parameter can be 0 or 1, got: "
                        << opIdx;

@@ -146,6 +146,10 @@ TargetInfo::queryLDSTransLoadParams(int bitWidth) const {
       (isCDNA4 || isGFX1250) && llvm::is_contained({16, 8, 4, 6}, bitWidth);
   if (!canUseTransLoad)
     return std::nullopt;
+
+  if (!supportsLDSTransLoadHCU(bitWidth))
+    return std::nullopt;
+
   unsigned numLanesInShuffleGroup = getWarpSize() / 4;
   unsigned instBitWidth = isGFX1250 && bitWidth == 16 ? 128 : 64;
   unsigned tileSize = instBitWidth / bitWidth;
@@ -654,6 +658,11 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
     break;
   }
 
+  return false;
+}
+
+bool TargetInfo::supportsLDSTransLoadHCU(int bitWidth) const {
+  (void)bitWidth;
   return false;
 }
 

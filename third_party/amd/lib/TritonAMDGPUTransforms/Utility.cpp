@@ -117,7 +117,7 @@ int deduceMinCountOnDefChain(Value defValue, Operation *consumerOp,
                                   std::numeric_limits<int>::max());
 }
 
-FailureOr<std::pair<triton::DotOp, unsigned>>
+FailureOr<std::pair<triton::DotOpInterface, unsigned>>
 getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp) {
   SetVector<Operation *> slices;
   mlir::getForwardSlice(matrixOp.getResult(), &slices);
@@ -127,9 +127,9 @@ getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp) {
     Operation *op = worklist.front();
     worklist.pop_front();
 
-    if (auto dotOp = dyn_cast<triton::DotOp>(op)) {
-      for (unsigned idx = 0; idx < dotOp.getNumOperands(); ++idx) {
-        auto defineOp = dotOp.getOperand(idx).getDefiningOp();
+    if (auto dotOp = dyn_cast<triton::DotOpInterface>(op)) {
+      for (unsigned idx = 0; idx < dotOp->getNumOperands(); ++idx) {
+        auto defineOp = dotOp->getOperand(idx).getDefiningOp();
         if (defineOp == matrixOp || (defineOp && slices.contains(defineOp))) {
           return success(std::make_pair(dotOp, idx));
         }
