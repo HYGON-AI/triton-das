@@ -1,6 +1,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <numeric>
 #include <utility>
 
@@ -1418,13 +1419,39 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
 }
 
 void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
+  auto useMmacCompatMfmaPrint = []() {
+    const char *value = std::getenv("TRITON_MMAC_COMPAT_MFMA_PRINT");
+    if (value == nullptr)
+      return false;
+    llvm::StringRef flag = llvm::StringRef(value).trim();
+    return flag.equals_insensitive("1") || flag.equals_insensitive("on");
+  };
+  auto mmacLayout = getMmacLayout();
+  bool compatMfmaPrint = useMmacCompatMfmaPrint();
+  std::optional<bool> compatIsTransposed = std::nullopt;
+  if (compatMfmaPrint) {
+    switch (mmacLayout) {
+    case MmacLayout::INTERLEAVE:
+      compatIsTransposed = true;
+      break;
+    case MmacLayout::INTERLEAVE_TRANSPOSE:
+      compatIsTransposed = false;
+      break;
+    default:
+      break;
+    }
+  }
+
   printer << "<{"
           << "version = " << getVersion()                   //
           << ", warpsPerCTA = [" << getWarpsPerCTA() << "]" //
           << ", instrShape = [" << getInstrShape() << "]";
 
-  printer << ", isTransposed = " << getIsTransposed();
-  printer << ", mmacLayout = " << (uint32_t)getMmacLayout();
+  printer << ", isTransposed = "
+          << (compatIsTransposed.has_value() ? *compatIsTransposed
+                                             : getIsTransposed());
+  if (mmacLayout != MmacLayout::MFMA && !compatIsTransposed.has_value())
+    printer << ", mmacLayout = " << (uint32_t)mmacLayout;
 
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getRank());

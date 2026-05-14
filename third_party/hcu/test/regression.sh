@@ -21,6 +21,9 @@ hcu_test_cmds=(
   "python ${hcu_file_path}/persistent-matmul.py --no_benchmark"
   "pytest ${hcu_file_path}/test_amd_buffer_ops_4gb.py"
   "pytest ${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"
+  "pytest ${hcu_file_path}/gluon/gluon_kernel_gemm_a8w8.py"
+  "pytest ${hcu_file_path}/gluon/gluon_kernel_pa_decode.py"
+  "pytest ${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"
 )
 
 function run_pytest() {

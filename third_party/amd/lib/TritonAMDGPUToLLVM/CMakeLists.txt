@@ -32,7 +32,7 @@ add_triton_library(TritonAMDGPUToLLVM
     BarrierOpToLLVM.cpp
     # ---- HCU code ---- #
     DotOpToLLVM/MMAC.cpp
-    ElementwiseOpHCUToLLVM.cpp
+    ElementwiseOpToLLVMHCU.cpp
     MlsOpToLLVM.cpp
     ConvertWarpSpecializeToLLVM.cpp
 

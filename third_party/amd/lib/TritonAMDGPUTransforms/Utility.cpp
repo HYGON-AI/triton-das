@@ -117,45 +117,6 @@ int deduceMinCountOnDefChain(Value defValue, Operation *consumerOp,
                                   std::numeric_limits<int>::max());
 }
 
-FailureOr<std::pair<triton::DotOpInterface, unsigned>>
-getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp) {
-  SetVector<Operation *> slices;
-  mlir::getForwardSlice(matrixOp.getResult(), &slices);
-
-  std::deque<Operation *> worklist(slices.begin(), slices.end());
-  while (!worklist.empty()) {
-    Operation *op = worklist.front();
-    worklist.pop_front();
-
-    if (auto dotOp = dyn_cast<triton::DotOpInterface>(op)) {
-      for (unsigned idx = 0; idx < dotOp->getNumOperands(); ++idx) {
-        auto defineOp = dotOp->getOperand(idx).getDefiningOp();
-        if (defineOp == matrixOp || (defineOp && slices.contains(defineOp))) {
-          return success(std::make_pair(dotOp, idx));
-        }
-      }
-    } else if (auto scfYieldOp = dyn_cast<scf::YieldOp>(op)) {
-      for (auto &&yieldOperand : llvm::enumerate(scfYieldOp.getOperands())) {
-        unsigned argIdx = yieldOperand.index();
-        Value argVal = yieldOperand.value();
-
-        Operation *defOp = argVal.getDefiningOp();
-        if (defOp == matrixOp || (defOp && slices.contains(defOp))) {
-          auto scfRes = scfYieldOp->getParentOp()->getResult(argIdx);
-          SetVector<Operation *> outSlice;
-          mlir::getForwardSlice(scfRes, &outSlice);
-          for (Operation *outOp : outSlice)
-            if (slices.insert(outOp))
-              worklist.push_back(outOp);
-        }
-      }
-    }
-
-  }
-
-  return failure();
-}
-
 // On GFX9, lanes in a warp have to write contiguously to shared memory which
 // means we can only add padding at warp boundaries. With 64 lanes, this means:
 // - Padding intervals must be multiples of 256 bytes for 4-byte loads.

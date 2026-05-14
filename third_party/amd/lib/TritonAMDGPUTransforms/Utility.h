@@ -6,6 +6,7 @@
 #include "mlir/IR/Value.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
+#include "UtilityHCU.h"
 
 using namespace mlir;
 
@@ -18,9 +19,6 @@ using namespace mlir;
 // Returns 0 if there is an error traversing the def chain
 int deduceMinCountOnDefChain(Value defValue, Operation *consumerOp,
                              llvm::function_ref<int(Operation *)> countFunc);
-
-FailureOr<std::pair<triton::DotOpInterface, unsigned>>
-getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp);
 
 // Returns a padded shared encoding minimizing bank conflicts for the given
 // tensor and dot encoding.

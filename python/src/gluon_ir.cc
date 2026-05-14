@@ -250,9 +250,27 @@ py::object layoutToGluon(Attribute layout) {
     return layouts.CoalescedLayout();
   } else if (auto amdMfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(layout)) {
     auto cgaBases = getCgaLayoutBases(amdMfma.getCTALayout());
+    // Reverse the mapping from _to_ir: mmacLayout encodes the transposed
+    // semantics that were originally passed as Python `transposed`.
+    // When mmacLayout != MFMA, isTransposed is always false in the IR
+    // and the transpose meaning is carried by mmacLayout instead.
+    bool transposed;
+    switch (amdMfma.getMmacLayout()) {
+    case ttg::MmacLayout::MFMA:
+      transposed = amdMfma.getIsTransposed();
+      break;
+    case ttg::MmacLayout::INTERLEAVE:
+    case ttg::MmacLayout::TRANSPOSE:
+      transposed = true;
+      break;
+    case ttg::MmacLayout::LEGACY:
+    case ttg::MmacLayout::INTERLEAVE_TRANSPOSE:
+      transposed = false;
+      break;
+    }
     return layouts.AMDMFMALayout(
         amdMfma.getVersion(), toStdVector(amdMfma.getInstrShape()),
-        amdMfma.getIsTransposed(), toStdVector(amdMfma.getWarpsPerCTA()),
+        transposed, toStdVector(amdMfma.getWarpsPerCTA()),
         amdMfma.getElementBitWidth(), toStdVector(amdMfma.getTilesPerWarp()),
         cgaBases);
   } else if (auto amdWmma = dyn_cast<ttg::AMDWmmaEncodingAttr>(layout)) {
@@ -402,13 +420,40 @@ void init_gluon_ir(py::module &&m) {
               std::vector<unsigned> &instrShape, bool transposed,
               std::vector<std::vector<int32_t>> &cgaBases,
               std::vector<unsigned> &tilesPerWarp,
-              unsigned elementBitWidth) -> Attribute {
+              unsigned elementBitWidth,
+              const std::string &archName) -> Attribute {
              auto ctx = self.getContext();
              unsigned rank = warpsPerCta.size();
              auto ctaLayout = buildCtaLayoutAttr(ctx, cgaBases, rank);
+
+             // Determine mmacLayout and isTransposed from arch + Python transposed.
+             // Must match deduceHCUISAFeature in TargetUtils.cpp.
+             static const llvm::DenseSet<llvm::StringRef> mmacLayoutArchs = {
+                 "gfx938", "gfx946"};
+             static const llvm::DenseSet<llvm::StringRef> hcuArchs = {
+                 "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"};
+
+             bool isTransposed;
+             ttg::MmacLayout mmacLayout;
+             if (mmacLayoutArchs.count(archName)) {
+               // HCU with MMAC_LAYOUT: transpose via mmacLayout, IR isTransposed=false
+               isTransposed = false;
+               mmacLayout =
+                   transposed ? ttg::MmacLayout::INTERLEAVE
+                              : ttg::MmacLayout::INTERLEAVE_TRANSPOSE;
+             } else if (hcuArchs.count(archName)) {
+               // HCU without MMAC_LAYOUT: LEGACY, IR isTransposed=false
+               isTransposed = false;
+               mmacLayout = ttg::MmacLayout::LEGACY;
+             } else {
+               // AMD MFMA: preserve original isTransposed, use MFMA layout
+               isTransposed = transposed;
+               mmacLayout = ttg::MmacLayout::MFMA;
+             }
+
              return ttg::AMDMfmaEncodingAttr::get(
-                 ctx, version, warpsPerCta, instrShape, transposed, ctaLayout,
-                 tilesPerWarp, elementBitWidth);
+                 ctx, version, warpsPerCta, instrShape, isTransposed, ctaLayout,
+                 tilesPerWarp, elementBitWidth, mmacLayout);
            })
       .def("get_amd_wmma_layout",
            [](GluonOpBuilder &self, unsigned version, bool transposed,

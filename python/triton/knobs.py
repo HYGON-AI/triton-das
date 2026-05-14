@@ -517,6 +517,7 @@ class amd_knobs(base_knobs):
 
     use_async_copy: env_bool = env_bool("TRITON_HIP_USE_ASYNC_COPY")
     scalarize_packed_fops: env_bool = env_bool("AMDGCN_SCALARIZE_PACKED_FOPS")
+    mmac_compat_mfma_print: env_bool = env_bool("TRITON_MMAC_COMPAT_MFMA_PRINT")
 
 
 class proton_knobs(base_knobs):

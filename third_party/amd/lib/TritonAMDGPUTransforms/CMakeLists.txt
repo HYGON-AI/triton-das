@@ -17,6 +17,7 @@ add_triton_library(TritonAMDGPUTransforms
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
+  UtilityHCU.cpp
   # ---- HCU code ---- #
   AccelerateHCUMatmul.cpp
   MmacGroup.cpp

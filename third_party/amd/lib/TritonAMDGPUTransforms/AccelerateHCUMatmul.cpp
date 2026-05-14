@@ -43,21 +43,6 @@ using triton::AMD::ISAFamily;
 constexpr char AttrDecomposedDotScaledSource[] =
     "amdg.decomposed_dot_scaled_source";
 
-MmacLayout getDefaultMmacLayout(StringRef archGen) {
-  // FIXME: Default MMAC layout for HCUs, not the final version, modify and adjust as needed.
-  static DenseMap<StringRef, MmacLayout> defaultLayoutMap = {
-      {"gfx926", MmacLayout::LEGACY},
-      {"gfx928", MmacLayout::LEGACY},
-      {"gfx92a", MmacLayout::LEGACY},
-      {"gfx936", MmacLayout::LEGACY},
-      {"gfx938", MmacLayout::INTERLEAVE},
-      {"gfx946", MmacLayout::INTERLEAVE},
-      {"gfx948", MmacLayout::INTERLEAVE},
-  };
-  // We treat all other architectures as AMD GPUs.
-  return defaultLayoutMap.contains(archGen) ? defaultLayoutMap[archGen] : MmacLayout::MFMA;
-}
-
 struct MatrixLoadInfo {
   triton::MatrixLoadOp matrixOp;
   bool isKMajor;
@@ -1041,7 +1026,7 @@ class BlockedToMFMA : public OpRewritePattern<tt::DotOp> {
 
 public:
   BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack,
-                HCUISAFeature features, MmacLayout mmacLayout,
+                MmacLayout mmacLayout, HCUISAFeature features,
                 PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
         nonKDim(nonKDim), kPack(kPack),
@@ -1114,8 +1099,18 @@ public:
     auto warpsPerTile =
         warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
-    SmallVector<unsigned> tilesPerWarp = {1, 1};
     unsigned rank = oldRetType.getRank();
+    SmallVector<unsigned> tilesPerWarp = {1, 1};
+    // if (mDim == nDim && (mDim == 32 || mDim == 16)) {
+    //   Value scaleA = findScaleAsDecompositionSource(a);
+    //   Value scaleB = findScaleAsDecompositionSource(b);
+    //   tilesPerWarp = deduceTilesPerWarpForScale(
+    //       dyn_cast_if_present<TensorValue>(scaleA),
+    //       dyn_cast_if_present<TensorValue>(scaleB), mDim, retShape[0],
+    //       retShape[1], warpsPerTile);
+    // }
+
+    bool hasPreShuffledScale = (tilesPerWarp[0] > 1 && tilesPerWarp[1] > 1);
     if (rank == 3) {
       tilesPerWarp.insert(tilesPerWarp.begin(), 1);
     }
@@ -1144,25 +1139,41 @@ public:
     else
       mfmaAccType = rewriter.getF32Type();
 
-    // Use transposed mfma layout to enable larger vectorization for global
-    // store instructions. We can not support transposed mfma 4x64 as it
-    // requires to broadcast the operand A.
-    bool isTransposed = !(mDim == 4 && nDim == 64);
+    // HCU MMAC only supports 16x16 instructions (no 4x64/64x4/32x32),
+    // so isTransposed is always true as the 4x64 exception never applies.
+    bool isTransposed = true;
     auto aElemTy = mfmaInstr->aElementType;
     auto is16BitElemTy = (aElemTy.isF16() || aElemTy.isBF16());
 
-    // ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
-    //     oldRetType.getContext(),
-    //     /*version*/ mfmaVersion, warpsPerTile,
-    //     /*instrShape*/ mDim, nDim, /*isTransposed=*/isTransposed, CTALayout,
-    //     mfmaAccType);
-    // HCU: Transposed mfma layout is an AMD-specific feature which is NOT avaiable on all HCUs.
-    isTransposed = false;
+    // Match AMD chained-dot transpose selection, but materialize the choice
+    // through mmacLayout on HCU instead of encoding isTransposed=true.
+    if (mfmaVersion >= 3 && is16BitElemTy && mDim == 16 && nDim == 16 &&
+        rank == 2 && !hasPreShuffledScale &&
+        !useMatrixLoad && (features & HCUISAFeature::MMAC_LAYOUT) != 0) {
+      if (isChainDotHead(dotOp, 0u) &&
+          retShape.front() >= 16 * 2 * warpsPerTile.front() &&
+          retShape.back() == 16 && warpsPerTile.back() == 1) {
+        isTransposed = true;
+        tilesPerWarp = {2, 1};
+      } else if (isChainDotHead(dotOp, 1u) && retShape.front() == 16 &&
+                 retShape.back() >= 16 * 2 * warpsPerTile.back() &&
+                 warpsPerTile.front() == 1) {
+        isTransposed = false;
+        tilesPerWarp = {1, 2};
+      }
+    }
+
+    auto effectiveMmacLayout =
+        mmacLayout == MmacLayout::MFMA
+            ? getMfmaMappedMmacLayout(
+                  isTransposed,
+                  (features & HCUISAFeature::MMAC_LAYOUT) != 0)
+            : mmacLayout;
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(), /*verison=*/mfmaVersion, warpsPerTile,
-        {mDim, nDim, kDim}, /*isTransposed=*/isTransposed, CTALayout,
+        {mDim, nDim, kDim}, /*isTransposed=*/false, CTALayout,
         tilesPerWarp, mfmaAccType.getIntOrFloatBitWidth(),
-        mmacLayout);
+        effectiveMmacLayout);
 
     // convert accumulator
     auto oldAcc = dotOp.getC();
@@ -1289,7 +1300,7 @@ class ScaledBlockedToMFMA final : public OpRewritePattern<triton::DotScaledOp> {
 
 public:
   ScaledBlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim,
-                      int kPack, HCUISAFeature features, MmacLayout mmacLayout,
+                      int kPack, MmacLayout mmacLayout, HCUISAFeature features,
                       PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
         nonKDim(nonKDim), kPack(kPack),
@@ -1376,12 +1387,17 @@ public:
     SmallVector<unsigned, 2> mfmaWarpsPerCTA(rank, 1);
     mfmaWarpsPerCTA[aScale ? 0 : 1] = numWarps;
 
-    // Always use transposed mfma layout. This enables larger vectorization
-    // for global store instructions.
+    auto effectiveMmacLayout =
+        mmacLayout == MmacLayout::MFMA
+            ? getMfmaMappedMmacLayout(
+                  /*logicalIsTransposed=*/true,
+                  (features & HCUISAFeature::MMAC_LAYOUT) != 0)
+            : mmacLayout;
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*version=*/mfmaVersion, mfmaWarpsPerCTA, {mDim, nDim, kDim},
-        /*isTransposed=*/true, ctaLayout, {},
-        oldRetType.getElementType().getIntOrFloatBitWidth());
+        /*isTransposed=*/false, ctaLayout, {},
+        oldRetType.getElementType().getIntOrFloatBitWidth(),
+        effectiveMmacLayout);
 
     auto newRetType = RankedTensorType::get(
         oldRetType.getShape(), oldRetType.getElementType(), mfmaEnc);
@@ -1648,19 +1664,25 @@ public:
                                       {tileM, tileN});
     }
 
-    // Always use transposed mfma layout. This enables larger vectorization
-    // for global store instructions.
+    auto effectiveMmacLayout =
+        mmacLayout == MmacLayout::MFMA
+            ? getMfmaMappedMmacLayout(
+                  /*logicalIsTransposed=*/true,
+                  (hcuFeatures & HCUISAFeature::MMAC_LAYOUT) != 0)
+            : mmacLayout;
     mlir::Attribute mfmaEnc;
     if (llvm::any_of(tilesPerWarp, [](int x) { return x != 1; })) {
       mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
           ctx, /*verison=*/mfmaVersion, warpsPerTile, {mDim, nDim, kDim},
           /*isTransposed=*/false, ctaLayout, tilesPerWarp,
-          oldRetType.getElementType().getIntOrFloatBitWidth(), mmacLayout);
+          oldRetType.getElementType().getIntOrFloatBitWidth(),
+          effectiveMmacLayout);
     } else {
       mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
           ctx, /*verison=*/mfmaVersion, warpsPerTile, {mDim, nDim, kDim},
           /*isTransposed=*/false, ctaLayout, {},
-          oldRetType.getElementType().getIntOrFloatBitWidth(), mmacLayout);
+          oldRetType.getElementType().getIntOrFloatBitWidth(),
+          effectiveMmacLayout);
     }
 
     auto newRetType =
@@ -2203,12 +2225,11 @@ struct TritonAMDGPUAccelerateMatmulPass
 
     RewritePatternSet mfmaPatterns(context);
     auto features = triton::AMD::deduceHCUISAFeature(archGenerationName);
-    auto mmacLayout = getDefaultMmacLayout(archGenerationName);
-    if (mmacLayoutForce != -1) {
-      if (features & HCUISAFeature::MMAC_LAYOUT)
-        mmacLayout = *ttg::symbolizeMmacLayout(mmacLayoutForce);
-      else
-        emitWarning(m.getLoc(), "mmacLayoutForce is set but MMAC_LAYOUT feature is not supported on " + archGenerationName);
+    bool supportsMmacLayout = (features & HCUISAFeature::MMAC_LAYOUT) != 0;
+    auto mmacLayout = mmacLayoutForce != -1 ? *ttg::symbolizeMmacLayout(mmacLayoutForce) : MmacLayout::MFMA;
+    if (mmacLayoutForce != -1 && !supportsMmacLayout) {
+      emitWarning(m.getLoc(), "MMAC_LAYOUT feature is not supported on " + archGenerationName);
+      mmacLayout = getMmacLayoutDefault(archGenerationName);
     }
 
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
@@ -2223,7 +2244,7 @@ struct TritonAMDGPUAccelerateMatmulPass
     case ISAFamily::CDNA3:
       mfmaPatterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
-          features, mmacLayout,
+          mmacLayout, features,
           /*benefit=*/2);
       break;
     case ISAFamily::RDNA3:

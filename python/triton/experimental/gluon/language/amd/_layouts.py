@@ -58,6 +58,8 @@ class AMDMFMALayout(DistributedLayout):
         self.verify()
 
     def _to_ir(self, builder):
+        # HCU:Arch-based mapping (isTransposed + mmacLayout) is done in C++ get_amd_mfma_layout
+        arch_name = getattr(builder.options, "arch", "")
         return builder.get_amd_mfma_layout(
             self.version,
             self.warps_per_cta,
@@ -66,6 +68,7 @@ class AMDMFMALayout(DistributedLayout):
             self.cga_layout,
             self.tiles_per_warp,
             self.element_bitwidth,
+            arch_name,
         )
 
     def mangle(self) -> str:
