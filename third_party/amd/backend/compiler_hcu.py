@@ -235,14 +235,22 @@ class HIPBackend(BaseBackend):
             HIPBackend.instrumentation.load_dialects(ctx)
 
     @staticmethod
-    def is_within_2gb(arg):
+    def get_tensor_physical_size(t) -> int:
+        if t.numel() == 0:
+            return 0
+
+        offset = sum((size_i - 1) * stride_i for size_i, stride_i in zip(t.shape, t.stride()))
+        elements = offset + 1
+        return elements * t.element_size()
+
+    @staticmethod
+    def is_within_4gb(arg):
         import torch
 
-        MAX_INT_32 = 2**31 - 1
         if hasattr(arg, "ptr_range"):
-            return arg.ptr_range() <= MAX_INT_32
+            return arg.ptr_range() <= 2**32 - 2
         if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
-            return arg.untyped_storage().size() <= MAX_INT_32
+            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 2
         return False
 
     @staticmethod
@@ -255,7 +263,7 @@ class HIPBackend(BaseBackend):
     @staticmethod
     def get_tensor_specialization(arg, **kwargs):
         ret = BaseBackend.get_tensor_specialization(arg, **kwargs)
-        if knobs.amd.use_buffer_ops and HIPBackend.is_within_2gb(arg):
+        if knobs.amd.use_buffer_ops and HIPBackend.is_within_4gb(arg):
             ret += "S"
         return ret
 

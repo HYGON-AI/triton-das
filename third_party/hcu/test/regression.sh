@@ -19,6 +19,7 @@ hcu_test_cmds=(
   "python ${hcu_file_path}/extern-functions.py"
   "python ${hcu_file_path}/grouped-gemm.py --no_benchmark"
   "python ${hcu_file_path}/persistent-matmul.py --no_benchmark"
+  "pytest ${hcu_file_path}/test_amd_buffer_ops_4gb.py"
 )
 
 function run_pytest() {

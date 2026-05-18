@@ -619,41 +619,57 @@ def test_hooks(device, fresh_triton_cache) -> None:
     assert name == "test_hooks.<locals>.kernel_add"
 
 
-@pytest.mark.skipif(reason="within_2g is a HIP specific optimization", condition=not is_hip())
-def test_within_2gb(device, fresh_triton_cache) -> None:
-    default_buffer_ops = os.environ.get("AMDGCN_USE_BUFFER_OPS", "0")
+@pytest.mark.skipif(reason="within_4g is a HIP specific optimization", condition=not is_hip())
+def test_within_4gb(device, fresh_triton_cache) -> None:
+    """End-to-end pointer_range_32 for tensors up to the HIP raw-buffer span limit."""
+    default_buffer_ops = os.environ.get("AMDGCN_USE_BUFFER_OPS", "1")
     try:
-        use_buffer_ops_opts = ["1", "0"]
-        # The ranges should only be available when buffer ops are enabled
-        pointer_ranges = [[(0, )], []]
-        for use_buffer_ops, pointer_range in zip(use_buffer_ops_opts, pointer_ranges):
-            # Set AMDGCN_USE_BUFFER_OPS
-            os.environ["AMDGCN_USE_BUFFER_OPS"] = use_buffer_ops
+        os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
 
-            @triton.jit
-            def kernel_add(a):
-                tl.load(a)
+        @triton.jit
+        def kernel_add(a):
+            tl.load(a)
 
-            # This is the attribute we want to test
-            pointer_range_32 = None
+        pointer_range_32 = None
 
-            def cache_hook(*args, **kwargs):
-                nonlocal pointer_range_32
+        def cache_hook(*args, **kwargs):
+            nonlocal pointer_range_32
+            cfg0 = kwargs["compile"]["configs"][0]
+            if hasattr(cfg0, "pointer_range_32"):
+                pointer_range_32 = cfg0.pointer_range_32
+            else:
                 pointer_range_32 = [
-                    k for k, v in kwargs["compile"]["configs"][0].items() if ["tt.pointer_range", 32] in v
+                    k for k, v in cfg0.items() if isinstance(v, list) and ["tt.pointer_range", 32] in v
                 ]
 
-            triton.knobs.runtime.jit_cache_hook = cache_hook
-            # In warmup we assume that the pointer range is 32 bits
-            kernel_add.warmup(torch.float32, grid=(1, ))
-            assert pointer_range_32 == pointer_range
-            # Torch tensor > 2GB
-            kernel_add[(1, 0)](torch.empty(2**31, dtype=torch.int8, device=device))
-            assert len(pointer_range_32) == 0
-            # Torch tensor <= 2GB
-            kernel_add[(1, 0)](torch.empty(2**31 - 1, dtype=torch.int8, device=device))
-            assert pointer_range_32 == pointer_range
+        triton.knobs.runtime.jit_cache_hook = cache_hook
+        kernel_add.warmup(torch.float32, grid=(1, ))
+        assert pointer_range_32 == [0]
+
+        kernel_add[(1, 0)](torch.empty(2**31 - 1, dtype=torch.int8, device=device))
+        assert pointer_range_32 == [0]
+
+        kernel_add[(1, 0)](torch.empty(2**31, dtype=torch.int8, device=device))
+        assert pointer_range_32 == [0]
+
+        kernel_add[(1, 0)](torch.empty(2**32 - 2, dtype=torch.int8, device=device))
+        assert pointer_range_32 == [0]
+
+        base = torch.empty(4, 4, dtype=torch.float32, device=device)
+        kernel_add[(1, 0)](base[:, 0])
+        assert pointer_range_32 == [0]
+
+        oob_storage = torch.empty(2**32 - 1, dtype=torch.int8, device=device)
+        kernel_add[(1, 0)](oob_storage[:4096])
+        assert pointer_range_32 == [0]
+
+        kernel_add[(1, 0)](oob_storage)
+        assert len(pointer_range_32) == 0
+
+        kernel_add[(1, 0)](torch.empty(2**32, dtype=torch.int8, device=device))
+        assert len(pointer_range_32) == 0
     finally:
+        triton.knobs.runtime.jit_cache_hook = None
         os.environ["AMDGCN_USE_BUFFER_OPS"] = default_buffer_ops
 
 

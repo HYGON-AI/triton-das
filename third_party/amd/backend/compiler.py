@@ -171,16 +171,15 @@ class HIPBackend(BaseBackend):
         return elements * t.element_size()
 
     @staticmethod
-    def is_within_2gb(arg):
+    def is_within_4gb(arg):
+        # NUM_RECORDS/OOB-mask encoding supports offsets up to (2^32 - 2) bytes inclusive.
         import torch
 
-        MAX_INT_32 = 2**31 - 1
         if hasattr(arg, "ptr_range"):
-            return arg.ptr_range() <= MAX_INT_32
+            return arg.ptr_range() <= 2**32 - 2
         if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
-            # return arg.untyped_storage().size() <= 2**31 - 1
             # Use the tensor's physical span so views do not inherit the full backing storage size.
-            return HIPBackend.get_tensor_physical_size(arg) <= 2**31 - 1
+            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 2
 
         return False
 
@@ -194,7 +193,7 @@ class HIPBackend(BaseBackend):
     @staticmethod
     def get_tensor_specialization(arg, **kwargs):
         ret = BaseBackend.get_tensor_specialization(arg, **kwargs)
-        if knobs.amd.use_buffer_ops and HIPBackend.is_within_2gb(arg):
+        if knobs.amd.use_buffer_ops and HIPBackend.is_within_4gb(arg):
             ret += "S"
         return ret
 
