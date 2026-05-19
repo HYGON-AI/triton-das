@@ -44,8 +44,8 @@ namespace mlir::LLVM::AMD {
 // ```
 // def masked_op(base_ptr, offset, pred)
 //     mem_desc.base_ptr = base_ptr
-//     mem_desc.num_records = max_int_32
-//     oob_offset = max_int_32+1
+//     mem_desc.num_records = 2**32 - 2
+//     oob_offset = 2**32 - 1
 //     masked_offset = (pred ? offset : oob_offset)
 //     buffer_op(mem_desc, masked_offset)
 // ```

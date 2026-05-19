@@ -5,7 +5,10 @@
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
     // CHECK-LABEL: buffer_load
     tt.func @buffer_load(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: llvm.mlir.constant(-2 : i32)
+        // CHECK: rocdl.make.buffer.rsrc
         // CHECK: %[[c_mask:.*]] = llvm.mlir.constant(true) : i1
+        // CHECK: llvm.mlir.constant(-1 : i32)
         // CHECK: %[[offset:.*]] = llvm.select %[[c_mask]]
         // CHECK: %[[aux:.*]] = llvm.mlir.constant(3 : i32) : i32
         // CHECK: rocdl.raw.ptr.buffer.load {{.*}}, %[[offset]], {{.*}}, %[[aux]]
@@ -29,6 +32,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
         %5 = tt.splat %N: i32 -> tensor<128xi32, #blocked0>
         %7 = arith.cmpi slt, %4, %5: tensor<128xi32, #blocked0>
         // CHECK: %[[mask:.*]] = llvm.extractvalue %{{.*}} : !llvm.struct<(i1, i1, i1, i1)>
+        // CHECK: llvm.mlir.constant(-2 : i32)
+        // CHECK: rocdl.make.buffer.rsrc
+        // CHECK: llvm.mlir.constant(-1 : i32)
         // CHECK: %[[offset:.*]] = llvm.select %[[mask]]
         // CHECK: rocdl.raw.ptr.buffer.load {{.*}}, %[[offset]]
         %ret = amdg.buffer_load %arg0[%offset], %7 stride = %c256_i32 : tensor<128xf32, #blocked0>
@@ -52,6 +58,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
         %7 = arith.cmpi slt, %4, %5: tensor<128xi32, #blocked0>
         %other = arith.constant dense<0.00e+00> : tensor<128xf32, #blocked0>
         // CHECK: %[[mask:.*]] = llvm.extractvalue %{{.*}} : !llvm.struct<(i1, i1, i1, i1)>
+        // CHECK: llvm.mlir.constant(-2 : i32)
+        // CHECK: rocdl.make.buffer.rsrc
+        // CHECK: llvm.mlir.constant(-1 : i32)
         // CHECK: %[[offset:.*]] = llvm.select %[[mask]]
         // CHECK: rocdl.raw.ptr.buffer.load {{.*}}, %[[offset]]
         // CHECK: llvm.select
@@ -66,7 +75,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
     // CHECK-LABEL: buffer_store
     tt.func @buffer_store(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: llvm.mlir.constant(-2 : i32)
+        // CHECK: rocdl.make.buffer.rsrc
         // CHECK: %[[mask:.*]] = llvm.mlir.constant(true) : i1
+        // CHECK: llvm.mlir.constant(-1 : i32)
         // CHECK: %[[offset:.*]] = llvm.select %[[mask]]
         // CHECK: %[[aux:.*]] = llvm.mlir.constant(3 : i32) : i32
         // CHECK: rocdl.raw.ptr.buffer.store {{.*}}, {{.*}}, %[[offset]], {{.*}}, %[[aux]]
@@ -91,8 +103,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
         %5 = tt.splat %N: i32 -> tensor<128xi32, #blocked0>
         %7 = arith.cmpi slt, %4, %5: tensor<128xi32, #blocked0>
         // CHECK: %[[mask0:.*]] = llvm.extractvalue %{{.*}} : !llvm.struct<(i1, i1, i1, i1)>
+        // CHECK: llvm.mlir.constant(-2 : i32)
+        // CHECK: rocdl.make.buffer.rsrc
         // CHECK: %[[mask1:.*]] = llvm.mlir.constant(true) : i1
         // CHECK: %[[mask2:.*]] = llvm.and %[[mask1]], %[[mask0]]
+        // CHECK: llvm.mlir.constant(-1 : i32)
         // CHECK: %[[offset:.*]] = llvm.select %[[mask2]]
         // CHECK: rocdl.raw.ptr.buffer.store {{.*}}, {{.*}}, %[[offset]]
         amdg.buffer_store %value, %arg0[%offset], %7 stride = %N : tensor<128xf32, #blocked0>
