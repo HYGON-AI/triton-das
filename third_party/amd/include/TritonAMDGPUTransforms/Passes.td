@@ -159,7 +159,10 @@ def TritonAMDGPUConvertToBufferOps : Pass<"tritonamdgpu-convert-buffer-ops", "ml
            "Allow buffer atomic operations when the hardware supports it.">,
     Option<"analyzeSmallTensorOfst", "analyze-small-tensor-ofst",
           "bool", /*default=*/"false",
-           "Whether to still analyze index range for tensors whose base has tt.pointer_range = 32 specialization. If false load/store from such tensors will go down buffer ops without analzying index range.">
+           "Whether to still analyze index range for tensors whose base has tt.pointer_range = 32 specialization. If false load/store from such tensors will go down buffer ops without analzying index range.">,
+    Option<"emitBufferOpsOffsetAssert", "emit-buffer-ops-offset-assert",
+           "bool", /*default=*/"false",
+           "Insert tt.assert before amdgpu buffer load/store to check offset * elem_size is in [0, 2^32-2] bytes.">
   ];
 }
 

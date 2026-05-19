@@ -142,8 +142,8 @@ bool isSplatOneConstTensor(const Value v) {
   return false;
 }
 
-bool isByteOffsetSmallerThan2GB(triton::AddPtrOp addPtrOp,
-                                std::shared_ptr<DataFlowSolver> solver) {
+bool isByteOffsetWithin4GB(triton::AddPtrOp addPtrOp,
+                           std::shared_ptr<DataFlowSolver> solver) {
   Value elemIdx = addPtrOp.getOffset();
   LDBG("Determing value-range of element-index: " << elemIdx);
 
@@ -183,17 +183,17 @@ bool isByteOffsetSmallerThan2GB(triton::AddPtrOp addPtrOp,
     return false;
   }
 
-  // step 3: check of byte-offset is within 2G
+  // step 3: check if byte-offset is within 4GiB-2
   int64_t elemBitSz = elemTy.getIntOrFloatBitWidth();
   int64_t elemMaxIdx = smax.getSExtValue();
   int64_t byteOfst = (elemBitSz * elemMaxIdx + elemBitSz + 7) / 8;
-  int64_t szLimit2GB = (1L << 31) - 1;
+  int64_t szLimit4GB = (int64_t{1} << 32) - 2;
 
   LDBG("element bit sz:" << elemBitSz << ", max byte offset:" << byteOfst
-                         << ((szLimit2GB > byteOfst) ? ", out of range"
+                         << ((szLimit4GB > byteOfst) ? ", out of range"
                                                      : ", in range"));
 
-  return byteOfst <= szLimit2GB;
+  return byteOfst <= szLimit4GB;
 }
 
 bool isFuncArgWith32bitPtrRange(mlir::Value value) {
@@ -264,7 +264,64 @@ bool canUseBufferOps(Value ptr,
   if (isFuncArgPtrWithNonNegativeAssumption(maybeSplatOp.getSrc(), assumptions))
     return true;
 
-  return isByteOffsetSmallerThan2GB(addPtrOp, std::move(solver));
+  return isByteOffsetWithin4GB(addPtrOp, std::move(solver));
+}
+
+/// Insert `tt.assert` before each `amdgpu.buffer_{load,store}` so that the
+/// buffer instruction's element offset tensor encodes a byte offset in
+/// [0, 2^32-2] for active lanes (same field lowered to raw.ptr.buffer.* and
+/// compared against num_records). Scalar chunks folded into the resource base
+/// by pointer canonicalization are not added back here.
+static void emitBufferOpOffsetAssert(PatternRewriter &rewriter, Location loc,
+                                     Value tensorOffset, Type valueTy,
+                                     Value maskOrNull) {
+  auto offTy = cast<RankedTensorType>(tensorOffset.getType());
+  Value offsets = tensorOffset;
+  Type valueElemTy = getElementTypeOrSelf(valueTy);
+  const unsigned valueElemNBits =
+      std::max(8u, valueElemTy.getIntOrFloatBitWidth());
+  const int64_t elementByteWidth = valueElemNBits / 8;
+
+  auto i64TensorTy = RankedTensorType::get(
+      offTy.getShape(), rewriter.getI64Type(), offTy.getEncoding());
+  Value offI64 = rewriter.create<arith::ExtSIOp>(loc, i64TensorTy, offsets);
+
+  Value strideVal = rewriter.create<arith::ConstantOp>(
+      loc, i64TensorTy,
+      DenseElementsAttr::get(i64TensorTy,
+                             rewriter.getI64IntegerAttr(elementByteWidth)));
+  Value byteOff = rewriter.create<arith::MulIOp>(loc, offI64, strideVal);
+
+  const int64_t kMaxByteOff = (int64_t{1} << 32) - 2;
+  Value limitVal = rewriter.create<arith::ConstantOp>(
+      loc, i64TensorTy,
+      DenseElementsAttr::get(i64TensorTy,
+                             rewriter.getI64IntegerAttr(kMaxByteOff)));
+  Value withinLimit = rewriter.create<arith::CmpIOp>(
+      loc, arith::CmpIPredicate::sle, byteOff, limitVal);
+
+  Value zeroOff = rewriter.create<arith::ConstantOp>(
+      loc, offTy, DenseElementsAttr::get(offTy, rewriter.getI32IntegerAttr(0)));
+  Value nonNeg = rewriter.create<arith::CmpIOp>(
+      loc, arith::CmpIPredicate::sge, offsets, zeroOff);
+
+  Value boundsOk = rewriter.create<arith::AndIOp>(loc, nonNeg, withinLimit);
+
+  Value assertCond = boundsOk;
+  if (maskOrNull) {
+    auto maskTy = cast<RankedTensorType>(maskOrNull.getType());
+    Value splatFalse = rewriter.create<arith::ConstantOp>(
+        loc, maskTy, DenseElementsAttr::get(maskTy, rewriter.getBoolAttr(false)));
+    Value maskOff = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::eq, maskOrNull, splatFalse);
+    assertCond = rewriter.create<arith::OrIOp>(loc, maskOff, boundsOk);
+  }
+
+  rewriter.create<triton::AssertOp>(
+      loc, assertCond,
+      rewriter.getStringAttr(
+          "triton amdgpu buffer op: element_offset * elem_size must be in "
+          "[0, 2^32-2] bytes"));
 }
 
 // Extract stride of the blocked offset of LD/ST ops.
@@ -542,10 +599,12 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
   ConvertTritonLoadToBufferLoad(
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
-      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_)
+      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
+      bool emitBufferOpsOffsetAssert_)
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
         solver(std::move(solver)),
-        analyzeSmallTensorOfst(analyzeSmallTensorOfst_) {}
+        analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
 
   mlir::LogicalResult
   matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
@@ -570,6 +629,13 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+
+      if (emitBufferOpsOffsetAssert) {
+        if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
+          emitBufferOpOffsetAssert(rewriter, op->getLoc(), tensorOffset,
+                                   op.getType(), maybeMask);
+        }
+      }
 
       auto bufferLoadOp = [&]() {
         if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
@@ -627,6 +693,7 @@ private:
   DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool emitBufferOpsOffsetAssert;
 };
 
 struct ConvertTritonStoreToBufferStore
@@ -636,10 +703,12 @@ struct ConvertTritonStoreToBufferStore
   ConvertTritonStoreToBufferStore(
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
-      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_)
+      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
+      bool emitBufferOpsOffsetAssert_)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
         assumptions(assumptions), solver(std::move(solver)),
-        analyzeSmallTensorOfst(analyzeSmallTensorOfst_) {}
+        analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::StoreOp op,
@@ -657,6 +726,9 @@ struct ConvertTritonStoreToBufferStore
       if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+      if (emitBufferOpsOffsetAssert)
+        emitBufferOpOffsetAssert(rewriter, op->getLoc(), tensorOffset,
+                                 op.getValue().getType(), maybeMask);
       rewriter.replaceOpWithNewOp<triton::amdgpu::BufferStoreOp>(
           op, op.getValue(), basePtr, tensorOffset, blockStride, op.getCache(),
           maybeMask);
@@ -671,6 +743,7 @@ private:
   DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool emitBufferOpsOffsetAssert;
 };
 
 } // anonymous namespace
@@ -702,14 +775,16 @@ struct TritonAMDGPUConvertToBufferOpsPass
 
     AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
-                 ConvertTritonStoreToBufferStore>(context, assumptions, solver,
-                                                  this->analyzeSmallTensorOfst);
+                 ConvertTritonStoreToBufferStore>(
+        context, assumptions, solver, this->analyzeSmallTensorOfst,
+        this->emitBufferOpsOffsetAssert);
     // BufferLoadToLds is only supported on CDNA3 and CDNA4
     if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                            targetInfo.getISAFamily())) {
       patterns
           .add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(
-              context, assumptions, solver, this->analyzeSmallTensorOfst);
+              context, assumptions, solver, this->analyzeSmallTensorOfst,
+              this->emitBufferOpsOffsetAssert);
     }
 
     // Gate buffer atomics behind CDNA3 for now
