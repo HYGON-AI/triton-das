@@ -248,9 +248,9 @@ class HIPBackend(BaseBackend):
         import torch
 
         if hasattr(arg, "ptr_range"):
-            return arg.ptr_range() <= 2**32 - 2
+            return arg.ptr_range() <= 2**32 - 1
         if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
-            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 2
+            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 1
         return False
 
     @staticmethod

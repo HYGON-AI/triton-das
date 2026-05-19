@@ -655,16 +655,16 @@ def test_within_4gb(device, fresh_triton_cache) -> None:
         kernel_add[(1, 0)](torch.empty(2**32 - 2, dtype=torch.int8, device=device))
         assert pointer_range_32 == [0]
 
+        kernel_add[(1, 0)](torch.empty(2**32 - 1, dtype=torch.int8, device=device))
+        assert pointer_range_32 == [0]
+
         base = torch.empty(4, 4, dtype=torch.float32, device=device)
         kernel_add[(1, 0)](base[:, 0])
         assert pointer_range_32 == [0]
 
-        oob_storage = torch.empty(2**32 - 1, dtype=torch.int8, device=device)
-        kernel_add[(1, 0)](oob_storage[:4096])
+        large_storage = torch.empty(2**32 - 1, dtype=torch.int8, device=device)
+        kernel_add[(1, 0)](large_storage[:4096])
         assert pointer_range_32 == [0]
-
-        kernel_add[(1, 0)](oob_storage)
-        assert len(pointer_range_32) == 0
 
         kernel_add[(1, 0)](torch.empty(2**32, dtype=torch.int8, device=device))
         assert len(pointer_range_32) == 0

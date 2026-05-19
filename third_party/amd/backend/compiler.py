@@ -172,14 +172,14 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def is_within_4gb(arg):
-        # NUM_RECORDS/OOB-mask encoding supports offsets up to (2^32 - 2) bytes inclusive.
+        # Max byte offset is 2^32-2; max physical tensor span for pointer_range=32 is 2^32-1 bytes.
         import torch
 
         if hasattr(arg, "ptr_range"):
-            return arg.ptr_range() <= 2**32 - 2
+            return arg.ptr_range() <= 2**32 - 1
         if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
             # Use the tensor's physical span so views do not inherit the full backing storage size.
-            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 2
+            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 1
 
         return False
 

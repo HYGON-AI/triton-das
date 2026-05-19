@@ -10,9 +10,9 @@ from triton._internal_testing import is_hip
 from triton.backends.amd.compiler import HIPBackend
 import triton.knobs
 
-# Per-matrix byte span: strictly between the old 2GiB cap and the new 4GiB-2 cap.
+# Per-matrix byte span: strictly between the old 2GiB cap and the new 4GiB-1 cap.
 OLD_CAP_BYTES = 2**31 - 1
-NEW_CAP_BYTES = 2**32 - 2
+NEW_CAP_BYTES = 2**32 - 1
 
 # float32 GEMM with M=K=24000 -> 24000*24000*4 = 2_304_000_000 bytes (~2.15 GiB) per operand.
 GEMM_M = 24000
