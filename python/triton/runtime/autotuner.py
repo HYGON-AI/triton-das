@@ -343,7 +343,7 @@ class Config:
     :ivar ir_override: filename of a user-defined IR (*.{ttgir|llir|ptx|amdgcn}).
     """
 
-    def __init__(self, kwargs, num_warps=4, num_stages=3, num_ctas=1, maxnreg=None, pre_hook=None, ir_override=None):
+    def __init__(self, kwargs, num_warps=4, num_stages=3, num_ctas=1, num_ldmatrixes=0, enable_mmacfuse=0, maxnreg=None, pre_hook=None, ir_override=None):
         self.kwargs = kwargs
         self.num_warps = num_warps
         self.num_ctas = num_ctas
