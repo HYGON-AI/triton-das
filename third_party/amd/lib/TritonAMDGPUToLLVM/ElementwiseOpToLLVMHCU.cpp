@@ -2031,7 +2031,9 @@ struct FpToFpOpConversion
           (llvm::isa<Float8E4M3FNType, Float8E5M2Type>(dstElementType)) &&
           roundingMode == RoundingMode::RTNE) &&
         !(false/* isaFamily == AMD::ISAFamily::CDNA3 */ &&
-          (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(dstElementType)));
+          (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(dstElementType)))  &&
+        !(isaFamily != AMD::ISAFamily::CDNA4 &&
+          (llvm::isa<Float8E5M2Type, Float8E4M3FNType>(dstElementType)));
 
     // fp8/bf8->f32, if not nanoo fp8/bf8 on CDNA3 or ocp fp8/bf8 on CDNA4, is
     // done in two steps: fp8/bf8->fp16 and fp16->fp32
