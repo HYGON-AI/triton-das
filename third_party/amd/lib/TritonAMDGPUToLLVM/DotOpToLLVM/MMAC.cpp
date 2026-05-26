@@ -106,7 +106,12 @@ struct DotOpMFMAConversionHelper {
                intrinsicName.compare("rocdl.mmac.f32.16x16x32.fp8.bf8") == 0 ||
                intrinsicName.compare("rocdl.mmac.f32.16x16x32.fp8.fp8") == 0) {
       loweredOp.addOperands({valA, valB, valC, litFlag, ltsFlag});
-    } else if (intrinsicName.compare("rocdl.mmac.i32.16x16x32.i8") == 0 ||
+      } else if (intrinsicName.compare("rocdl.mmac.f32.16x16x8.tf32") == 0) {
+      auto v2i32Ty = vec_ty(i32_ty, 2);
+      Value valAi32 = b.bitcast(valA, v2i32Ty);
+      Value valBi32 = b.bitcast(valB, v2i32Ty);
+      loweredOp.addOperands({valAi32, valBi32, valC, litFlag, ltsFlag});
+    }else if (intrinsicName.compare("rocdl.mmac.i32.16x16x32.i8") == 0 ||
                intrinsicName.compare("rocdl.mmac.i32.16x16x32.u8") == 0) {
       loweredOp.addOperands({valA, valB, valC, litFlag, i1Flag, ltsFlag});
     } else {

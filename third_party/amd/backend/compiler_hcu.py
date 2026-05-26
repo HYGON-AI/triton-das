@@ -46,7 +46,7 @@ class HIPOptions:
     supported_fp8_dtypes: Tuple[str] = ("fp8e4nv", "fp8e5")
     deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
     default_dot_input_precision: str = "ieee"
-    allowed_dot_input_precisions: Tuple[str] = ("ieee", )
+    allowed_dot_input_precisions: Tuple[str] = ("ieee", "tf32",)
     enable_fp_fusion: bool = True
     launch_cooperative_grid: bool = False
     matrix_instr_nonkdim: int = 0
@@ -157,11 +157,6 @@ class HIPBackend(BaseBackend):
         if opts.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(self.target.arch):
             raise ValueError(f"num_ctas > 1 not supported on {self.target.arch}")
 
-        # Enable XF32 (TF32) for CDNA3 GPUs
-        if self.target.arch == 'gfx942':
-            allowed_dot_input_precisions = set(HIPOptions.allowed_dot_input_precisions)
-            allowed_dot_input_precisions.update({'tf32'})
-            args["allowed_dot_input_precisions"] = tuple(sorted(allowed_dot_input_precisions))
 
         if "supported_fp8_dtypes" not in opts:
             args["supported_fp8_dtypes"] = tuple(sorted(HIPOptions.supported_fp8_dtypes))

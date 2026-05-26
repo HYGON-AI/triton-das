@@ -185,6 +185,9 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   auto fp4T = b.getType<Float4E2M1FNType>();
 
   mfmaMap = {
+      // xf32 inputs
+      // mmac_f32_16x16x8tf32
+      TRITON_MMAC_v3to4(16, 16, tf32T, tf32T, f32T, mmac_f32_16x16x8tf32, 8, 2),
       // f32 inputs
       // mmac_f32_16x16x8f32
       TRITON_MMAC_v3to4(16, 16, f32T, f32T, f32T, mmac_f32_16x16x8f32, 8, 2),
