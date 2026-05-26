@@ -62,12 +62,8 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
   }
 
   Value stride = b.int_val(16, 0);
-  if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
-                         targetInfo.getISAFamily())) {
-#if 0
-    // Turn off cache-swizzling for the time being while we are figuring out
-    // how to safely use it.
-    if (blockStride) {
+  if (mlir::triton::AMD::supportsBufferCacheSwizzle(targetInfo.getArch())) {
+    if (blockStride && !isZero(blockStride)) {
       Value enableSwizzle = b.int_val(16, 16384);
       Value mask14b = b.int_val(16, 16383);
       // Cache swizzle supports only upto 8k stride. Also simply swizzling the
@@ -81,7 +77,6 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
       // stride[14] = swizzle enabling bit
       stride = LLVM::OrOp::create(rewriter, loc, enableSwizzle, strideSat);
     }
-#endif
   }
 
   Value flagsConst = b.int_val(32, flags);

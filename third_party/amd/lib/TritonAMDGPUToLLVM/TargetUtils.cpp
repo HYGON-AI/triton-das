@@ -1,5 +1,6 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "llvm/ADT/DenseMap.h"
+#include <algorithm>
 #include "llvm/TargetParser/TargetParser.h"
 
 namespace mlir::triton::AMD {
@@ -122,6 +123,56 @@ bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature) {
   HCUISAFeature hcuIsaFeatures = deduceHCUISAFeature(arch);
   uint64_t featureBits = static_cast<uint64_t>(feature);
   return (uint64_t(hcuIsaFeatures) & featureBits) == featureBits;
+}
+
+bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
+  static constexpr llvm::StringRef kCacheSwizzleArchs[] = {
+      "gfx926", // kongming
+      "gfx928", // zhongda
+      "gfx936", // bmz
+      "gfx938", // nmz
+      "gfx92a", // yueying
+  };
+  for (llvm::StringRef supported : kCacheSwizzleArchs)
+    if (arch == supported)
+      return true;
+  return false;
+}
+
+static int64_t roundUpLegacyCacheSwizzleStrideBytes(int64_t strideBytes) {
+  constexpr int64_t kLegacyMax = (1 << 14) - 1;
+  if (strideBytes <= 64)
+    return 64;
+  for (int n = 0; n < 9; ++n) {
+    int64_t candidate = 64LL << n;
+    if (candidate > kLegacyMax)
+      return kLegacyMax;
+    if (candidate >= strideBytes)
+      return candidate;
+  }
+  return kLegacyMax;
+}
+
+int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
+                                         int64_t minStrideBytes) {
+  if (strideBytes <= 0 && minStrideBytes <= 0)
+    return 0;
+
+  int64_t target = std::max(strideBytes, minStrideBytes);
+  int64_t normalized = roundUpLegacyCacheSwizzleStrideBytes(target);
+
+  if (minStrideBytes > 0 && normalized < minStrideBytes)
+    normalized = roundUpLegacyCacheSwizzleStrideBytes(minStrideBytes);
+
+  constexpr int64_t kCacheSwizzleStrideCapBytes = 8192;
+  constexpr int64_t kLegacyMax = (1 << 14) - 1;
+  normalized =
+      std::min(normalized, std::min(kLegacyMax, kCacheSwizzleStrideCapBytes));
+  if (normalized <= 0 ||
+      (minStrideBytes > 0 && normalized < minStrideBytes))
+    return 0;
+
+  return normalized;
 }
 
 } // namespace mlir::triton::AMD

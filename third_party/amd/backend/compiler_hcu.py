@@ -503,6 +503,7 @@ class HIPBackend(BaseBackend):
                 knobs.amd.use_buffer_atomics,
                 knobs.amd.buffer_ops_analyze_small_tensor_range,
                 knobs.amd.emit_buffer_ops_offset_assert,
+                knobs.amd.buffer_cache_swizzle,
             )
 
         amd.passes.ttgpuir.add_fold_true_cmpi(pm)

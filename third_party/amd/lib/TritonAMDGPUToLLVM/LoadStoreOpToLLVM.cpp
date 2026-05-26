@@ -764,12 +764,8 @@ struct BufferLoadOpConversion
     if (llOther)
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
-    // FIXME: Explicitly disable cache swizzling(introduced by oai commit 7fffa0df) for
-    //        buffer ops on HCUs as more hcu-specific details (stride field particularly)
-    //        should be considered.
     // Create the resource descriptor and then emit the buffer_load intrinsic(s)
-    // Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
-    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr);
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
     SmallVector<Value> loadedVals;
     Type vecTy = LLVM::getVectorType(valueElemTy, vec);
     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
@@ -1641,11 +1637,7 @@ struct BufferStoreOpConversion
     SmallVector<Value> maskElems =
         getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
 
-    // FIXME: Explicitly disable cache swizzling(introduced by oai commit 7fffa0df) for
-    //        buffer ops on HCUs as more hcu-specific details (stride field particularly)
-    //        should be considered.
-    // Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
-    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr);
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
     MLIRContext *ctx = rewriter.getContext();
     auto moduleOp = op->getParentOfType<ModuleOp>();
     auto freeVarMasks = getFreeVariableMasks(valueTy);

@@ -11,14 +11,17 @@
 #include "third_party/amd/include/Analysis/AxisInfoExt.h"
 #include "third_party/amd/include/Analysis/RangeAnalysis.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "third_party/amd/include/TritonAMDGPUToLLVM/TargetUtils.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include <optional>
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-convert-buffer-ops"
@@ -341,6 +344,212 @@ Value getBlockStride(Location loc, Value offset, PatternRewriter &rewriter) {
   return nullptr;
 }
 
+static constexpr int64_t kCacheSwizzleWideAccessBytes = 256;
+static constexpr int32_t kDefaultCacheSwizzleStrideBytes = 8192;
+
+static unsigned getValueElementByteWidth(RankedTensorType tensorTy) {
+  Type elemTy = tensorTy.getElementType();
+  while (auto ptrTy = dyn_cast<triton::PointerType>(elemTy))
+    elemTy = ptrTy.getPointeeType();
+  return std::max(1u, elemTy.getIntOrFloatBitWidth() / 8);
+}
+
+static std::optional<int64_t> getSplatConstantInt(Value v) {
+  if (auto cst = v.getDefiningOp<arith::ConstantIntOp>())
+    return cst.value();
+  if (auto splat = v.getDefiningOp<triton::SplatOp>())
+    return getSplatConstantInt(splat.getSrc());
+  if (auto cst = v.getDefiningOp<arith::ConstantOp>()) {
+    if (auto attr = dyn_cast<DenseIntElementsAttr>(cst.getValue()))
+      if (attr.isSplat())
+        return attr.getSplatValue<APInt>().getSExtValue();
+  }
+  return std::nullopt;
+}
+
+static std::optional<int64_t>
+getUniformLaneElementStrideImpl(Value expr, llvm::DenseSet<Value> &visited) {
+  if (!visited.insert(expr).second)
+    return std::nullopt;
+
+  if (Operation *op = expr.getDefiningOp()) {
+    return llvm::TypeSwitch<Operation *, std::optional<int64_t>>(op)
+        .Case<triton::MakeRangeOp>(
+            [&](auto) { return std::optional<int64_t>(1); })
+        .Case<triton::SplatOp, triton::BroadcastOp, triton::ExpandDimsOp>(
+            [&](Operation *uop) {
+              return getUniformLaneElementStrideImpl(uop->getOperand(0),
+                                                     visited);
+            })
+        .Case<arith::ConstantOp, arith::ConstantIntOp, triton::GetProgramIdOp>(
+            [&](auto) { return std::optional<int64_t>(0); })
+        .Case<arith::AddIOp>([&](arith::AddIOp addOp) -> std::optional<int64_t> {
+          auto s0 = getUniformLaneElementStrideImpl(addOp.getLhs(), visited);
+          auto s1 = getUniformLaneElementStrideImpl(addOp.getRhs(), visited);
+          if (!s0 || !s1)
+            return std::nullopt;
+          if (*s0 == 0)
+            return s1;
+          if (*s1 == 0)
+            return s0;
+          if (*s0 == *s1)
+            return s0;
+          return std::nullopt;
+        })
+        .Case<arith::MulIOp>([&](arith::MulIOp mulOp) -> std::optional<int64_t> {
+          auto s0 = getUniformLaneElementStrideImpl(mulOp.getLhs(), visited);
+          auto s1 = getUniformLaneElementStrideImpl(mulOp.getRhs(), visited);
+          if (!s0 || !s1)
+            return std::nullopt;
+          if (*s0 == 0 && *s1 == 0)
+            return 0;
+          if (*s0 == 0) {
+            if (auto k = getSplatConstantInt(mulOp.getRhs()))
+              return *k * *s1;
+            return std::nullopt;
+          }
+          if (*s1 == 0) {
+            if (auto k = getSplatConstantInt(mulOp.getLhs()))
+              return *k * *s0;
+            return std::nullopt;
+          }
+          return std::nullopt;
+        })
+        .Case<arith::DivSIOp, arith::RemSIOp, arith::MaxSIOp, arith::MinSIOp>(
+            [&](auto) -> std::optional<int64_t> { return std::nullopt; })
+        .Default([&](auto) -> std::optional<int64_t> { return std::nullopt; });
+  }
+  return std::optional<int64_t>(0);
+}
+
+static std::optional<int64_t> getUniformLaneElementStride(Value offset) {
+  llvm::DenseSet<Value> visited;
+  return getUniformLaneElementStrideImpl(offset, visited);
+}
+
+static std::optional<int64_t>
+getContiguousBytesPerWarp(RankedTensorType tensorTy) {
+  Attribute encoding = tensorTy.getEncoding();
+  if (!encoding || !isa<ttg::BlockedEncodingAttr>(encoding))
+    return std::nullopt;
+
+  SmallVector<unsigned> order = ttg::getOrder(tensorTy);
+  if (order.empty())
+    return std::nullopt;
+
+  unsigned contigDim = order[0];
+  auto shapePerCTA = ttg::getShapePerCTA(tensorTy);
+  auto warpsPerCTA = ttg::getWarpsPerCTA(tensorTy);
+  if (contigDim >= shapePerCTA.size() || contigDim >= warpsPerCTA.size())
+    return std::nullopt;
+
+  int64_t elemsPerWarp =
+      shapePerCTA[contigDim] / std::max(1u, warpsPerCTA[contigDim]);
+  elemsPerWarp = std::min<int64_t>(elemsPerWarp, shapePerCTA[contigDim]);
+  return elemsPerWarp * getValueElementByteWidth(tensorTy);
+}
+
+static std::optional<int64_t>
+getLinearContiguousAccessBytesPerWarp(RankedTensorType tensorTy,
+                                      Value tensorOffset) {
+  auto laneStrideElems = getUniformLaneElementStride(tensorOffset);
+  if (!laneStrideElems || *laneStrideElems != 1)
+    return std::nullopt;
+  return getContiguousBytesPerWarp(tensorTy);
+}
+
+static Value getBlockStrideFromOffset(Value offset) {
+  auto maybeAdd = offset.getDefiningOp<arith::AddIOp>();
+  if (!maybeAdd)
+    return nullptr;
+  for (Value addOpr : maybeAdd.getOperands()) {
+    auto maybeBC = addOpr.getDefiningOp<tt::BroadcastOp>();
+    if (!maybeBC)
+      continue;
+    Value bcSrc = maybeBC.getSrc();
+    auto maybeMul = bcSrc.getDefiningOp<arith::MulIOp>();
+    if (!maybeMul)
+      continue;
+    for (Value mulOpr : maybeMul.getOperands()) {
+      if (auto maybeSplat = mulOpr.getDefiningOp<tt::SplatOp>())
+        return maybeSplat.getSrc();
+    }
+  }
+  return nullptr;
+}
+
+static Value strideElementsToBytes(Location loc, Value strideElems,
+                                   unsigned elemBytes,
+                                   PatternRewriter &rewriter) {
+  if (elemBytes == 1)
+    return strideElems;
+  Value elemBytesVal =
+      rewriter.create<arith::ConstantIntOp>(loc, elemBytes, 32);
+  return rewriter.create<arith::MulIOp>(loc, strideElems, elemBytesVal);
+}
+
+static std::optional<int64_t>
+getMatrixRowPitchBytes(RankedTensorType ptrTensorTy, Value tensorOffset) {
+  unsigned elemBytes = getValueElementByteWidth(ptrTensorTy);
+  if (Value strideElems = getBlockStrideFromOffset(tensorOffset)) {
+    if (auto cst = strideElems.getDefiningOp<arith::ConstantIntOp>())
+      return cst.value() * elemBytes;
+  }
+  return std::nullopt;
+}
+
+static Value makeNormalizedCacheSwizzleStride(Location loc, int64_t strideBytes,
+                                              int64_t minRowPitchBytes,
+                                              PatternRewriter &rewriter) {
+  int64_t normalized = AMD::normalizeCacheSwizzleStrideBytes(
+      strideBytes, minRowPitchBytes);
+  if (normalized <= 0) {
+    LDBG("Skip cache swizzle: cannot encode stride bytes=" << strideBytes
+         << " minRowPitch=" << minRowPitchBytes);
+    return nullptr;
+  }
+  return rewriter.create<arith::ConstantIntOp>(loc, normalized, 32);
+}
+
+static Value resolveCacheSwizzleStride(Location loc, RankedTensorType ptrTensorTy,
+                                       Value tensorOffset,
+                                       PatternRewriter &rewriter,
+                                       bool bufferCacheSwizzleEnabled) {
+  if (!bufferCacheSwizzleEnabled)
+    return nullptr;
+
+  int64_t minRowPitchBytes = 0;
+  if (auto rowPitch = getMatrixRowPitchBytes(ptrTensorTy, tensorOffset))
+    minRowPitchBytes = *rowPitch;
+
+  if (auto bytesPerWarp =
+          getLinearContiguousAccessBytesPerWarp(ptrTensorTy, tensorOffset)) {
+    if (*bytesPerWarp >= kCacheSwizzleWideAccessBytes) {
+      LDBG("Skip cache swizzle: linear contiguous bytes per warp = "
+           << *bytesPerWarp);
+      return nullptr;
+    }
+  }
+
+  unsigned elemBytes = getValueElementByteWidth(ptrTensorTy);
+  if (Value strideElems = getBlockStrideFromOffset(tensorOffset)) {
+    if (auto cst = strideElems.getDefiningOp<arith::ConstantIntOp>()) {
+      int64_t strideBytes = cst.value() * elemBytes;
+      LDBG("Inferred cache swizzle stride bytes: " << strideBytes
+           << " rowPitch=" << minRowPitchBytes);
+      return makeNormalizedCacheSwizzleStride(loc, strideBytes, minRowPitchBytes,
+                                              rewriter);
+    }
+    return strideElementsToBytes(loc, strideElems, elemBytes, rewriter);
+  }
+
+  LDBG("Using default cache swizzle stride bytes: "
+       << kDefaultCacheSwizzleStrideBytes
+       << " rowPitch=" << minRowPitchBytes);
+  return makeNormalizedCacheSwizzleStride(loc, kDefaultCacheSwizzleStrideBytes,
+                                          minRowPitchBytes, rewriter);
+}
+
 // /*-----------------AtomicCAS-------------------*/
 
 struct ConvertTritonAtomicCASOpToBufferAtomicCAS
@@ -600,11 +809,12 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
-      bool emitBufferOpsOffsetAssert_)
+      bool emitBufferOpsOffsetAssert_, bool bufferCacheSwizzleEnabled_)
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
         solver(std::move(solver)),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
-        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_),
+        bufferCacheSwizzleEnabled(bufferCacheSwizzleEnabled_) {}
 
   mlir::LogicalResult
   matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
@@ -629,6 +839,12 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+      if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
+        auto ptrTensorTy = cast<RankedTensorType>(ptr.getType());
+        blockStride = resolveCacheSwizzleStride(
+            op->getLoc(), ptrTensorTy, tensorOffset, rewriter,
+            bufferCacheSwizzleEnabled);
+      }
 
       if (emitBufferOpsOffsetAssert) {
         if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
@@ -694,6 +910,7 @@ private:
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
   bool emitBufferOpsOffsetAssert;
+  bool bufferCacheSwizzleEnabled;
 };
 
 struct ConvertTritonStoreToBufferStore
@@ -704,11 +921,12 @@ struct ConvertTritonStoreToBufferStore
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
-      bool emitBufferOpsOffsetAssert_)
+      bool emitBufferOpsOffsetAssert_, bool bufferCacheSwizzleEnabled_)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
         assumptions(assumptions), solver(std::move(solver)),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
-        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_),
+        bufferCacheSwizzleEnabled(bufferCacheSwizzleEnabled_) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::StoreOp op,
@@ -725,7 +943,10 @@ struct ConvertTritonStoreToBufferStore
       Value maybeMask{};
       if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
         maybeMask = op.getMask();
-      Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+      auto ptrTensorTy = cast<RankedTensorType>(ptr.getType());
+      Value blockStride = resolveCacheSwizzleStride(
+          op->getLoc(), ptrTensorTy, tensorOffset, rewriter,
+          bufferCacheSwizzleEnabled);
       if (emitBufferOpsOffsetAssert)
         emitBufferOpOffsetAssert(rewriter, op->getLoc(), tensorOffset,
                                  op.getValue().getType(), maybeMask);
@@ -744,6 +965,7 @@ private:
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
   bool emitBufferOpsOffsetAssert;
+  bool bufferCacheSwizzleEnabled;
 };
 
 } // anonymous namespace
@@ -774,17 +996,20 @@ struct TritonAMDGPUConvertToBufferOpsPass
       return signalPassFailure();
 
     AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
+    const bool bufferCacheSwizzleEnabled =
+        this->bufferCacheSwizzle && arch &&
+        AMD::supportsBufferCacheSwizzle(*arch);
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
                  ConvertTritonStoreToBufferStore>(
         context, assumptions, solver, this->analyzeSmallTensorOfst,
-        this->emitBufferOpsOffsetAssert);
+        this->emitBufferOpsOffsetAssert, bufferCacheSwizzleEnabled);
     // BufferLoadToLds is only supported on CDNA3 and CDNA4
     if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                            targetInfo.getISAFamily())) {
       patterns
           .add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(
               context, assumptions, solver, this->analyzeSmallTensorOfst,
-              this->emitBufferOpsOffsetAssert);
+              this->emitBufferOpsOffsetAssert, /*bufferCacheSwizzleEnabled=*/false);
     }
 
     // Gate buffer atomics behind CDNA3 for now

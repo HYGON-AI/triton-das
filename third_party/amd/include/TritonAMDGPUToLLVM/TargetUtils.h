@@ -81,6 +81,16 @@ inline constexpr HCUISAFeature &operator&=(HCUISAFeature &lhs, HCUISAFeature rhs
 HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch);
 bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature);
 
+// Buffer cache swizzle: kongming (gfx926), zhongda (gfx928), bmz (gfx936),
+// nmz (gfx938), yueying (gfx92a). All use 14-bit stride (64*2^n bytes).
+bool supportsBufferCacheSwizzle(llvm::StringRef arch);
+
+// Round stride up to a legal 14-bit swizzle value (64*2^n, max 16383). If
+// minStrideBytes > 0 (matrix row pitch), the result is at least that value.
+// Normalized stride is capped at 8192 bytes (8KB).
+int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
+                                         int64_t minStrideBytes = 0);
+
 } // namespace mlir::triton::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTOLLVM_TARGETUTILS_H_

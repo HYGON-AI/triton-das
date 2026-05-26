@@ -507,6 +507,7 @@ class amd_knobs(base_knobs):
     # Note: This requires use_buffer_ops be true to have any effect
     buffer_ops_analyze_small_tensor_range: env_bool = env_bool("AMDGCN_ANALYZE_SMALL_TENSOR_RANGE", False)
     emit_buffer_ops_offset_assert: env_bool = env_bool("TRITON_AMDGPU_EMIT_BUFFER_OPS_OFFSET_ASSERT", False)
+    buffer_cache_swizzle: env_bool = env_bool("TRITON_BUFFER_CACHE_SWIZZLE", False)
     optimize_epilogue: env_bool = env_bool("OPTIMIZE_EPILOGUE", False)
     dump_amdgcn: env_bool = env_bool("AMDGCN_ENABLE_DUMP")
     libhip_path: env_opt_str = env_opt_str("TRITON_LIBHIP_PATH")
