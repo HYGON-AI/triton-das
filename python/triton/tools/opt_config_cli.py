@@ -110,11 +110,11 @@ def _show_config(loader, kernel, device_name, indent=""):
     config = cache.cache
     print(f"{indent}key: {config['key']}")
 
-    if _OCCLI_ALL.value:
-      print(f"{indent}configs:")
-      for k, v in config['configs'].items():
-        print(f"  {indent}{k}: {to_config_str(v)}")
+    print(f"{indent}configs:")
+    for k, v in config['configs'].items():
+      print(f"  {indent}{k}: {to_config_str(v)}")
 
+    if _OCCLI_ALL.value:
       print(f"{indent}timings:")
       for k, v in config['timings'].items():
         print(f"  {indent}{k}: {v}")
@@ -305,14 +305,14 @@ def export():
   output_dir = _OCCLI_OUTPUT_DIR.value if _OCCLI_OUTPUT_DIR.value else os.getcwd()
   os.makedirs(output_dir, exist_ok=True)
 
-  # copy kernel cache to output_dir
-  export_kernel_cache(output_dir, _cache['paths'])
+  # # copy kernel cache to output_dir
+  # export_kernel_cache(output_dir, _cache['paths'])
 
   change_key = True if _OCCLI_HOIST_DTYPE.value or _OCCLI_HOIST_KEY.value \
                         or _OCCLI_KEEP_KEY.value else False
 
   if not change_key:
-    data = {'config': _cache['configs'], 'path': _cache['paths']}
+    data = {'key': _cache['key'], 'config': _cache['configs'], 'path': _cache['paths']}
     if _OCCLI_KEEP_TIMINGS.value:
       data['timings'] = _cache['timings']
     put_json(_get_filename(output_dir), data)

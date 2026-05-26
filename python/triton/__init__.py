@@ -83,3 +83,13 @@ def next_power_of_2(n: int):
     n |= n >> 32
     n += 1
     return n
+
+
+import os
+
+if os.getenv("TRITON_HCUTUNE", "0") == "1":
+    import triton.backends.amd.autotuner
+    import triton.backends.amd.testing
+
+if os.getenv("TRITON_FAST_JIT", "0") == "1":
+    import triton.backends.amd.jit
