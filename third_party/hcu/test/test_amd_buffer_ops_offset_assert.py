@@ -73,7 +73,7 @@ def _gemm_kernel(
         b_mask = (offs_k[:, None] < K) & (offs_n[None, :] < N)
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-        acc += tl.dot(a, b)
+        acc += tl.dot(a, b, input_precision="ieee")
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, acc, mask=c_mask)
