@@ -88,6 +88,7 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
 
   Value resource = rewriter.createOrFold<ROCDL::MakeBufferRsrcOp>(
       loc, rsrcType, basePtr, stride, numRecordsByte, flagsConst);
+  cachedBasePtr = basePtr;
   return resource;
 }
 
@@ -281,7 +282,7 @@ void BufferEmitter::fillCommonArgsAtomics(Type type, Value rsrcDesc,
   // Please note: the index passed is not in bytes, but in number of elements
   // In order to pass the index to the buffer operation, we need to convert in
   // bytes (i.e., we need to multiply by `elementByteWidth`)
-  Value vOffsetOutOfBunds = b.int_val(32, -1);
+  Value vOffsetOutOfBunds = b.int_val(32, -elementByteWidth);
   Value vOffsetBytes = b.mul(b.int_val(32, elementByteWidth), vOffsetElems);
   Value maskedOffsetBytes = b.select(pred, vOffsetBytes, vOffsetOutOfBunds);
 
@@ -300,8 +301,27 @@ void BufferEmitter::fillCommonArgsAtomics(Type type, Value rsrcDesc,
 
   Value cacheModifiers = b.int_val(32, aux);
 
-  // 4. Add the arguments
-  args.push_back(rsrcDesc);
+  // 4. Create an atomic-specific rsrcDesc with tighter num_records
+  //    (-elementByteWidth-1) so sentinel(-elementByteWidth) is always OOB.
+  if (cachedBasePtr) {
+    uint32_t flags = (7 << 12) | (4 << 15);
+    if (llvm::is_contained(
+            {ISAFamily::RDNA2, ISAFamily::RDNA3, ISAFamily::RDNA4},
+            targetInfo.getISAFamily())) {
+      flags |= (1 << 24);
+      uint32_t oob = 3;
+      flags |= (oob << 28);
+    }
+    Value stride = b.int_val(16, 0);
+    Value flagsConst = b.int_val(32, flags);
+    Type rsrcType = LLVM::LLVMPointerType::get(rewriter.getContext(), 8);
+    Value atomicNumRecords = b.int_val(32, -elementByteWidth - 1);
+    Value atomicRsrc = rewriter.createOrFold<ROCDL::MakeBufferRsrcOp>(
+        loc, rsrcType, cachedBasePtr, stride, atomicNumRecords, flagsConst);
+    args.push_back(atomicRsrc);
+  } else {
+    args.push_back(rsrcDesc);
+  }
   args.push_back(maskedOffsetBytes);
   args.push_back(sgprOffset);
   args.push_back(cacheModifiers);

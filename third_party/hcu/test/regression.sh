@@ -24,6 +24,7 @@ hcu_test_cmds=(
   "pytest ${hcu_file_path}/gluon/gluon_kernel_gemm_a8w8.py"
   "pytest ${hcu_file_path}/gluon/gluon_kernel_pa_decode.py"
   "pytest ${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"
+  "pytest ${hcu_file_path}/test_buffer_atomic_dtypes.py"
 )
 
 function run_pytest() {
