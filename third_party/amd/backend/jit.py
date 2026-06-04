@@ -18,14 +18,12 @@ from triton.runtime.jit import T
 
 from triton._C.libtriton import get_cache_invalidating_env_vars
 from triton._utils import find_paths_if, get_iterable_path
-from ._utils import triton_version_float, get_cache_dir, get_gpu_label, get_weak_fn_hash, get_triton_label
+from ._utils import triton_version_float, get_cache_dir, get_gpu_label, get_weak_fn_hash, get_triton_label, get_runtime_label
 
 if triton_version_float >= 3.3:
     from triton import knobs
 
 logger = logging.getLogger("triton.fast.jit")
-
-rocm_version = None
 
 
 def get_saved_kernel_cache_dir():
@@ -46,45 +44,6 @@ def get_or_create_metadata(fields):
 
 def get_string_hash(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-def _get_rocm_version():
-    """
-    Get ROCM runtime/driver version (i.e. which rocm linker is used).
-    This version is often different from the rocm version pytorch uses internally.
-    """
-    global rocm_version
-    if rocm_version is not None:
-        return rocm_version
-    try:
-        import subprocess
-        import re
-
-        rocm_ldd_path = triton.backends.backends["amd"].compiler.path_to_rocm_lld()
-        rocm_dir = os.path.dirname(rocm_ldd_path)
-        amdgpu_arch_path = os.path.abspath(os.path.join(rocm_dir, "amdgpu-arch"))
-
-        result = subprocess.check_output(
-            [amdgpu_arch_path, "--version"],
-            stderr=subprocess.STDOUT,
-        )
-        version = re.search(
-            r".*roc-(\d+\.\d+.\d+).*", result.decode("utf-8"), flags=re.MULTILINE
-        )
-        rocm_version = version.group(1)
-    except Exception as e:
-        # print(
-        #     f"[triton.utils.jit] Fail to determining rocm version with: {e}\n"
-        #     f"using torch.version.hip as fallback"
-        # )
-        rocm_version = f"torch_{torch.version.hip}"
-    return rocm_version
-
-
-@functools.lru_cache()
-def get_runtime_label():
-    assert torch.version.hip is not None
-    return f"rocm_{_get_rocm_version()}"
 
 
 def get_saved_kernel_cache_hash(fn):

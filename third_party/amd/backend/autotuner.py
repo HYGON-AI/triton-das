@@ -34,7 +34,7 @@ graph_step_cache = {}
 graph_cache = {}
 
 
-def _get_result_template(key: list):
+def _get_result_template(key: list = []):
     ret = {
         "key": key,
         "configs": {},
@@ -190,8 +190,9 @@ class Hcutuner(Autotuner):
         fname = os.path.join(self.save_config_dir, "config.json")
         key_name, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
         _key = str(key)
-        configs = file_cache[fname] if fname in file_cache else _get_result_template(key_name)
+        configs = file_cache[fname] if fname in file_cache else _get_result_template()
         if _key not in configs['configs']:
+            configs['key'] = key_name
             configs['configs'][_key] = self.best_config.all_kwargs()
             configs['timings'][_key] = self._configs_timings[key]
             if triton_version_float >= 3.5:
@@ -230,8 +231,9 @@ class Hcutuner(Autotuner):
         key = cache_manager.key
         config_key_name, config_key = get_config_key(arg_names, keys, *args, **kwargs)
         _config_key = str(config_key)
-        cache_json = config_cache[key] if key in config_cache else _get_result_template(config_key_name)
+        cache_json = config_cache[key] if key in config_cache else _get_result_template()
         if _config_key not in cache_json:
+            cache_json['key'] = config_key_name
             cache_json['configs'][_config_key] = self.best_config.all_kwargs()
             cache_json['timings'][_config_key] = self._configs_timings[config_key]
             # print(f"[hcutuner] added best config to {cache_manager.cache_dir}")
@@ -356,7 +358,7 @@ def get_config_key(arg_names, keys, *args, **kwargs):
 
 def merge_caches(data):
     """ merge a list of config cache """
-    res = _get_result_template(data[0]['key'])
+    res = _get_result_template(max([d['key'] for d in data], key=len))
     _configs, _timings, _paths = defaultdict(list), defaultdict(list), defaultdict(list)
     for d in data:
         for k, v in d['configs'].items():
@@ -824,8 +826,8 @@ class Graphtuner:
                  if hasattr(v, 'dtype') else v for k, v in zip(self.arg_names, args)}
         bound_args = {**nargs, **kwargs}
         hash = get_string_hash(str(bound_args))
-        env_graph_trace = os.get_env("TRITON_HCUTUNE_GRAPH_TRACE", "0")
-        env_hcutune = os.get_env("TRITON_HCUTUNE", "0")
+        env_graph_trace = os.getenv("TRITON_HCUTUNE_GRAPH_TRACE", "0")
+        env_hcutune = os.getenv("TRITON_HCUTUNE", "0")
 
         if hash not in self.traced:
             # Save the graph only on the first execution to prevent function

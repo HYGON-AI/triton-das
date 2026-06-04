@@ -15,6 +15,8 @@ if triton_version_float >= 3.3:
 else:
     from triton.runtime.cache import default_cache_dir, default_dump_dir, default_override_dir
 
+rocm_version = None
+
 
 @functools.lru_cache()
 def get_triton_label():
@@ -62,3 +64,42 @@ def get_weak_fn_hash(fn: triton.JITFunction):
         dependencies_finder = DependenciesFinder(name=fn.__name__, globals={}, src=fn.src)
     dependencies_finder.visit(fn.parse())
     return dependencies_finder.ret
+
+
+def _get_rocm_version():
+    """
+    Get ROCM runtime/driver version (i.e. which rocm linker is used).
+    This version is often different from the rocm version pytorch uses internally.
+    """
+    global rocm_version
+    if rocm_version is not None:
+        return rocm_version
+    try:
+        import subprocess
+        import re
+
+        rocm_ldd_path = triton.backends.backends["amd"].compiler.path_to_rocm_lld()
+        rocm_dir = os.path.dirname(rocm_ldd_path)
+        amdgpu_arch_path = os.path.abspath(os.path.join(rocm_dir, "amdgpu-arch"))
+
+        result = subprocess.check_output(
+            [amdgpu_arch_path, "--version"],
+            stderr=subprocess.STDOUT,
+        )
+        version = re.search(
+            r".*roc-(\d+\.\d+.\d+).*", result.decode("utf-8"), flags=re.MULTILINE
+        )
+        rocm_version = version.group(1)
+    except Exception as e:
+        # print(
+        #     f"[triton.utils.jit] Fail to determining rocm version with: {e}\n"
+        #     f"using torch.version.hip as fallback"
+        # )
+        rocm_version = f"torch_{torch.version.hip}"
+    return rocm_version
+
+
+@functools.lru_cache()
+def get_runtime_label():
+    assert torch.version.hip is not None
+    return f"rocm_{_get_rocm_version()}"

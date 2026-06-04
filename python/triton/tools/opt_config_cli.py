@@ -45,18 +45,18 @@ _OCCLI_ALL = flags.DEFINE_bool(
     help='If set, outputs all available information in the config cache.')
 
 _OCCLI_KERNEL = flags.DEFINE_string(
-    name='kernel', default=None,
+    name='kernel', default=None, short_name='k',
     help='kernel function name.')
 
 _OCCLI_DEVICE_NAME = flags.DEFINE_string(
-    name='device', default=None,
+    name='device', default=None, short_name='d',
     help='Comma-separated set of device label.')
 
 _OCCLI_OUTPUT_DIR = flags.DEFINE_string(
-    name='output-dir', default=None, help='Output directory path.')
+    name='output-dir', default=None, short_name='o', help='Output directory path.')
 
-_OCCLI_OUTPUT = flags.DEFINE_string(
-    name='output', default=None,
+_OCCLI_BASENAME = flags.DEFINE_string(
+    name='basename', default=None,
     help='User-provided filename of the output file.\n' \
          'Which support custom placeholder for dynamic values:\n' \
          '  %G  - When encountered, It will be replaced by the group name.\n\n' \
@@ -86,17 +86,16 @@ _OCCLI_SHORT_FILENAME = flags.DEFINE_bool(
     help='Simplify the created file name to: xxx-key=x_..._x-dtype=x_..._x. JSON')
 
 _OCCLI_OUTPUT_FIELDS = flags.DEFINE_string(
-    name='output-fields', default='config',
+    name='output-fields', default='key,config', short_name='f',
     help='Comma-separated set of output fields: key, config, timing, path.')
 
 _OCCLI_GRAPH = flags.DEFINE_string(
-    name='graph', default=None,
+    name='graph', default=None, short_name='g',
     help='Comma-separated set of triton function name.')
 
 _OCCLI_POP_KEY = flags.DEFINE_string(
     name='pop-key', default=None,
-    help='Comma-separated list of keys that will be popped from their original locations \n' \
-         'and inserted into the config dictionary.')
+    help='Comma-separated list of keys that will be popped from config key to the config dict.')
 
 command_required_flags = {
     'show': [],
@@ -147,11 +146,17 @@ def _show_config(loader, kernel, device_name, indent=""):
 
   if cache:
     config = cache.cache
-    print(f"{indent}key: {config['key']}")
+    print(f"{indent}key: {', '.join(config['key'])}")
 
     print(f"{indent}configs:")
-    for k, v in config['configs'].items():
+    for k, v in list(config['configs'].items())[:5]:
       print(f"  {indent}{k}: {to_config_str(v)}")
+
+    if len(config['configs']) > 5 and not _OCCLI_ALL.value:
+      print(f"  {indent}......")
+    elif _OCCLI_ALL.value:
+      for k, v in list(config['configs'].items())[5:]:
+        print(f"  {indent}{k}: {to_config_str(v)}")
 
     if _OCCLI_ALL.value:
       print(f"{indent}timings:")
@@ -295,6 +300,14 @@ def _hoist_key(data, keys, hoisted):
 
   grouped = defaultdict(dict)
   for k, v in parsed.items():
+    # The key name is a collection of all config keys, and if there is a config key
+    # argument that is None instead of tensor, it will not appear in the config key,
+    # thus causing an inconsistency error between the config key and the key name.
+    assert len(k) == len(keys), \
+      f"The number of config keys are inconsistency with key names: " \
+      f"{len(k)} vs {len(keys)}, {tuple(k)} vs {tuple(keys)}" \
+      f"\nNote: The number of config keys are inconsistency with key names, " \
+      f"not support hoist keys."
     gk = tuple([k[i] for i in hoisted_ids])
     kk = [eval(k[i]) if not isinstance(eval(k[i]), str) else k[i][1:-1] \
           for i in keep_ids]
@@ -309,7 +322,7 @@ def _hoist_key(data, keys, hoisted):
       if isinstance(eval(_v), bool):
         kv.append(f"{n}={eval(_v)}")
       elif isinstance(eval(_v), str) and _v.startswith("'torch."):
-        dtypes.append(f"{to_type(_v)}")
+        kv.append(f"{n}={_v[1:-1]}")
       else:
         kv.append(f"{n}={_v}")
 
@@ -337,7 +350,7 @@ def _get_filename(output_dir, kernel_name, device_name, group_name=''):
     # After parsing, this might become:
     "layernorm,M=4096,device=K100,dtype=fp16.json"
   """
-  filename = _OCCLI_OUTPUT.value
+  filename = _OCCLI_BASENAME.value
   if not filename:
     filename = f'{kernel_name}{_OCCLI_DELIMITER.value}device={device_name}.json'
 
@@ -366,14 +379,14 @@ def hoist_key(data):
   assert list(paths.keys()) == list(configs.keys()) == list(timings.keys())
 
   if _OCCLI_KEEP_KEY.value:
-    keep_keys = _OCCLI_KEEP_KEY.value.split(',')
+    keep_keys = [o.strip() for o in _OCCLI_KEEP_KEY.value.split(',')]
     hoisted_keys = [k for k in keys if k not in keep_keys]
   else:
     if _OCCLI_HOIST_KEY.value:
-      hoisted_keys = _OCCLI_HOIST_KEY.value.split(',')
+      hoisted_keys = [o.strip() for o in _OCCLI_HOIST_KEY.value.split(',')]
 
     if _OCCLI_HOIST_DTYPE.value:
-      vals = list(configs.keys())[0][1:-1].split(', ')
+      vals = [o.strip() for o in list(configs.keys())[0][1:-1].split(',')]
       for k, v in zip(keys, vals):
         if isinstance(v, str) and v.startswith("'torch."):
           hoisted_keys.append(k)
@@ -387,11 +400,16 @@ def hoist_key(data):
   return (_keys, _configs, _timings, _paths, group_names)
 
 
+gen_cnt = 0
 def put_json(path, data):
   os.makedirs(os.path.dirname(path), exist_ok=True)
   with open(path, "w") as f:
     json.dump(data, f, indent=4)
-  print(f"Generated '{path}'")
+  global gen_cnt
+  print('*' * 100)
+  print(f"*  [{gen_cnt}] Generated config file {path}")
+  print('*' * 100)
+  gen_cnt += 1
 
 
 def copy_libraries(dst, src):
@@ -555,9 +573,9 @@ def _graph_export():
 
   loader = GraphConfigLoader(cache_dir)
 
-  if _OCCLI_OUTPUT.value:
-    print(f"opt_config_cli export: warning: --output={_OCCLI_OUTPUT.value}: Flag --output is disabled in graph export, ignore it.")
-    flags.FLAGS.output = None
+  if _OCCLI_BASENAME.value:
+    print(f"opt_config_cli export: warning: --basename={_OCCLI_BASENAME.value}: Flag --basename is disabled in graph export, ignore it.")
+    flags.FLAGS.basename = None
 
   graph_name = _OCCLI_GRAPH.value
   device_names = []
