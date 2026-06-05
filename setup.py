@@ -759,8 +759,8 @@ def get_entry_points():
         entry_points["console_scripts"] = [
             "proton-viewer = triton.profiler.viewer:main",
             "proton = triton.profiler.proton:main",
-            "opt_config_cli = triton.tools.opt_config_cli:main",
-            "hcutune_cli = triton.tools.launch:main",
+            "opt_config_cli = triton.backends.amd.opt_config_cli:main",
+            "hcutune_cli = triton.backends.amd.hcutune_cli:main",
         ]
     entry_points["triton.backends"] = [f"{b.name} = triton.backends.{b.name}" for b in backends]
     return entry_points

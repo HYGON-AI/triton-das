@@ -1,5 +1,5 @@
 r"""
-`triton.utils.distributed.launch` is a module that spawns up multiple distributed
+`triton.backend.amd.hcutune_cli` is a module that spawns up multiple distributed
 processes for auto-tuning.
 
 The utility can be used for single-process auto-tuning, in which one or
@@ -13,8 +13,7 @@ auto-tuning and benchmarking.
 
 ::
 
-    >>> python -m triton.tools.launch --nproc=8
-            YOUR_PYTHON_SCRIPT.py (all arguments of your python script)
+    >>> hcutune_cli --nproc=8 YOUR_PYTHON_SCRIPT.py [args]
 
 
 **Important Notices:**

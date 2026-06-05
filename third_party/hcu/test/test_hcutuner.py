@@ -990,7 +990,7 @@ def test_dist_launch(monkeypatch, world_size, sharding):
 
     device = 'cuda'
 
-    cmd = ["python3", "-m", "triton.tools.launch", "--nproc", str(world_size),
+    cmd = ["python3", "-m", "triton.backends.amd.hcutune_cli", "--nproc", str(world_size),
            "--devices", "0,0,0,0"]
     if sharding != "":
         cmd.append(sharding)
@@ -1118,7 +1118,7 @@ def test_compile_only(code: str):
         f.write(code.strip())
         temp_filename = f.name
 
-    cmd = ["python3", "-m", "triton.tools.launch", "--nproc",
+    cmd = ["python3", "-m", "triton.backends.amd.hcutune_cli", "--nproc",
             "2", "--compile-only", temp_filename]
     res = subprocess.run(cmd, stdout=subprocess.PIPE)
     assert res.returncode == 0
