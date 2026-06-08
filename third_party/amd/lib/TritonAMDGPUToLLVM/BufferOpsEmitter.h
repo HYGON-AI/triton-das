@@ -108,11 +108,6 @@ private:
   RewriterBase &rewriter;
   Location loc;
   mlir::triton::AMD::TargetInfo targetInfo;
-
-  // Cached base pointer from the most recent createResourceDescriptor call,
-  // so fillCommonArgsAtomics can rebuild the rsrcDesc with atomic num_records
-  // without changing the function's caller interface.
-  Value cachedBasePtr = nullptr;
 };
 
 } // namespace mlir::LLVM::AMD

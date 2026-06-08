@@ -186,49 +186,18 @@ bool isByteOffsetWithin4GB(triton::AddPtrOp addPtrOp,
     return false;
   }
 
-  // step 3: check if byte-offset is within 4GiB-2
+  // step 3: check if byte-offset is within (4GiB - 9) = -9 (num_records).
+  // Sentinel is -8 so that sentinel + inst_size - 1 always exceeds
+  // num_records (-9). The limit matches num_records in the resource desc.
   int64_t elemBitSz = elemTy.getIntOrFloatBitWidth();
   int64_t elemMaxIdx = smax.getSExtValue();
   int64_t byteOfst = (elemBitSz * elemMaxIdx + elemBitSz + 7) / 8;
-  int64_t szLimit4GB = (int64_t{1} << 32) - 2;
+  int64_t szLimit4GB = (int64_t{1} << 32) - 9;
 
   LDBG("element bit sz:" << elemBitSz << ", max byte offset:" << byteOfst
                          << ((szLimit4GB > byteOfst) ? ", out of range"
                                                      : ", in range"));
 
-  return byteOfst <= szLimit4GB;
-}
-
-/// Same as isByteOffsetWithin4GB but with a tighter limit for atomics:
-///   byteOfst <= 4GiB - elemByteWidth - 1 (= -elemByteWidth-1)
-/// This ensures the max valid byte offset stays clear of the OOB sentinel
-/// (-elemByteWidth) while leaving the sentinel address properly aligned.
-bool isByteOffsetWithin4GBAtomic(triton::AddPtrOp addPtrOp,
-                                  std::shared_ptr<DataFlowSolver> solver,
-                                  int64_t elemByteWidth) {
-  Value elemIdx = addPtrOp.getOffset();
-  const auto *lattice =
-      solver->lookupState<dataflow::IntegerValueRangeLattice>(elemIdx);
-  if (!lattice)
-    return false;
-  const mlir::IntegerValueRange &vr = lattice->getValue();
-  if (vr.isUninitialized() || AMD::isEmptyInitializedRange(vr.getValue()))
-    return false;
-  const auto &smin = vr.getValue().smin();
-  const auto &smax = vr.getValue().smax();
-  if (smin.isNegative() || smax.isNegative())
-    return false;
-
-  Type elemTy = getElementTypeOrSelf(addPtrOp.getType());
-  while (auto ptrTy = dyn_cast<triton::PointerType>(elemTy))
-    elemTy = ptrTy.getPointeeType();
-  if (!elemTy || !elemTy.isIntOrFloat())
-    return false;
-
-  int64_t elemBitSz = elemTy.getIntOrFloatBitWidth();
-  int64_t elemMaxIdx = smax.getSExtValue();
-  int64_t byteOfst = (elemBitSz * elemMaxIdx + elemBitSz + 7) / 8;
-  int64_t szLimit4GB = (int64_t{1} << 32) - elemByteWidth - 1;
   return byteOfst <= szLimit4GB;
 }
 
@@ -645,19 +614,6 @@ struct ConvertTritonAtomicCASOpToBufferAtomicCAS
     }
     LDBG("AtomicCAS supported type");
 
-    // For non-shortcut path, apply tighter atomic-specific range check.
-    if (!this->analyzeSmallTensorOfst &&
-        !isFuncArgWith32bitPtrRange(splatOp.getSrc()) &&
-        !isFuncArgPtrWithNonNegativeAssumption(splatOp.getSrc(), assumptions)) {
-      Type valElemTy = getElementTypeOrSelf(op.getVal().getType());
-      unsigned valNBits = std::max(8u, valElemTy.getIntOrFloatBitWidth());
-      int64_t elemByteWidth = valNBits / 8;
-      if (!isByteOffsetWithin4GBAtomic(addPtrOp, solver, elemByteWidth)) {
-        return rewriter.notifyMatchFailure(
-            op, "CAS offset exceeds 4GiB-elemWidth-1 range");
-      }
-    }
-
     // Buffer atomics support 32 and 64-bit operations, so inputs must be at
     // least 32-bits. Otherwise, fall back to the existing path for atomics
     auto opValueType = op.getVal().getType();
@@ -802,19 +758,6 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
                                                  rmwOpStr);
     }
     LDBG("RMW supported Op");
-
-    // For non-shortcut path, apply tighter atomic-specific range check.
-    if (!this->analyzeSmallTensorOfst &&
-        !isFuncArgWith32bitPtrRange(splatOp.getSrc()) &&
-        !isFuncArgPtrWithNonNegativeAssumption(splatOp.getSrc(), assumptions)) {
-      Type valElemTy = getElementTypeOrSelf(op.getVal().getType());
-      unsigned valNBits = std::max(8u, valElemTy.getIntOrFloatBitWidth());
-      int64_t elemByteWidth = valNBits / 8;
-      if (!isByteOffsetWithin4GBAtomic(addPtrOp, solver, elemByteWidth)) {
-        return rewriter.notifyMatchFailure(
-            op, "RMW offset exceeds 4GiB-elemWidth-1 range");
-      }
-    }
 
     // 6. Buffer atomics support 32 and 64-bit operations, so inputs must be at
     //    least 32-bits. Otherwise, fall back to the existing path for atomics
