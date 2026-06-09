@@ -137,6 +137,8 @@ class Hcutuner(Autotuner):
         self.nargs = dict(zip(self.arg_names, args))
         ret = []
         if isinstance(self.fn, triton.runtime.autotuner.Heuristics):
+            for v, heur in self.fn.values.items():
+                kwargs[v] = heur({**dict(zip(self.fn.arg_names, args)), **kwargs})
             fn = self.fn.fn
         else:
             fn = self.fn
