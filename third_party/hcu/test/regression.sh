@@ -1,46 +1,63 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-CUR_PATH="$( cd $( dirname ${BASH_SOURCE} );pwd )"
+CUR_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # CUR_PATH为脚本所在路径，进一步获取triton项目根路径
-export SRC_HOME=$(realpath "${CUR_PATH}/../../../")
+export SRC_HOME="$(realpath "${CUR_PATH}/../../../")"
 
-hcu_file_path=${SRC_HOME}/third_party/hcu/test
-hcu_test_cmds=(
-  "pytest ${hcu_file_path}/matmul.py"
-  "pytest ${hcu_file_path}/rmsnorm.py"
-  "python ${hcu_file_path}/vector-add.py --no_benchmark"
-  "python ${hcu_file_path}/fused-softmax.py --no_benchmark"
-  "python ${hcu_file_path}/matrix-multiplication.py --no_benchmark"
-  "python ${hcu_file_path}/low-memory-dropout.py"
-  "python ${hcu_file_path}/layer-norm.py --no_benchmark"
-  "pytest ${hcu_file_path}/fused-attention.py"
-  "python ${hcu_file_path}/extern-functions.py"
-  "python ${hcu_file_path}/grouped-gemm.py --no_benchmark"
-  "python ${hcu_file_path}/persistent-matmul.py --no_benchmark"
-  "pytest ${hcu_file_path}/test_amd_buffer_ops_4gb.py"
-  "pytest ${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"
-  "pytest ${hcu_file_path}/gluon/gluon_kernel_gemm_a8w8.py"
-  "pytest ${hcu_file_path}/gluon/gluon_kernel_pa_decode.py"
-  "pytest ${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"
-  "pytest ${hcu_file_path}/test_buffer_atomic_dtypes.py"
+hcu_file_path="${SRC_HOME}/third_party/hcu/test"
+junit_xml="${JUNIT_XML:-${CUR_PATH}/hcu_regression.xml}"
+
+pytest_cases=(
+  "${hcu_file_path}/matmul.py"
+  "${hcu_file_path}/rmsnorm.py"
+  "${hcu_file_path}/fused-attention.py"
+  "${hcu_file_path}/test_amd_buffer_ops_4gb.py"
+  "${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"
+  "${hcu_file_path}/gluon/gluon_kernel_gemm_a8w8.py"
+  "${hcu_file_path}/gluon/gluon_kernel_pa_decode.py"
+  "${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"
+  "${hcu_file_path}/test_buffer_atomic_dtypes.py"
+  "${hcu_file_path}/regression_subprocess.py"
 )
 
+pytest_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --junitxml=*)
+      junit_xml="${1#--junitxml=}"
+      ;;
+    --junitxml)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "missing value for --junitxml" >&2
+        exit 2
+      fi
+      junit_xml="$1"
+      ;;
+    *)
+      pytest_args+=("$1")
+      ;;
+  esac
+  shift
+done
+
 function run_pytest() {
-  for cmd in "${hcu_test_cmds[@]}"; do
-    echo "$cmd .........."
-    eval "$cmd"
-    ret=$?
-    if [ $ret -ne 0 ]; then
-      echo "test hcu triton case ${cmd} failed!!"
-      return $ret
-    fi
-  done
-  echo -e "\n================="
-  echo    "Run all passed!!!"
-  echo -e "=================\n"
+  local junit_dir
+  junit_dir="$(dirname "${junit_xml}")"
+  mkdir -p "${junit_dir}"
+
+  local pytest_cmd=()
+  if [[ -n "${PYTEST:-}" ]]; then
+    read -r -a pytest_cmd <<< "${PYTEST}"
+  else
+    pytest_cmd=("${PYTHON:-python}" -m pytest)
+  fi
+
+  echo "Run HCU pytest regression:"
+  echo "  junitxml: ${junit_xml}"
+  "${pytest_cmd[@]}" -s --tb=short "--junitxml=${junit_xml}" "${pytest_args[@]}" "${pytest_cases[@]}"
 }
 
-# pytest
 run_pytest
