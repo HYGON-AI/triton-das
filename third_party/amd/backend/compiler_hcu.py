@@ -388,6 +388,9 @@ class HIPBackend(BaseBackend):
             else:
                 raise ValueError(f"Unsupported scheduling latency: {options.sched_latency}")
 
+        if options.enable_fp_fusion:
+            options_args.extend(["-mllvm=-fp-fuse=fast"])
+
         clang_args = [
             "-target", amd.TARGET_TRIPLE,
             f"-mcpu={options.arch}:xnack-",

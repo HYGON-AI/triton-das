@@ -10,7 +10,7 @@ variables:
   PIP_TRUSTED_HOST: "10.16.1.201"
   DTK_PKG: "/ArchivedFile/dtk-pkg/dtk26.04/DTK-26.04-rc4-centos8-x86_64.tar.gz"
   DEVPI_URL: "http://10.16.1.201:9929/"
-  CISMI_TIMEOUT: "300"
+  CISMI_TIMEOUT: "3600"
   TORCH_VERSION: "2.10.0"
 
 build:triton-wheel:
