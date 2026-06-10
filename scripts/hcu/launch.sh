@@ -206,14 +206,14 @@ function build_llvm() {
   package_user=${3:-"sw-builder"}
   password=${4:-"swadmin"}
   pushd ${SRC_HOME}
-  package_path="/builds/ai_compiler/llvm4triton"
+  package_path="/public/opendas/ArchivedFile/Jenkins/CompileDep/triton"
   hash=`grep -m 1 -v '^$' cmake/llvm-hash.txt`
   hash=${hash:0:8}
   platform=$(cat /etc/*release | grep '^ID=' | awk -F '=' '{print $2}' | tr -d '"')
   package_name=llvm-${hash}-${platform}-x64
   # Package not exist, build the package
   set +e
-  curl --head --silent --fail http://${package_server}/${package_path}/${package_name}.tar.gz
+  curl --head --silent --fail http://42.228.13.241:18000/Jenkins/CompileDep/triton/${package_name}.tar.gz
   check_exist=$?
   set -e
   if [[ $check_exist -ne 0 ]]; then
@@ -224,7 +224,7 @@ function build_llvm() {
     # git repo not exist, reclone
     else
       rm -rf llvm-project
-      git clone ${repo}
+      git clone ${repo} llvm-project
       cd llvm-project
     fi
     git reset ${hash} --hard

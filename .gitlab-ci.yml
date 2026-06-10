@@ -1,0 +1,39 @@
+stages:
+  - build
+
+variables:
+  LLVM_REPO: "http://42.228.13.241:10068/dcutoolkit/deeplearing/llvm-triton.git"
+  FILE_SERVER_IP: "10.16.1.27"
+  FILE_SERVER_USER: "fileowner"
+  # FILE_SERVER_PWD should be set via GitLab CI/CD Variables (Settings → CI/CD → Variables)
+  # Do NOT hardcode passwords in .gitlab-ci.yml
+
+build:triton-wheel:
+  stage: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
+  tags:
+    - nmz
+  before_script:
+    # 安装 DTK
+    - cp -f ${DTK_PKG} /opt/
+    - cd /opt && tar -xzf $(basename ${DTK_PKG}) && mv dtk-* dtk
+    - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
+    # 安装 AICC
+    - latest_run=$(ls /ArchivedFile/ai_cc/nightly/dtk_llvm_*.run 2>/dev/null | sort -t '_' -k4 -nr | head -n1)
+    - '[ -n "${latest_run}" ] && cp ${latest_run} ./ && chmod +x $(basename ${latest_run}) && yes | bash $(basename ${latest_run}) && echo "AICC 安装完成" || echo "跳过 AICC 安装"'
+    # 合并目标分支
+    - git config user.email "ci@.local" && git config user.name "CI"
+    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - git merge origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --no-edit
+    - pip install -r python/requirements.txt 
+  script:
+    - bash scripts/hcu/gen_triton_wheel.sh
+        --llvm_repo "${LLVM_REPO}"
+        --file_server_ip "${FILE_SERVER_IP}"
+        --file_server_user "${FILE_SERVER_USER}"
+        --file_server_pwd "${FILE_SERVER_PWD}"
+  artifacts:
+    paths:
+      - dist/*.whl
+    expire_in: 7 days
