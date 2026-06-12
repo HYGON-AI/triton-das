@@ -1,15 +1,21 @@
 stages:
   - build
+  - publish
 
 variables:
   LLVM_REPO: "http://42.228.13.241:10068/dcutoolkit/deeplearing/llvm-triton.git"
   FILE_SERVER_IP: "10.16.1.27"
   FILE_SERVER_USER: "fileowner"
-  # FILE_SERVER_PWD should be set via GitLab CI/CD Variables (Settings → CI/CD → Variables)
-  # Do NOT hardcode passwords in .gitlab-ci.yml
+  PIP_INDEX_URL: "http://10.16.1.201:9929/nightly/dtk2604/+simple/"
+  PIP_TRUSTED_HOST: "10.16.1.201"
+  DTK_PKG: "/ArchivedFile/dtk-pkg/dtk26.04/DTK-26.04-rc4-centos8-x86_64.tar.gz"
+  DEVPI_URL: "http://10.16.1.201:9929/"
+  CISMI_TIMEOUT: "300"
+  TORCH_VERSION: "2.10.0"
 
 build:triton-wheel:
   stage: build
+  timeout: 3h
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
   tags:
@@ -22,18 +28,86 @@ build:triton-wheel:
     # 安装 AICC
     - latest_run=$(ls /ArchivedFile/ai_cc/nightly/dtk_llvm_*.run 2>/dev/null | sort -t '_' -k4 -nr | head -n1)
     - '[ -n "${latest_run}" ] && cp ${latest_run} ./ && chmod +x $(basename ${latest_run}) && yes | bash $(basename ${latest_run}) && echo "AICC 安装完成" || echo "跳过 AICC 安装"'
+    # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
+    - |
+      cat > /tmp/git-askpass.sh << 'SCRIPT'
+      #!/bin/sh
+      case "$1" in
+        *Username*) echo "gitlab-ci-token" ;;
+        *Password*) echo "$GIT_TOKEN" ;;
+      esac
+      SCRIPT
+    - chmod +x /tmp/git-askpass.sh
+    - export GIT_ASKPASS=/tmp/git-askpass.sh GIT_TERMINAL_PROMPT=0 GIT_TOKEN="${CI_JOB_TOKEN}"
     # 合并目标分支
     - git config user.email "ci@.local" && git config user.name "CI"
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
     - git merge origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --no-edit
-    - pip install -r python/requirements.txt 
+    - pip install -r python/requirements.txt -r python/test-requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+    - pip install torch==${TORCH_VERSION} cismi amdsmi
+    - pip install numpy==1.24.3
+    - yum install -y expect rsync
   script:
+    - export FILE_SERVER_PWD_DECODED=$(echo -n "${FILE_SERVER_PWD}" | base64 -d)
     - bash scripts/hcu/gen_triton_wheel.sh
         --llvm_repo "${LLVM_REPO}"
         --file_server_ip "${FILE_SERVER_IP}"
         --file_server_user "${FILE_SERVER_USER}"
-        --file_server_pwd "${FILE_SERVER_PWD}"
+        --file_server_pwd "${FILE_SERVER_PWD_DECODED}"
+    - pip install dist/*.whl
+    - export HIP_VISIBLE_DEVICES=$(CIsmi need 1 --timeout ${CISMI_TIMEOUT})
+    - bash third_party/hcu/test/regression.sh
   artifacts:
     paths:
       - dist/*.whl
+      - third_party/hcu/test/hcu_regression.xml
+    reports:
+      junit: third_party/hcu/test/hcu_regression.xml
     expire_in: 7 days
+
+publish:
+  stage: publish
+  timeout: 3h
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME =~ /^(release\/|staging)/'
+  tags:
+    - nmz
+  before_script:
+    # 安装 DTK
+    - cp -f ${DTK_PKG} /opt/
+    - cd /opt && tar -xzf $(basename ${DTK_PKG}) && mv dtk-* dtk
+    - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
+    # 安装 AICC
+    - latest_run=$(ls /ArchivedFile/ai_cc/nightly/dtk_llvm_*.run 2>/dev/null | sort -t '_' -k4 -nr | head -n1)
+    - '[ -n "${latest_run}" ] && cp ${latest_run} ./ && chmod +x $(basename ${latest_run}) && yes | bash $(basename ${latest_run}) && echo "AICC 安装完成" || echo "跳过 AICC 安装"'
+    # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
+    - |
+      cat > /tmp/git-askpass.sh << 'SCRIPT'
+      #!/bin/sh
+      case "$1" in
+        *Username*) echo "gitlab-ci-token" ;;
+        *Password*) echo "$GIT_TOKEN" ;;
+      esac
+      SCRIPT
+    - chmod +x /tmp/git-askpass.sh
+    - export GIT_ASKPASS=/tmp/git-askpass.sh GIT_TERMINAL_PROMPT=0 GIT_TOKEN="${CI_JOB_TOKEN}"
+    - pip install -r python/requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+    - pip install torch==${TORCH_VERSION} ciupload
+  script:
+    - export FILE_SERVER_PWD_DECODED=$(echo -n "${FILE_SERVER_PWD}" | base64 -d)
+    - bash scripts/hcu/gen_triton_wheel.sh
+        --llvm_repo "${LLVM_REPO}"
+        --file_server_ip "${FILE_SERVER_IP}"
+        --file_server_user "${FILE_SERVER_USER}"
+        --file_server_pwd "${FILE_SERVER_PWD_DECODED}"
+    # repair wheel
+    - DTK_VER=$(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.')
+    - TORCH_VER=$(echo ${TORCH_VERSION} | tr -d '.')
+    - LOCAL_VER="dtk${DTK_VER}.torch${TORCH_VER}.$(date +%y%m%d%H%M).g$(git rev-parse --short=6 HEAD)"
+    - CIUpload --repair --torch_version ${TORCH_VERSION} --set_local_version ${LOCAL_VER} --outputdir output -f dist/*.whl
+    # upload
+    - CIUpload --devpi_url ${DEVPI_URL} --devpi_user ${devpi_nightly_user} --devpi_password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl
+  artifacts:
+    paths:
+      - output/*.whl
+    expire_in: 30 days

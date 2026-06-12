@@ -245,6 +245,7 @@ function build_llvm() {
     ninja install -j${MAX_JOBS}
     cd ..
     tar -zcf ${package_name}.tar.gz ${package_name}
+    export RSYNC_PWD="${password}"
     expect -c """
       set timeout 14400
       spawn rsync -avP ${package_name}.tar.gz ${package_user}@${package_server}:${package_path}/
@@ -252,12 +253,12 @@ function build_llvm() {
         \"*yes/no*\" {
           send \"yes\n\"
             expect \"*assword:\" {
-            send \"${password}\n\"
+            send \"\$env(RSYNC_PWD)\n\"
             expect eof
           }
         }
         \"*assword:\" {
-          send \"${password}\n\"
+          send \"\$env(RSYNC_PWD)\n\"
           expect eof
         }
         eof
