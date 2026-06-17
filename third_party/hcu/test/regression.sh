@@ -13,6 +13,7 @@ pytest_cases=(
   "${hcu_file_path}/matmul.py"
   "${hcu_file_path}/rmsnorm.py"
   "${hcu_file_path}/fused-attention.py"
+  "${hcu_file_path}/mls-unit-test.py"
   "${hcu_file_path}/test_amd_buffer_ops_4gb.py"
   "${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"
   "${hcu_file_path}/gluon/gluon_kernel_gemm_a8w8.py"

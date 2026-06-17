@@ -56,6 +56,13 @@ else
   )
 fi
 
+# local cache
+mkdir ~/.triton/
+cd ~/.triton/
+wget http://10.16.1.201:8000/Jenkins/CompileDep/triton/nvidia.3.6.x.tar.gz
+tar -zxf nvidia.3.6.x.tar.gz
+cd $CUR_PATH/../../
+
 for python_app in ${PYTHON_LIST[@]}; do
   app_path=$(which ${python_app})
   if [[ -z ${app_path} ]]; then

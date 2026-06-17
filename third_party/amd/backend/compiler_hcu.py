@@ -278,8 +278,22 @@ class HIPBackend(BaseBackend):
     @staticmethod
     def path_to_rocm_llvm():
         rocm_path = Path(HIPBackend.path_to_rocm())
-        llvm_subdir = "aillvm" if rocm_path.name == "dtk" else "llvm"
-        return rocm_path / llvm_subdir
+        if rocm_path.name == "dtk":
+            llvm_path = rocm_path / "aillvm"
+            if not llvm_path.is_dir():
+                print(
+                    "\n"
+                    "========================================================================\n"
+                    "HCU/DTK TOOLCHAIN ERROR: AI LLVM (aillvm) not found\n"
+                    "========================================================================\n"
+                    f"  DTK root : {rocm_path}\n"
+                    f"  Expected : {llvm_path}\n"
+                    "========================================================================\n",
+                    file=os.sys.stderr,
+                    flush=True,
+                )
+            return llvm_path
+        return rocm_path / "llvm"
 
     @staticmethod
     def path_to_rocm_lld():
