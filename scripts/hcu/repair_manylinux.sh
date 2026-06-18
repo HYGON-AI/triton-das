@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 生成 manylinux 版本标识
-PLATFORM="manylinux_$(ldd --version | awk '{print $NF}' | head -n1 | tr -d '.')_x86_64"
+PLATFORM="manylinux_$(ldd --version | awk '{print $NF}' | head -n1 | tr '.' '_')_x86_64"
 
 TORCH_PATH=$(python -c "import torch, os; print(os.path.dirname(torch.__file__))" 2>/dev/null)
 export LD_LIBRARY_PATH="${TORCH_PATH}/lib:${LD_LIBRARY_PATH}"
