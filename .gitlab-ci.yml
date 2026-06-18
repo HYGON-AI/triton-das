@@ -44,7 +44,7 @@ build:triton-wheel:
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
     - git merge origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --no-edit
     - pip install -r python/requirements.txt -r python/test-requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-    - pip install torch==${TORCH_VERSION} cismi amdsmi
+    - pip install torch==${TORCH_VERSION} cismi amdsmi auditwheel
     - pip install numpy==1.24.3
     - yum install -y expect rsync
   script:
@@ -54,7 +54,9 @@ build:triton-wheel:
         --file_server_ip "${FILE_SERVER_IP}"
         --file_server_user "${FILE_SERVER_USER}"
         --file_server_pwd "${FILE_SERVER_PWD_DECODED}"
-    - pip install dist/*.whl
+    # manylinux repair
+    - bash scripts/hcu/repair_manylinux.sh
+    - pip install dist/*manylinux*.whl
     - export HIP_VISIBLE_DEVICES=$(CIsmi need 1 --timeout ${CISMI_TIMEOUT})
     - bash third_party/hcu/test/regression.sh
   artifacts:
