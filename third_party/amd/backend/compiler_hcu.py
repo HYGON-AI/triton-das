@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 from types import ModuleType
 import hashlib
+import shutil
 import tempfile
+import time
 import re
 import subprocess
 import functools
@@ -278,7 +280,8 @@ class HIPBackend(BaseBackend):
     @staticmethod
     def path_to_rocm_llvm():
         rocm_path = Path(HIPBackend.path_to_rocm())
-        if rocm_path.name == "dtk":
+        name = rocm_path.name.lower()
+        if name == "dtk" or "dtk" in name:
             llvm_path = rocm_path / "aillvm"
             if not llvm_path.is_dir():
                 print(
@@ -292,8 +295,38 @@ class HIPBackend(BaseBackend):
                     file=os.sys.stderr,
                     flush=True,
                 )
+                return rocm_path / "llvm"
             return llvm_path
         return rocm_path / "llvm"
+
+    @staticmethod
+    def _archive_failed_compilation(stage, metadata, artifact_paths, clang_path, clang_command, error):
+        rocm_path = HIPBackend.path_to_rocm()
+        llvm_path = HIPBackend.path_to_rocm_llvm()
+        kernel_name = metadata.get("name", "unknown_kernel")
+        safe_name = re.sub(r'[^\w.-]', '_', kernel_name)
+        context = (
+            f"stage      : {stage}\n"
+            f"kernel     : {kernel_name}\n"
+            f"rocm_path  : {rocm_path}\n"
+            f"llvm_path  : {llvm_path}\n"
+            f"clang      : {clang_path}\n"
+        )
+        if clang_command is not None:
+            context += f"command    : {' '.join(map(str, clang_command))}\n"
+        context += f"error      : {error}\n"
+        print(f"[triton-hcu] {stage} failed\n{context}", flush=True)
+
+        dest_dir = (
+            Path.home() / ".triton" / "cache" / "failed_kernels"
+            / f"{time.strftime('%Y%m%d_%H%M%S')}_{safe_name}_{stage.replace('->', '_')}"
+        )
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / "context.txt").write_text(context)
+        for path in artifact_paths:
+            if path and os.path.isfile(path):
+                shutil.copy2(path, dest_dir / os.path.basename(path))
+        print(f"[triton-hcu] archived failed kernel artifacts to {dest_dir}", flush=True)
 
     @staticmethod
     def path_to_rocm_lld():
@@ -775,9 +808,13 @@ class HIPBackend(BaseBackend):
                 amdgcn = fd_out.read()
 
         except subprocess.CalledProcessError as e:
+            HIPBackend._archive_failed_compilation(
+                "llir->amdgcn", metadata, [llir_file, asm_file], clang_path, asm_command, e.stderr)
             print(f"Compilation failed: {e.stderr}")
             raise HSACOError(f"Compilation failed: {e.stderr}") from e
         except IOError as e:
+            HIPBackend._archive_failed_compilation(
+                "llir->amdgcn", metadata, [llir_file, asm_file], clang_path, asm_command, str(e))
             print(f"File operation failed: {str(e)}")
             raise HSACOError(f"File operation failed: {str(e)}") from e
         finally:
@@ -814,9 +851,13 @@ class HIPBackend(BaseBackend):
                 ret = fd_out.read()
 
         except subprocess.CalledProcessError as e:
+            HIPBackend._archive_failed_compilation(
+                "amdgcn->hsaco", metadata, [asm_file, hsaco_file], clang_path, hsaco_command, e.stderr)
             print(f"Compilation failed: {e.stderr}")
             raise HSACOError(f"Compilation failed: {e.stderr}") from e
         except IOError as e:
+            HIPBackend._archive_failed_compilation(
+                "amdgcn->hsaco", metadata, [asm_file, hsaco_file], clang_path, hsaco_command, str(e))
             print(f"File operation failed: {str(e)}")
             raise HSACOError(f"File operation failed: {str(e)}") from e
 
