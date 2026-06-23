@@ -82,7 +82,7 @@ publish:
     - cd /opt && tar -xzf $(basename ${DTK_PKG}) && mv dtk-* dtk
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
     # 安装 AICC
-    - src_dir="/public/opendas/ArchivedFile/ai_cc/nightly"
+    - src_dir="/ArchivedFile/ai_cc/nightly"
     - latest_run=$(cd "$src_dir" && ls dtk_llvm_*.run 2>/dev/null | sed 's/\.run$//' | sort -t '_' -k4 -nr | head -n1)
     - 'echo "完整安装包路径: ${src_dir}/${latest_run}.run"'
     - test -n "${latest_run}" && cp "${src_dir}/${latest_run}.run" ./ && chmod +x "${latest_run}.run" && yes | bash "${latest_run}.run" && echo "AICC 安装完成" || echo "跳过 AICC 安装"
