@@ -29,7 +29,7 @@ build:triton-wheel:
     - src_dir="/ArchivedFile/ai_cc/nightly"
     - latest_run=$(cd "$src_dir" && ls dtk_llvm_*.run 2>/dev/null | sed 's/\.run$//' | sort -t '_' -k4 -nr | head -n1)
     - echo "完整安装包路径: ${src_dir}/${latest_run}.run"
-    - '[ -n "${latest_run}" ] && cp "${src_dir}/${latest_run}.run" ./ && chmod +x "${latest_run}.run" && yes | bash "${latest_run}.run" && echo "AICC 安装完成" || echo "跳过 AICC 安装"'
+    - test -n "${latest_run}" && cp "${src_dir}/${latest_run}.run" ./ && chmod +x "${latest_run}.run" && yes | bash "${latest_run}.run" && echo "AICC 安装完成" || echo "跳过 AICC 安装"
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'
@@ -85,7 +85,7 @@ publish:
     - src_dir="/public/opendas/ArchivedFile/ai_cc/nightly"
     - latest_run=$(cd "$src_dir" && ls dtk_llvm_*.run 2>/dev/null | sed 's/\.run$//' | sort -t '_' -k4 -nr | head -n1)
     - echo "完整安装包路径: ${src_dir}/${latest_run}.run"
-    - '[ -n "${latest_run}" ] && cp "${src_dir}/${latest_run}.run" ./ && chmod +x "${latest_run}.run" && yes | bash "${latest_run}.run" && echo "AICC 安装完成" || echo "跳过 AICC 安装"'
+    - test -n "${latest_run}" && cp "${src_dir}/${latest_run}.run" ./ && chmod +x "${latest_run}.run" && yes | bash "${latest_run}.run" && echo "AICC 安装完成" || echo "跳过 AICC 安装"
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'
