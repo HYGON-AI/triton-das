@@ -398,6 +398,11 @@ class HIPBackend(BaseBackend):
         else:
             raise ValueError(f"Unknown arch: {options.arch}")
 
+        if options.arch != "gfx928":
+            # s_barrier not include s_waitcnt vmcnt(0), if not use this, compiler will auto insert s_waitcnt vmcnt(0) with s_barrier
+            options_args.append("-mllvm=-amdgpu-disable-backoff-barrier=false")
+
+
         version_args = {
             "18": [
                 "-mllvm=-enable-hcu-approx-func-fp-math=true",
