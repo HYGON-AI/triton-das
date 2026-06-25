@@ -232,7 +232,7 @@ class HIPBackend(BaseBackend):
             HIPBackend.instrumentation.load_dialects(ctx)
 
     @staticmethod
-    def get_tensor_physical_size(t) -> int:
+    def get_tensor_physical_size(t) -> int: 
         if t.numel() == 0:
             return 0
 
@@ -245,9 +245,9 @@ class HIPBackend(BaseBackend):
         import torch
 
         if hasattr(arg, "ptr_range"):
-            return arg.ptr_range() <= 2**32 - 1
+            return arg.ptr_range() <= 2**32 - 8
         if isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
-            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 1
+            return HIPBackend.get_tensor_physical_size(arg) <= 2**32 - 8
         return False
 
     @staticmethod

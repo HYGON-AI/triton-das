@@ -274,7 +274,7 @@ bool canUseBufferOps(Value ptr,
 
 /// Insert `tt.assert` before each `amdgpu.buffer_{load,store}` so that the
 /// buffer instruction's element offset tensor encodes a byte offset in
-/// [0, 2^32-2] for active lanes (same field lowered to raw.ptr.buffer.* and
+/// [0, 2^32-9] for active lanes (same field lowered to raw.ptr.buffer.* and
 /// compared against num_records). Scalar chunks folded into the resource base
 /// by pointer canonicalization are not added back here.
 static void emitBufferOpOffsetAssert(PatternRewriter &rewriter, Location loc,
@@ -297,7 +297,7 @@ static void emitBufferOpOffsetAssert(PatternRewriter &rewriter, Location loc,
                              rewriter.getI64IntegerAttr(elementByteWidth)));
   Value byteOff = rewriter.create<arith::MulIOp>(loc, offI64, strideVal);
 
-  const int64_t kMaxByteOff = (int64_t{1} << 32) - 2;
+  const int64_t kMaxByteOff = (int64_t{1} << 32) - 9;
   Value limitVal = rewriter.create<arith::ConstantOp>(
       loc, i64TensorTy,
       DenseElementsAttr::get(i64TensorTy,
@@ -326,7 +326,7 @@ static void emitBufferOpOffsetAssert(PatternRewriter &rewriter, Location loc,
       loc, assertCond,
       rewriter.getStringAttr(
           "triton amdgpu buffer op: element_offset * elem_size must be in "
-          "[0, 2^32-2] bytes"));
+          "[0, 2^32-9] bytes"));
 }
 
 // Extract stride of the blocked offset of LD/ST ops.
@@ -562,11 +562,13 @@ struct ConvertTritonAtomicCASOpToBufferAtomicCAS
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
-      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_)
+      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
+      bool emitBufferOpsOffsetAssert_)
       : mlir::OpRewritePattern<triton::AtomicCASOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
         solver(std::move(solver)),
-        analyzeSmallTensorOfst(analyzeSmallTensorOfst_) {}
+        analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::AtomicCASOp op,
@@ -630,6 +632,9 @@ struct ConvertTritonAtomicCASOpToBufferAtomicCAS
       return rewriter.notifyMatchFailure(
           op, "BufferAtomicCAS requires opBitWidth >= 32");
     }
+    if (emitBufferOpsOffsetAssert)
+      emitBufferOpOffsetAssert(rewriter, op->getLoc(), tensorOffset,
+                               op.getVal().getType(), Value());
     Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
     rewriter.replaceOpWithNewOp<triton::amdgpu::BufferAtomicCASOp>(
         op, op.getVal().getType(), basePtr, tensorOffset, op.getCmp(),
@@ -643,6 +648,7 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool emitBufferOpsOffsetAssert;
 };
 
 struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
@@ -654,11 +660,12 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
       std::shared_ptr<DataFlowSolver> solver, ISAFamily isaFamily,
-      bool analyzeSmallTensorOfst_)
+      bool analyzeSmallTensorOfst_, bool emitBufferOpsOffsetAssert_)
       : mlir::OpRewritePattern<triton::AtomicRMWOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
         solver(std::move(solver)), isaFamily(isaFamily),
-        analyzeSmallTensorOfst(analyzeSmallTensorOfst_) {}
+        analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::AtomicRMWOp op,
@@ -784,6 +791,9 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     Value maybeMask{};
     if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
       maybeMask = op.getMask();
+    if (emitBufferOpsOffsetAssert)
+      emitBufferOpOffsetAssert(rewriter, op->getLoc(), tensorOffset,
+                               op.getVal().getType(), maybeMask);
     Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
     rewriter.replaceOpWithNewOp<triton::amdgpu::BufferAtomicRMWOp>(
         op, op.getVal().getType(), atomicRmwOp, basePtr, tensorOffset,
@@ -799,6 +809,7 @@ private:
   std::shared_ptr<DataFlowSolver> solver;
   ISAFamily isaFamily;
   bool analyzeSmallTensorOfst;
+  bool emitBufferOpsOffsetAssert;
 };
 
 // Workaround to allow static_assert(false) on older compilers as it was
@@ -1026,10 +1037,10 @@ struct TritonAMDGPUConvertToBufferOpsPass
         (ISAFamily::CDNA3 == isaFamily || ISAFamily::CDNA4 == isaFamily))
       patterns.add<ConvertTritonAtomicRMWOpToBufferAtomicRMW>(
           context, assumptions, axisInfoAnalysis, solver, isaFamily,
-          this->analyzeSmallTensorOfst);
+          this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert);
     patterns.add<ConvertTritonAtomicCASOpToBufferAtomicCAS>(
         context, assumptions, axisInfoAnalysis, solver,
-        this->analyzeSmallTensorOfst);
+        this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert);
 
     if (applyPatternsGreedily(mod, std::move(patterns)).failed())
       signalPassFailure();
