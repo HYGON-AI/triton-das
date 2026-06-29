@@ -660,12 +660,14 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
       std::shared_ptr<DataFlowSolver> solver, ISAFamily isaFamily,
-      bool analyzeSmallTensorOfst_, bool emitBufferOpsOffsetAssert_)
+      bool analyzeSmallTensorOfst_, bool emitBufferOpsOffsetAssert_,
+      std::string arch_)
       : mlir::OpRewritePattern<triton::AtomicRMWOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
         solver(std::move(solver)), isaFamily(isaFamily),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
-        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_),
+        arch(std::move(arch_)) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::AtomicRMWOp op,
@@ -723,11 +725,11 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     }
     LDBG("RMW supported type");
 
-    // float16 is the only 16-bit dtype supported by buffer atomic fadd on
-    // gfx942
-    if (isaFamily == ISAFamily::CDNA3 && checkType.isBF16() &&
-        atomicRmwOp == RMWOp::FADD) {
-      return rewriter.notifyMatchFailure(op, "RMW FADD does not support bf16");
+    // HCU: bf16 is unsupported everywhere on CDNA3; f16 only works on gfx942
+    if (isaFamily == ISAFamily::CDNA3 && atomicRmwOp == RMWOp::FADD &&
+        (checkType.isBF16() || (checkType.isF16() && arch != "gfx942"))) {
+      return rewriter.notifyMatchFailure(
+          op, "CDNA3 does not support 16-bit buffer atomic fadd");
     }
     LDBG("RMW FADD supported 16-bit type");
 
@@ -808,6 +810,7 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
   ISAFamily isaFamily;
+  std::string arch;
   bool analyzeSmallTensorOfst;
   bool emitBufferOpsOffsetAssert;
 };
@@ -1037,7 +1040,8 @@ struct TritonAMDGPUConvertToBufferOpsPass
         (ISAFamily::CDNA3 == isaFamily || ISAFamily::CDNA4 == isaFamily))
       patterns.add<ConvertTritonAtomicRMWOpToBufferAtomicRMW>(
           context, assumptions, axisInfoAnalysis, solver, isaFamily,
-          this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert);
+          this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert,
+          archGenerationName);
     patterns.add<ConvertTritonAtomicCASOpToBufferAtomicCAS>(
         context, assumptions, axisInfoAnalysis, solver,
         this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert);
