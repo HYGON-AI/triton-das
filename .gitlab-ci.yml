@@ -46,7 +46,7 @@ build:triton-wheel:
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
     - git merge origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --no-edit
     - pip install -r python/requirements.txt -r python/test-requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-    - pip install torch==${TORCH_VERSION} cismi amdsmi auditwheel patchelf
+    - pip install torch==${TORCH_VERSION} cismi amdsmi auditwheel patchelf==0.17.2.4
     - pip install numpy==1.24.3
     - yum install -y expect rsync
   script:
@@ -98,7 +98,7 @@ publish:
     - chmod +x /tmp/git-askpass.sh
     - export GIT_ASKPASS=/tmp/git-askpass.sh GIT_TERMINAL_PROMPT=0 GIT_TOKEN="${CI_JOB_TOKEN}"
     - pip install -r python/requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-    - pip install torch==${TORCH_VERSION} ciupload auditwheel
+    - pip install torch==${TORCH_VERSION} ciupload auditwheel patchelf==0.17.2.4
   script:
     - export FILE_SERVER_PWD_DECODED=$(echo -n "${FILE_SERVER_PWD}" | base64 -d)
     - bash scripts/hcu/gen_triton_wheel.sh
