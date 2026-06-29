@@ -220,6 +220,7 @@ maybeGetOrCreateScalarConstant(RewriterBase &rewriter, Location loc, Value expr,
 }
 
 bool isScalarIntConst(Value v) {
+  if (!v) return false;
   auto constOp = v.getDefiningOp<mlir::arith::ConstantOp>();
   if (!constOp)
     return false;
@@ -230,6 +231,7 @@ bool isScalarIntConst(Value v) {
 }
 
 bool isScalarIntZero(Value v) {
+  if (!v) return false;
   auto constOp = v.getDefiningOp<mlir::arith::ConstantOp>();
   if (!constOp)
     return false;
@@ -241,6 +243,7 @@ bool isScalarIntZero(Value v) {
 }
 
 bool isTensorIntZero(Value v) {
+  if (!v) return false;
   if (!getElementTypeOrSelf(v).isInteger())
     return false;
   if (auto splatOp = v.getDefiningOp<tt::SplatOp>())
@@ -1051,6 +1054,16 @@ private:
 
     LDBG("   -- new uniform offset: " << uniformSum);
     LDBG("   -- new non-uniform offset: " << nonUniformSum);
+
+    // Ensure uniformSum has a value, even if it's just zero
+    if (!uniformSum) {
+      auto offsetType = fatPtrOffset.getType();
+      auto bitness = offsetType.isIntOrIndex()
+                         ? offsetType.getIntOrFloatBitWidth()
+                         : llvm::cast<RankedTensorType>(offsetType)
+                               .getElementTypeBitWidth();
+      uniformSum = arith::ConstantIntOp::create(rewriter, curLoc, 0, bitness);
+    }
 
     // Add uniform and non-uniform quantities together to be a new offset.
     assert(uniformSum && "uniformSum should have value, even if it is 0");
