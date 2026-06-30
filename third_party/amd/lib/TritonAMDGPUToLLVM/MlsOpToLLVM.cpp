@@ -17,6 +17,7 @@
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 
 using namespace mlir;
@@ -59,6 +60,28 @@ bool isKMajor(llvm::ArrayRef<unsigned> order, int opIdx) {
   auto rank = order.size();
   int kdim = opIdx == 0 ? rank - 1 : rank - 2;
   return order[0] == kdim;
+}
+
+Value getLinearWarpId(Location loc, RewriterBase &rewriter,
+                      const AMD::TargetInfo &targetInfo) {
+  unsigned warpSize = targetInfo.getWarpSize();
+  assert(warpSize == 64);
+
+  auto insertPt = rewriter.saveInsertionPoint();
+  Operation *parentOp = insertPt.getBlock()->getParentOp();
+  while (!isa<LLVM::LLVMFuncOp>(parentOp))
+    parentOp = parentOp->getParentOp();
+
+  auto funcOp = cast<LLVM::LLVMFuncOp>(parentOp);
+  rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+  auto entryBuilder = TritonLLVMOpBuilder(loc, rewriter);
+  Value threadId = getThreadId(rewriter, loc);
+  Value warpId = entryBuilder.udiv(threadId, entryBuilder.i32_val(warpSize));
+  auto call = LLVM::createLLVMIntrinsicCallOp(
+      rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty}, {warpId});
+  rewriter.restoreInsertionPoint(insertPt);
+
+  return call.getResult(0);
 }
 
 } // namespace
@@ -539,11 +562,7 @@ private:
     unsigned dim0DivFactor = !isBit4 ? 1 : mlsTileE[0] / mlsTileG[0];
     unsigned dim1DivFactor = !isBit4 ? 1 : mlsTileE[1] / mlsTileG[1];
 
-    Value threadId = getThreadId(rewriter, loc);
-    Value warpSize = b.i32_val(64);
-    Value laneId = b.urem(threadId, warpSize);
-    // Note: To make the warpId as a uniform value for Matrix Load Rsrc Desc.
-    Value warpId = rewriter.create<ROCDL::ReadfirstlaneOp>(loc, i32_ty, b.udiv(threadId, warpSize));
+    Value warpId = getLinearWarpId(loc, rewriter, targetInfo);
     SmallVector<Value> multiDimWarpId =
         delinearize(rewriter, loc, warpId, _warpsPerCTA, warpOrder);
 
@@ -627,7 +646,11 @@ private:
     // dword 3:
     Value mfilter = b.and_(mPadding, b.i32_val(0xFF));
     Value nfilter = b.and_(nmPadding, b.i32_val(0xFF));
-    Value cacheSwizzle = b.i32_val(0);
+    bool enableCacheSwizzle =
+        triton::tools::isEnvValueBool(
+            triton::tools::getStrEnv("TRITON_BUFFER_CACHE_SWIZZLE"))
+            .value_or(true);
+    Value cacheSwizzle = b.i32_val(enableCacheSwizzle ? 1 : 0);
     Value mfmt = b.i32_val(alt2Kind);
 
     Value controlField = mfilter;                                                    // [7:0]
@@ -805,14 +828,15 @@ private:
     Value res;
     auto opIdx = dotOperandLayout.getOpIdx();
     auto mfmaLayout = cast<AMDMfmaEncodingAttr>(dotOperandLayout.getParent());
-    Value threadId = getThreadId(rewriter, loc);
+    Value linearWarpId = getLinearWarpId(loc, rewriter, targetInfo);
+
     if ((opIdx == 0 && mfmaLayout.getMfmaTile()[0] == mfmaLayout.getInstrShape()[0]) ||
         (opIdx == 1 && mfmaLayout.getMfmaTile()[1] == mfmaLayout.getInstrShape()[1])) {
       res = convertLayoutUnitTilesPerWarp(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                                          dotOperandLayout, smemObj, typeConverter, threadId);
+                                          dotOperandLayout, smemObj, typeConverter, linearWarpId);
     } else {
         res = convertLayoutMultiTilesPerWarp(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                                             dotOperandLayout, smemObj, typeConverter, threadId);
+                                             dotOperandLayout, smemObj, typeConverter, linearWarpId);
     }
 
     if (!res)
@@ -827,7 +851,7 @@ private:
                                 DotOperandEncodingAttr encoding,
                                 const SharedMemoryObject &smemObj,
                                 const LLVMTypeConverter *typeConverter,
-                                Value thread) const {
+                                Value linearWarpId) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
     auto tensorTy = cast<MemDescType>(tensor.getType());
@@ -888,8 +912,6 @@ private:
 
     unsigned iWarpSize = targetInfo.getWarpSize();
     assert(iWarpSize == 64);
-    Value warpSize = b.i32_val(iWarpSize);
-    Value linearWarpId = b.udiv(thread, warpSize);
 
     auto warpOrder = triton::gpu::getMatrixOrder(rank, /*rowMajor*/ true);
     Value spatialWarpId = getWarpIdInBlock(
@@ -1000,7 +1022,7 @@ private:
                                  DotOperandEncodingAttr encoding,
                                  const SharedMemoryObject &smemObj,
                                  const LLVMTypeConverter *typeConverter,
-                                 Value thread) const {
+                                 Value linearWarpId) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
     auto tensorTy = cast<MemDescType>(tensor.getType());
@@ -1069,8 +1091,6 @@ private:
 
     unsigned iWarpSize = targetInfo.getWarpSize();
     assert(iWarpSize == 64);
-    Value warpSize = b.i32_val(iWarpSize);
-    Value linearWarpId = b.udiv(thread, warpSize);
 
     auto warpOrder = triton::gpu::getMatrixOrder(rank, /*rowMajor*/ true);
     Value spatialWarpId = getWarpIdInBlock(

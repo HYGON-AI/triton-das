@@ -24,6 +24,40 @@ regression_run = True
 
 def get_autotune_config():
     return [
+        # autotune winners for 5120x5120 fp16 matmul (waves_per_eu=1)
+        triton.Config(
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=1),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=1),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=1),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=3),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=4),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=1),
+        triton.Config(
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=2),
         triton.Config(
             {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
             num_warps=4, num_stages=2),
@@ -79,32 +113,32 @@ def get_autotune_config():
             num_warps=4, num_stages=2),
     ]
 
-    configs = []
+    # configs = []
 
-    block_sizes = [16, 32, 64, 128, 256]
-    num_warps_list = [4, 8]
-    num_stages_list = [1, 2]
+    # block_sizes = [16, 32, 64, 128, 256]
+    # num_warps_list = [4, 8]
+    # num_stages_list = [1, 2, 3, 4]
 
-    for block_m in block_sizes:
-        for block_n in block_sizes:
-            for block_k in block_sizes:
-                for num_warps in num_warps_list:
-                    for num_stages in num_stages_list:
-                        configs.append(
-                            triton.Config(
-                                {
-                                    'BLOCK_SIZE_M': block_m,
-                                    'BLOCK_SIZE_N': block_n,
-                                    'BLOCK_SIZE_K': block_k,
-                                    'GROUP_SIZE_M': 1,
-                                    'waves_per_eu': 1,
-                                },
-                                num_warps=num_warps,
-                                num_stages=num_stages
-                            )
-                        )
+    # for block_m in block_sizes:
+    #     for block_n in block_sizes:
+    #         for block_k in block_sizes:
+    #             for num_warps in num_warps_list:
+    #                 for num_stages in num_stages_list:
+    #                     configs.append(
+    #                         triton.Config(
+    #                             {
+    #                                 'BLOCK_SIZE_M': block_m,
+    #                                 'BLOCK_SIZE_N': block_n,
+    #                                 'BLOCK_SIZE_K': block_k,
+    #                                 'GROUP_SIZE_M': 1,
+    #                                 'waves_per_eu': 1,
+    #                             },
+    #                             num_warps=num_warps,
+    #                             num_stages=num_stages
+    #                         )
+    #                     )
 
-    return configs
+    # return configs
 
 
 @triton.jit
@@ -249,12 +283,13 @@ def run_matrix_load_store_test(a, a_layout, boundary_check=False, use_mask=False
 
 
 def prune_configs(configs, nargs, **kwargs):
-    # Get bitwidth from nargs (dtype_bits parameter) or default to 16
-    bitwidth = nargs.get('dtype_bits', 16)
+    # dtype_bits / layout flags are passed as kwargs, not positional nargs
+    args = {**nargs, **kwargs}
+    bitwidth = args.get('dtype_bits', 16)
 
     def _prune(config):
         _config = config.all_kwargs()
-        if _config["BLOCK_SIZE_M"] > nargs["M"]  or _config["BLOCK_SIZE_K"]  > nargs["K"] or _config["BLOCK_SIZE_N"]  > nargs["N"]:
+        if _config["BLOCK_SIZE_M"] > args["M"] or _config["BLOCK_SIZE_K"] > args["K"] or _config["BLOCK_SIZE_N"] > args["N"]:
             return True
 
         # Determine threshold based on bitwidth
@@ -264,7 +299,7 @@ def prune_configs(configs, nargs, **kwargs):
             threshold = 32
 
         # Check matrix A constraints
-        a_is_row_major = nargs.get("a_is_row_major", True)
+        a_is_row_major = args.get("a_is_row_major", True)
         if a_is_row_major:
             if _config["BLOCK_SIZE_K"] < threshold:
                 return True
@@ -273,7 +308,7 @@ def prune_configs(configs, nargs, **kwargs):
                 return True
 
         # Check matrix B constraints
-        b_is_row_major = nargs.get("b_is_row_major", True)
+        b_is_row_major = args.get("b_is_row_major", True)
         if b_is_row_major:
             if _config["BLOCK_SIZE_N"] < threshold:
                 return True
@@ -294,7 +329,7 @@ def prune_configs(configs, nargs, **kwargs):
 #     key=['M', 'N', 'K', 'stride_am', 'stride_ak', 'stride_bk', 'stride_bn', 'block_k_diviable', 'mix_load',
 #          'boundary_check', 'use_mask', 'dtype_bits', 'a_is_row_major', 'b_is_row_major'],
 #     prune_configs_by={"early_config_prune": prune_configs},
-#     perf_debug=True,
+#     perf_debug=False,
 # )
 @triton.heuristics({
     'block_k_diviable': lambda nargs: nargs['K'] % nargs['BLOCK_SIZE_K'] == 0,
@@ -661,6 +696,82 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
 #
 # 通过改变shape来实现列主序且contiguous的张量
 
+def compare_matmul_outputs(triton_output, expected_output, dtype, label="Triton and reference"):
+    """比较 Triton 输出与参考输出，含详细差异分析。"""
+    rtol = 0
+    triton_output_cpu = triton_output.cpu()
+    expected_output_cpu = expected_output.cpu()
+    if torch.allclose(triton_output_cpu, expected_output_cpu, atol=1e-2, rtol=rtol):
+        print(f"✅ {label} match")
+        return True
+
+    print(f"❌ {label} differ")
+    print(f"Max diff: {torch.max(torch.abs(triton_output_cpu - expected_output_cpu))}")
+
+    diff = torch.abs(triton_output_cpu - expected_output_cpu)
+    max_diff = torch.max(diff).item()
+    print(f"最大差异: {max_diff}")
+
+    triton_nan_count = torch.isnan(triton_output_cpu).sum().item()
+    expected_nan_count = torch.isnan(expected_output_cpu).sum().item()
+    print(f"Triton输出中nan值数量: {triton_nan_count}")
+    print(f"参考输出中nan值数量: {expected_nan_count}")
+
+    threshold = 1e-2 if dtype == torch.float16 else 1
+    triton_nan_indices = torch.where(torch.isnan(triton_output_cpu))
+    expected_nan_indices = torch.where(torch.isnan(expected_output_cpu))
+
+    finite_diff = torch.where(torch.isfinite(diff), diff, torch.zeros_like(diff))
+    diff_indices = torch.where(finite_diff > threshold)
+
+    print(f"\n=== 差异分析 ===")
+    print(f"Triton输出nan位置: {len(triton_nan_indices[0]) if len(triton_nan_indices[0]) > 0 else '无'}")
+    print(f"参考输出nan位置: {len(expected_nan_indices[0]) if len(expected_nan_indices[0]) > 0 else '无'}")
+    print(f"有限数值差异位置: {len(diff_indices[0]) if len(diff_indices[0]) > 0 else '无'}")
+
+    if len(triton_nan_indices[0]) > 0:
+        print("\nTriton输出中的nan位置:")
+        for i in range(min(100, len(triton_nan_indices[0]))):
+            row, col = triton_nan_indices[0][i].item(), triton_nan_indices[1][i].item()
+            expected_val = expected_output_cpu[row, col].item()
+            print(f"  [{row}, {col}]: Triton=nan, Ref={expected_val:.6f}")
+
+    if len(expected_nan_indices[0]) > 0:
+        print("\n参考输出中的nan位置:")
+        for i in range(min(100, len(expected_nan_indices[0]))):
+            row, col = expected_nan_indices[0][i].item(), expected_nan_indices[1][i].item()
+            triton_val = triton_output_cpu[row, col].item()
+            print(f"  [{row}, {col}]: Triton={triton_val:.6f}, Ref=nan")
+
+    if len(diff_indices[0]) > 0:
+        print("\n有限数值差异元素位置 (行, 列) 和值:")
+        print("索引\t行\t列\tTriton值\tRef值\t差异")
+        for i in range(min(100, len(diff_indices[0]))):
+            row, col = diff_indices[0][i].item(), diff_indices[1][i].item()
+            triton_val = triton_output_cpu[row, col].item()
+            expected_val = expected_output_cpu[row, col].item()
+            print(f"{i}\t{row}\t{col}\t{triton_val:.6f}\t{expected_val:.6f}\t{diff[row, col].item():.6f}")
+
+        if len(diff_indices[0]) > 100:
+            print(f"... 和另外 {len(diff_indices[0]) - 100} 个差异元素未显示")
+    else:
+        print("没有找到有限数值的差异元素")
+
+    if len(diff_indices[0]) > 0:
+        expected_vals = expected_output_cpu[diff_indices]
+        triton_vals = triton_output_cpu[diff_indices]
+        denom = torch.clamp(torch.abs(expected_vals), min=1e-6)
+        rel_errors = torch.abs(triton_vals - expected_vals) / denom
+        if torch.all(rel_errors <= 0.05):
+            print("✅ 所有差异位置的相对误差均不超过 5%，判定为通过")
+            return False if len(triton_nan_indices[0]) > 0 else True
+        else:
+            print("❌ 所有差异位置的相对误差均超过 5%，判定为失败")
+            return False
+
+    return True
+
+
 def run_layout_combination_test(a, b, a_layout, b_layout, mix_load, boundary_check, use_mask, case_name="", config=None):
     """测试单个布局组合（新方法）"""
     print(f"\n=== {case_name} ===")
@@ -701,89 +812,7 @@ def run_layout_combination_test(a, b, a_layout, b_layout, mix_load, boundary_che
         torch_output = torch.matmul(a_torch.cpu(), b_torch.cpu()).cuda()
 
     # 比较结果
-    rtol = 0
-    triton_output_cpu = triton_output.cpu()
-    torch_output_cpu = torch_output.cpu()
-    torch.set_printoptions(profile="full")
-    if torch.allclose(triton_output_cpu, torch_output_cpu, atol=1e-2, rtol=rtol):
-        print("✅ Triton and Torch match")
-        return True
-    else:
-        # print(f"triton_output_cpu={triton_output_cpu}")
-        # print(f"torch_output_cpu={torch_output_cpu}")
-        print("❌ Triton and Torch differ")
-        print(f"Max diff: {torch.max(torch.abs(triton_output_cpu - torch_output_cpu))}")
-
-        print("❌ Triton and Torch differ")
-        diff = torch.abs(triton_output_cpu - torch_output_cpu)
-        max_diff = torch.max(diff).item()
-        print(f"最大差异: {max_diff}")
-
-        # 检查是否有nan值
-        triton_nan_count = torch.isnan(triton_output_cpu).sum().item()
-        torch_nan_count = torch.isnan(torch_output_cpu).sum().item()
-        print(f"Triton输出中nan值数量: {triton_nan_count}")
-        print(f"Torch输出中nan值数量: {torch_nan_count}")
-
-        # 找出所有差异大于阈值的元素（包括nan值）
-        threshold = 1e-2 if a.dtype == torch.float16 else 1
-        # 检查nan值
-        triton_nan_indices = torch.where(torch.isnan(triton_output_cpu))
-        torch_nan_indices = torch.where(torch.isnan(torch_output_cpu))
-
-        # 检查有限数值的差异
-        finite_diff = torch.where(torch.isfinite(diff), diff, torch.zeros_like(diff))
-        diff_indices = torch.where(finite_diff > threshold)
-
-        print(f"\n=== 差异分析 ===")
-        print(f"Triton输出nan位置: {len(triton_nan_indices[0]) if len(triton_nan_indices[0]) > 0 else '无'}")
-        print(f"Torch输出nan位置: {len(torch_nan_indices[0]) if len(torch_nan_indices[0]) > 0 else '无'}")
-        print(f"有限数值差异位置: {len(diff_indices[0]) if len(diff_indices[0]) > 0 else '无'}")
-
-        # 打印nan位置
-        if len(triton_nan_indices[0]) > 0:
-            print("\nTriton输出中的nan位置:")
-            for i in range(min(100, len(triton_nan_indices[0]))):
-                row, col = triton_nan_indices[0][i].item(), triton_nan_indices[1][i].item()
-                torch_val = torch_output_cpu[row, col].item()
-                print(f"  [{row}, {col}]: Triton=nan, Torch={torch_val:.6f}")
-
-        if len(torch_nan_indices[0]) > 0:
-            print("\nTorch输出中的nan位置:")
-            for i in range(min(100, len(torch_nan_indices[0]))):
-                row, col = torch_nan_indices[0][i].item(), torch_nan_indices[1][i].item()
-                triton_val = triton_output_cpu[row, col].item()
-                print(f"  [{row}, {col}]: Triton={triton_val:.6f}, Torch=nan")
-
-        # 打印有限数值的差异
-        if len(diff_indices[0]) > 0:
-            print("\n有限数值差异元素位置 (行, 列) 和值:")
-            print("索引\t行\t列\tTriton值\tTorch值\t差异")
-            for i in range(min(100, len(diff_indices[0]))):  # 最多打印100个差异
-                row, col = diff_indices[0][i].item(), diff_indices[1][i].item()
-                triton_val = triton_output_cpu[row, col].item()
-                torch_val = torch_output_cpu[row, col].item()
-                print(f"{i}\t{row}\t{col}\t{triton_val:.6f}\t{torch_val:.6f}\t{diff[row, col].item():.6f}")
-
-            if len(diff_indices[0]) > 100:
-                print(f"... 和另外 {len(diff_indices[0]) - 100} 个差异元素未显示")
-        else:
-            print("没有找到有限数值的差异元素")
-
-        # 针对所有 diff_indices 做相对误差判定：若全部 <= 5% 则视为通过
-        if len(diff_indices[0]) > 0:
-            torch_vals = torch_output_cpu[diff_indices]
-            triton_vals = triton_output_cpu[diff_indices]
-            denom = torch.clamp(torch.abs(torch_vals), min=1e-6)
-            rel_errors = torch.abs(triton_vals - torch_vals) / denom
-            if torch.all(rel_errors <= 0.05):
-                print("✅ 所有差异位置的相对误差均不超过 5%，判定为通过")
-                return False if len(triton_nan_indices[0]) > 0 else True
-            else:
-                print("❌ 所有差异位置的相对误差均超过 5%，判定为失败")
-                return False
-
-        return True
+    return compare_matmul_outputs(triton_output, torch_output, a.dtype, label="Triton and Torch")
 
 # %%
 # Pytest测试程序 - 完整的配置列表测试
@@ -1194,45 +1223,46 @@ torch.manual_seed(0)
 
 matrix_mls_test_sizes = [
     # (M, N, K)
-    (128, 128, 128),
-    (256, 256, 256),
-    (512, 512, 512),
-    (1024, 1024, 1024),
-    (2048, 2048, 2048),
+    # (128, 128, 128),
+    # (256, 256, 256),
+    # (512, 512, 512),
+    # (1024, 1024, 1024),
+    # (2048, 2048, 2048),
     (4096, 4096, 4096),
-    (8192, 8192, 8192),
-    (16384, 16384, 16384),
-    # moe gemm1 case
-    (32, 256, 7168),
-    (64, 256, 7168),
-    (128, 256, 7168),
-    (256, 256, 7168),
-    (512, 256, 7168),
-    (1024, 256, 7168),
-    (2048, 256, 7168),
-    (4096, 256, 7168),
-    (8192, 256, 7168),
-    (16384, 256, 7168),
-    # moe gemm2 case
-    (32, 7168, 256),
-    (64, 7168, 256),
-    (128, 7168, 256),
-    (256, 7168, 256),
-    (512, 7168, 256),
-    (1024, 7168, 256),
-    (2048, 7168, 256),
-    (4096, 7168, 256),
-    (8192, 7168, 256),
-    (16384, 7168, 256),
-    # # fa case
-    (128, 128, 128),
-    (256, 256, 128),
-    (512, 512, 128),
-    (1024, 1024, 128),
-    (2048, 2048, 128),
-    (4096, 4096, 128),
-    (8192, 8192, 128),
-    (16384, 16384, 128),
+    # (5120, 5120, 5120),
+    # (8192, 8192, 8192),
+    # (16384, 16384, 16384),
+    # # moe gemm1 case
+    # (32, 256, 7168),
+    # (64, 256, 7168),
+    # (128, 256, 7168),
+    # (256, 256, 7168),
+    # (512, 256, 7168),
+    # (1024, 256, 7168),
+    # (2048, 256, 7168),
+    # (4096, 256, 7168),
+    # (8192, 256, 7168),
+    # (16384, 256, 7168),
+    # # moe gemm2 case
+    # (32, 7168, 256),
+    # (64, 7168, 256),
+    # (128, 7168, 256),
+    # (256, 7168, 256),
+    # (512, 7168, 256),
+    # (1024, 7168, 256),
+    # (2048, 7168, 256),
+    # (4096, 7168, 256),
+    # (8192, 7168, 256),
+    # (16384, 7168, 256),
+    # # # fa case
+    # (128, 128, 128),
+    # (256, 256, 128),
+    # (512, 512, 128),
+    # (1024, 1024, 128),
+    # (2048, 2048, 128),
+    # (4096, 4096, 128),
+    # (8192, 8192, 128),
+    # (16384, 16384, 128),
 ]
 
 # matrix_mls_test_sizes = [
@@ -1277,10 +1307,47 @@ matrix_mls_test_sizes = [
 #     (8192, 8192, 128-4),
 #     (16384, 16384, 128-4),
 # ]
-matrix_load_line_vals = ["mls", "buffer_load"]
-matrix_load_line_names = ["MLS(tflops)", "BUF_LOAD(tflops)"]
+def ref_program(A, B):
+    """
+    Compute the matrix product of A and the transpose of B.
+
+    A and B are expected to be 2-D tensors where A has shape (M, K) and B has shape (N, K).
+    The result is a tensor with shape (M, N) equal to A @ B.T, using the inputs' dtypes.
+    """
+    return A @ B.T
+
+
+def get_logical_ab_for_ref(a, b, a_layout, b_layout):
+    A = a if a_layout == 'row' else a.t()
+    B = b if b_layout == 'col' else b.t()
+    return A, B
+
+
+def run_ref_program(a, b, a_layout, b_layout, dtype):
+    A, B = get_logical_ab_for_ref(a, b, a_layout, b_layout)
+    if dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
+        A = A.to(torch.float16)
+        B = B.to(torch.float16)
+        return ref_program(A, B)
+    return ref_program(A, B)
+
+
+def verify_triton_vs_ref(triton_output, a, b, a_layout, b_layout, dtype, label=""):
+    ref_output = run_ref_program(a, b, a_layout, b_layout, dtype)
+    if dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
+        ref_output = ref_output.to(torch.float16)
+    return compare_matmul_outputs(
+        triton_output, ref_output, dtype,
+        label=f"Triton vs ref {label}".rstrip(),
+    )
+
+
+matrix_load_line_vals = ["ref"] + (["mls", "buffer_load"] if is_hcu_support_mls() else ["buffer_load"])
+matrix_load_line_names = ["REF(tflops)"] + (["MLS(tflops)", "BUF_LOAD(tflops)"] if is_hcu_support_mls() else ["BUF_LOAD(tflops)"])
+matrix_load_line_styles = [("blue", "-")] + ([("green", "-"), ("orange", "-")] if is_hcu_support_mls() else [("orange", "-")])
 benchmark_matmul_mls_configs = []
-for fp8_inputs in [False, True]:
+fp8_inputs_types = [False, True] if is_hcu_support_mls() else [False]
+for fp8_inputs in fp8_inputs_types:
     for a_layout in ['row']:
         for b_layout in ['col', 'row']:
             benchmark_matmul_mls_configs.append(
@@ -1290,7 +1357,7 @@ for fp8_inputs in [False, True]:
                     line_arg="matrix_load_mode",
                     line_vals=matrix_load_line_vals,
                     line_names=matrix_load_line_names,
-                    styles=[("green", "-"), ("orange", "-")],
+                    styles=matrix_load_line_styles,
                     ylabel="TFLOPS",
                     plot_name="matmul-load-performance-" + a_layout + "-" + b_layout +  "-" + ("fp8" if fp8_inputs else "fp16"),
                     args={"fp8_inputs": fp8_inputs, "a_layout": a_layout, "b_layout": b_layout},
@@ -1304,6 +1371,8 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
         matrix_load_mode_value = 0b00
     elif matrix_load_mode == "buffer_load":
         matrix_load_mode_value = 0b11
+    elif matrix_load_mode == "ref":
+        matrix_load_mode_value = None
     else:
         raise ValueError(f"未知的 matrix_load_mode: {matrix_load_mode}")
 
@@ -1321,14 +1390,45 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
             activation="",
         )
 
-    ms, min_ms, max_ms = triton.testing.do_bench(_matmul_mls, quantiles=quantiles)
+    if matrix_load_mode == "ref":
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: run_ref_program(a, b, a_layout, b_layout, dtype),
+            quantiles=quantiles,
+        )
+    else:
+        triton_output = _matmul_mls()
+        verify_triton_vs_ref(
+            triton_output, a, b, a_layout, b_layout, dtype,
+            label=f"[{matrix_load_mode}] M={M} N={N} K={K}",
+        )
+        ms, min_ms, max_ms = triton.testing.do_bench(_matmul_mls, quantiles=quantiles)
     perf = lambda t: 2 * M * N * K * 1e-12 / (t * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
+
+# Performance:
+# matmul-load-performance-row-col-fp16:
+#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0  4096.0  4096.0  4096.0            271.232538            179.931715                 193.772765
+# 1  5120.0  5120.0  5120.0            265.693622            166.854566                 187.980140
+# matmul-load-performance-row-row-fp16:
+#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0  4096.0  4096.0  4096.0            295.186747            173.639268                 112.316187
+# 1  5120.0  5120.0  5120.0            314.297782            182.828173                 116.824893
+# ---------------------------------------------------------------------------
+# After:
+# matmul-load-performance-row-col-fp16:
+#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0  4096.0  4096.0  4096.0            271.232538            216.808036                 194.210876
+# 1  5120.0  5120.0  5120.0            265.693622            201.673620                 187.580814
+# matmul-load-performance-row-row-fp16:
+#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0  4096.0  4096.0  4096.0            295.186747            211.262526                 112.316089
+# 1  5120.0  5120.0  5120.0            314.297782            185.712064                 116.597590
 
 # if __name__ == "__main__":
 #     benchmark_matmul_mls.run(show_plots=True, print_data=True)
 
 
-if __name__ == "__main__":
-    pytest.main(["-v", "-s", "mls-unit-test.py::test_mls_comprehensive[1-16-config_list0-layout_combination1-dtype0-1-True-none-True-1-False-False]"])
+# if __name__ == "__main__":
+#     pytest.main(["-v", "-s", "mls-unit-test.py::test_mls_comprehensive[1-16-config_list0-layout_combination1-dtype0-1-True-none-True-1-False-False]"])
