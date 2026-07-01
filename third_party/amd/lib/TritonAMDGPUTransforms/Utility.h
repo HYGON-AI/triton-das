@@ -6,7 +6,6 @@
 #include "mlir/IR/Value.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
-#include "UtilityHCU.h"
 
 using namespace mlir;
 

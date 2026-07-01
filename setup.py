@@ -621,7 +621,7 @@ def download_and_copy_dependencies():
     )
 
 
-backends = [*BackendInstaller.copy(["nvidia", "amd"]), *BackendInstaller.copy_externals()]
+backends = [*BackendInstaller.copy(["nvidia", "amd", "hcu"]), *BackendInstaller.copy_externals()]
 
 
 def get_package_dirs():
@@ -762,8 +762,8 @@ def get_entry_points():
         entry_points["console_scripts"] = [
             "proton-viewer = triton.profiler.viewer:main",
             "proton = triton.profiler.proton:main",
-            "opt_config_cli = triton.backends.amd.opt_config_cli:main",
-            "hcutune_cli = triton.backends.amd.hcutune_cli:main",
+            "opt_config_cli = triton.backends.hcu.opt_config_cli:main",
+            "hcutune_cli = triton.backends.hcu.hcutune_cli:main",
         ]
     entry_points["triton.backends"] = [f"{b.name} = triton.backends.{b.name}" for b in backends]
     return entry_points

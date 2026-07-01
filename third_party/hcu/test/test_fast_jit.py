@@ -7,7 +7,7 @@ import tempfile
 os.environ["TRITON_FAST_JIT"] = "1"
 import triton
 import triton.language as tl
-from triton.backends.amd.jit import (
+from triton.backends.hcu.jit import (
     FastJITFunction, get_saved_kernel_cache_hash, get_saved_kernel_cache_dir
 )
 from triton.runtime.jit import JITFunction

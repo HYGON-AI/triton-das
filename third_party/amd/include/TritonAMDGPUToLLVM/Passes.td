@@ -88,34 +88,5 @@ def TritonAMDGPULowerInstructionSchedHints : Pass<"triton-amdgpu-lower-insert-in
     ];
 }
 
-def AMDGPUConvertWarpSpecializeToLLVM : Pass<"triton-amdgpu-convert-warp-specialize-to-llvm", "mlir::ModuleOp"> {
-  let summary = "lower `ttg.warp_specialize` to LLVM";
-  let constructor = "mlir::triton::createAMDGPUConvertWarpSpecializeToLLVM(\"\", 4, 8, true, 32, 32, 32)";
-  let description = [{
-    The `convert-warp-specialize-to-llvm` pass performs codegen for warp
-    specialization. It is a function-level transformation that rewrites
-    warp-specialized kernels by using shared memory and barriers to communicate
-    states between the default warpgroup and the worker warps.
-  }];
-  let dependentDialects = ["mlir::LLVM::LLVMDialect",
-                          "mlir::ROCDL::ROCDLDialect",
-                          "mlir::triton::amdgpu::TritonAMDGPUDialect"];
-  let options = [
-        Option<"arch", "arch", "std::string", /*default*/"\"\"",
-               "gfx target device architecture, e.g., gfx942">,
-        Option<"waspNumLoadWarps", "wasp_num_load_warps", "int", /*default*/"4",
-               "total number of warps to do load">,
-        Option<"waspNumMmaWarps", "wasp_num_mma_warps", "int", /*default*/"8",
-               "total number of warps to do mma">,
-        Option<"wdraEnabled", "wdra-enabled", "bool", /*default*/"true",
-               "flag to indicate wdra is enabled">,
-        Option<"wdraNumLoadRegs", "wdra_num_load_regs", "int", /*default*/"0",
-               "max number of registers allocated to per wave in load_partition">,
-        Option<"wdraNumMmaRegsMain", "wdra_num_mma_regs_main", "int", /*default*/"0",
-               "max number of registers allocated to per wave in main mma partition">,
-        Option<"wdraNumMmaRegsTail", "wdra_num_mma_regs_tail", "int", /*default*/"",
-               "max number of registers allocated to per wave in tail mma partition; omit to leave unset (e.g. inherit main mma or backend default)">,
-    ];
-}
 
 #endif

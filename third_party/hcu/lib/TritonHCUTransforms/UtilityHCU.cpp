@@ -1,4 +1,4 @@
-#include "UtilityHCU.h"
+#include "TritonHCU/Utility.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -6,6 +6,8 @@
 #include "llvm/ADT/SetVector.h"
 
 #include <deque>
+
+namespace mlir::triton::HCU {
 
 namespace ttg = mlir::triton::gpu;
 
@@ -73,3 +75,4 @@ getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp) {
 
   return failure();
 }
+} // namespace mlir::triton::HCU

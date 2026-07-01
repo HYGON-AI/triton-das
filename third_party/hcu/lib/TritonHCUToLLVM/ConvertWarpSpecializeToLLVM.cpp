@@ -1,4 +1,4 @@
-#include "TargetInfo.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include <climits>
 #include <cstdlib>
 #include "mlir/Analysis/TopologicalSortUtils.h"
@@ -12,12 +12,12 @@
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "third_party/amd/include/TritonAMDGPUToLLVM/Passes.h"
+#include "TritonHCU/Passes.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 
 namespace mlir::triton {
-#define GEN_PASS_DEF_AMDGPUCONVERTWARPSPECIALIZETOLLVM
-#include "TritonAMDGPUToLLVM/Passes.h.inc"
+#define GEN_PASS_DEF_HCUCONVERTWARPSPECIALIZETOLLVM
+#include "TritonHCU/Passes.h.inc"
 } // namespace mlir::triton
 
 using namespace mlir;
@@ -614,10 +614,10 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
 //===----------------------------------------------------------------------===//
 
 namespace {
-struct AMDGPUConvertWarpSpecializeToLLVM
-    : public mlir::triton::impl::AMDGPUConvertWarpSpecializeToLLVMBase<
-          AMDGPUConvertWarpSpecializeToLLVM> {
-  explicit AMDGPUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, 
+struct HCUConvertWarpSpecializeToLLVM
+    : public mlir::triton::impl::HCUConvertWarpSpecializeToLLVMBase<
+          HCUConvertWarpSpecializeToLLVM> {
+  explicit HCUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, 
       int waspNumMmaWarps, bool wdraEnabled, int wdraNumLoadRegs, 
       int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {
 
@@ -725,9 +725,9 @@ struct AMDGPUConvertWarpSpecializeToLLVM
 namespace mlir::triton {
 
   std::unique_ptr<OperationPass<ModuleOp>>
-  createAMDGPUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, int waspNumMmaWarps, 
+  createHCUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, int waspNumMmaWarps, 
      bool wdraEnabled, int wdraNumLoadRegs, int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {
-    return std::make_unique<AMDGPUConvertWarpSpecializeToLLVM>(targetArch, waspNumLoadWarps, waspNumMmaWarps,
+    return std::make_unique<HCUConvertWarpSpecializeToLLVM>(targetArch, waspNumLoadWarps, waspNumMmaWarps,
       wdraEnabled, wdraNumLoadRegs, wdraNumMmaRegsMain, wdraNumMmaRegsTail);
   }
   

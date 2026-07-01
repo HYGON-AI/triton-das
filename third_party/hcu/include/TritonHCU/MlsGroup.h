@@ -1,19 +1,20 @@
-#ifndef TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTRANSFORMS_MLSGROUP_H_
-#define TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTRANSFORMS_MLSGROUP_H_
+#ifndef TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_MLSGROUP_H_
+#define TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_MLSGROUP_H_
 
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
+#include "TritonHCU/TargetUtils.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 
-using mlir::triton::AMD::HCUISAFeature;
 
-namespace mlir {
+
+namespace mlir::triton::HCU {
 
 //===----------------------------------------------------------------------===//
-// AMDGPU MLS instruction selection utilities
+// HCU MLS instruction selection utilities
 //===----------------------------------------------------------------------===//
 
 // flags: lsb: elem3 | row3 << 8 | col3 << 16 | alt2 << 24  msb
@@ -266,6 +267,6 @@ public:
   const DsReadMatrixInsnAttr &getDsReadMatrixInsnAttr() const { return attr.dsInsn; }
 };
 
-} // namespace mlir
+} // namespace mlir::triton::HCU
 
-#endif // TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTRANSFORMS_MLSGROUP_H_
+#endif // TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_MLSGROUP_H_

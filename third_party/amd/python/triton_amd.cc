@@ -67,9 +67,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                      const std::string &, int32_t);
   ADD_PASS_WRAPPER_0("add_allocate_shared_memory",
                      mlir::triton::createAllocateAMDGPUSharedMemory);
-  ADD_PASS_OPTION_WRAPPER_4("add_accelerate_matmul",
+  ADD_PASS_OPTION_WRAPPER_3("add_accelerate_matmul",
                             mlir::createTritonAMDGPUAccelerateMatmul,
-                            const std::string, int, int, int);
+                            const std::string, int, int);
   ADD_PASS_WRAPPER_0("add_optimize_epilogue",
                      mlir::createTritonAMDGPUOptimizeEpilogue);
   ADD_PASS_OPTION_WRAPPER_1(
@@ -84,9 +84,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
     pm.addNestedPass<mlir::triton::FuncOp>(
         mlir::createTritonAMDGPUCanonicalizePointers());
   });
-  ADD_PASS_OPTION_WRAPPER_5("add_convert_to_buffer_ops",
+  ADD_PASS_OPTION_WRAPPER_3("add_convert_to_buffer_ops",
                             mlir::createTritonAMDGPUConvertToBufferOps,
-                            const std::string &, bool, bool, bool, bool);
+                            const std::string &, bool, bool);
   ADD_PASS_WRAPPER_0("add_reorder_instructions",
                      mlir::createTritonAMDGPUReorderInstructions);
   ADD_PASS_WRAPPER_0("add_fold_true_cmpi", mlir::createTritonAMDFoldTrueCmpI);
@@ -105,24 +105,6 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   m.def("add_in_thread_transpose", [](mlir::PassManager &pm) {
     pm.addNestedPass<mlir::triton::FuncOp>(
         mlir::createTritonAMDGPUInThreadTranspose());
-  });
-  ADD_PASS_OPTION_WRAPPER_3("add_mls_stream_pipeline",
-                            mlir::createTritonAMDGPUMlsStreamPipeline, int, int, int);
-  ADD_PASS_WRAPPER_0("add_mls_encoding_insertion",
-                     mlir::createTritonAMDGPUMlsEncodingInsertion);
-  ADD_PASS_WRAPPER_0("add_mls_lowering_pass",
-                     mlir::createTritonAMDGPUMlsLowering);
-  m.def("add_warp_specialize_to_llvm", [](mlir::PassManager &pm, const std::string &arch,
-      int waspNumLoadWarps, int waspNumMmaWarps, bool wdraEnabled, int wdraNumLoadRegs, 
-      int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {
-    pm.addPass(createAMDGPUConvertWarpSpecializeToLLVM(
-        arch,
-        waspNumLoadWarps,
-        waspNumMmaWarps,
-        wdraEnabled,
-        wdraNumLoadRegs,
-        wdraNumMmaRegsMain,
-        wdraNumMmaRegsTail));
   });
 }
 

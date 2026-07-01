@@ -20,17 +20,17 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include "../PatternTritonGPUOpToLLVM.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
-#include "Utility.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
-#include "TritonAMDGPUTransforms/MlsGroup.h"
+#include "TritonHCU/MlsGroup.h"
 
 using namespace mlir;
-using namespace mlir::triton;
+using namespace mlir::triton::HCU;
 
 namespace {
 
@@ -946,7 +946,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
 } // namespace
 
-namespace mlir::triton::AMD {
+namespace mlir::triton::HCU {
 LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                           const LLVMTypeConverter *typeConverter,
                           ConversionPatternRewriter &rewriter) {
@@ -1031,4 +1031,4 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
 
   return helper.convertScaledDot(op, adaptor);
 }
-} // namespace mlir::triton::AMD
+} // namespace mlir::triton::HCU

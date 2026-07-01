@@ -1,10 +1,10 @@
-#include "TargetInfo.h"
-#include "BufferOpsEmitter.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "PatternTritonGPUOpToLLVM.h"
-#include "TargetInfo.h"
-#include "TritonAMDGPUTransforms/MlsGroup.h"
-#include "Utility.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/PatternTritonGPUOpToLLVM.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
+#include "TritonHCU/MlsGroup.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -22,6 +22,7 @@
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
+using namespace mlir::triton::HCU;
 
 using ::mlir::LLVM::delinearize;
 using ::mlir::LLVM::getSharedMemoryObjectFromStruct;

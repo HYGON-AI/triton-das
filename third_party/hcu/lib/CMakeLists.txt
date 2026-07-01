@@ -1,0 +1,2 @@
+add_subdirectory(TritonHCUToLLVM)
+add_subdirectory(TritonHCUTransforms)

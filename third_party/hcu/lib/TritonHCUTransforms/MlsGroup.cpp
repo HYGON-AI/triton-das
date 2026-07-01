@@ -1,7 +1,7 @@
-#include "TritonAMDGPUTransforms/MlsGroup.h"
+#include "TritonHCU/MlsGroup.h"
 #include "llvm/ADT/SmallVector.h"
 
-namespace mlir {
+namespace mlir::triton::HCU {
 
 struct MlsInsnGroupSelectKey {
   unsigned nonKTile;
@@ -461,4 +461,4 @@ FailureOr<MlsInsn> MlsInsn::selectOrGetMlsInsn(unsigned nonKTile,
 }
 
 
-} // namespace mlir
+} // namespace mlir::triton::HCU

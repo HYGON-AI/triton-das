@@ -14,8 +14,8 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "TritonAMDGPUTransforms/MlsGroup.h"
-#include "Utility.h"
+#include "TritonHCU/MlsGroup.h"
+#include "TritonHCU/Utility.h"
 
 using namespace mlir;
 namespace tt = mlir::triton;
@@ -180,14 +180,14 @@ class MlsConvertOpCanonicalization : public OpRewritePattern<ttg::ConvertLayoutO
 
 namespace mlir {
 
-#define GEN_PASS_DEF_TRITONAMDGPUMLSLOWERING
-#include "TritonAMDGPUTransforms/Passes.h.inc"
+#define GEN_PASS_DEF_TRITONHCUMLSLOWERING
+#include "TritonHCU/Passes.h.inc"
 
-class TritonAMDGPUMlsLoweringPass
-    : public impl::TritonAMDGPUMlsLoweringBase<TritonAMDGPUMlsLoweringPass> {
+class TritonHCUMlsLoweringPass
+    : public impl::TritonHCUMlsLoweringBase<TritonHCUMlsLoweringPass> {
 public:
-  using impl::TritonAMDGPUMlsLoweringBase<
-      TritonAMDGPUMlsLoweringPass>::TritonAMDGPUMlsLoweringBase;
+  using impl::TritonHCUMlsLoweringBase<
+      TritonHCUMlsLoweringPass>::TritonHCUMlsLoweringBase;
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();

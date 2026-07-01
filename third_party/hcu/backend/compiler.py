@@ -1,5 +1,5 @@
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
-from triton._C.libtriton import ir, passes, llvm, amd, distributed
+from triton._C.libtriton import ir, passes, llvm, amd, hcu, distributed
 from triton import knobs
 from triton.runtime.errors import HSACOError
 from dataclasses import dataclass
@@ -142,12 +142,15 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def supports_target(target: GPUTarget):
-        return target.backend == 'hip'
+        # Support both 'hcu' (native) and 'hip' (legacy) identifiers.
+        # Disambiguation from AMD HIPBackend is handled by make_backend().
+        return target.backend in ('hcu', 'hip')
 
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
         assert isinstance(target.arch, str)
         self.binary_ext = "hsaco"
+        self.is_hcu = target.arch in ('gfx926', 'gfx928', 'gfx936', 'gfx938', 'gfx92a', 'gfx946')
 
     def get_target_name(self, options) -> str:
         return f"hip:{options.arch}"
@@ -485,7 +488,7 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch,
+        hcu.passes.ttgpuir.add_accelerate_matmul(pm, options.arch,
                                                  options.matrix_instr_nonkdim,
                                                  options.kpack,
                                                  options.mmac_layout_force)
@@ -494,7 +497,7 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.add_optimize_epilogue(pm)
         amd.passes.ttgpuir.add_optimize_dot_operands(pm, options.arch)
 
-        amd.passes.ttgpuir.add_mls_encoding_insertion(pm)
+        hcu.passes.ttgpuir.add_mls_encoding_insertion(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 
         amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
@@ -513,7 +516,7 @@ class HIPBackend(BaseBackend):
             global_prefetch = 1
 
         async_copy_single_buffer = options.async_copy_use_single_buffer and (options.num_stages == 2 and not global_prefetch)
-        amd.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, async_copy_single_buffer)
+        hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, async_copy_single_buffer)
 
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
@@ -533,7 +536,7 @@ class HIPBackend(BaseBackend):
                 amd.passes.ttgpuir.insert_instruction_sched_hints(pm, hint)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 
-        amd.passes.ttgpuir.add_mls_lowering_pass(pm)
+        hcu.passes.ttgpuir.add_mls_lowering_pass(pm)
 
         passes.ttgpuir.add_reduce_data_duplication(pm)
         if is_in_thread_transpose_enabled(options.arch):
@@ -545,7 +548,7 @@ class HIPBackend(BaseBackend):
 
         if options.wasp_enabled:
             passes.ttgpuir.add_warp_specialize_hcu(pm, 2, options.wdra_enabled, options.wasp_num_load_warps, options.wasp_num_mma_warps)
-            amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack, options.mmac_layout_force)
+            hcu.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack, options.mmac_layout_force)
             passes.ttgpuir.add_remove_layout_conversions(pm)
             if options.optimize_epilogue:
                 amd.passes.ttgpuir.add_optimize_epilogue(pm)
@@ -555,7 +558,7 @@ class HIPBackend(BaseBackend):
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
             passes.common.add_canonicalizer(pm)
-            amd.passes.ttgpuir.add_convert_to_buffer_ops(
+            hcu.passes.ttgpuir.add_convert_to_buffer_ops(
                 pm,
                 options.arch,
                 knobs.amd.use_buffer_atomics,
@@ -621,7 +624,7 @@ class HIPBackend(BaseBackend):
         ## 3. __HIP_FTZ is default to 1 and not exposed as a kernel argument.
         ##    For now it is used as a controller for developers only.
         __HIP_FTZ = True
-        amd.passes.ttgpuir.add_to_llvmir(pm, options.arch, __HIP_FTZ)
+        hcu.passes.ttgpuir.add_to_llvmir(pm, options.arch, __HIP_FTZ)
         # TritonDistributed Extension: distributed -> llvm
         distributed.passes.ttgpuir.amd.add_distributed_to_llvm(pm, options.arch, __HIP_FTZ)
         passes.common.add_canonicalizer(pm)
@@ -634,7 +637,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
 
         if options.wasp_enabled:
-            amd.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch, options.wasp_num_load_warps,
+            hcu.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch, options.wasp_num_load_warps,
                 options.wasp_num_mma_warps, options.wdra_enabled, options.wdra_num_load_regs or 0,
                 options.wdra_num_mma_regs_main or 0, options.wdra_num_mma_regs_tail or 0)
             passes.convert.add_arith_to_llvmir(pm)

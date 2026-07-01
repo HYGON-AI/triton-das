@@ -78,7 +78,7 @@ def _get_rocm_version():
         import subprocess
         import re
 
-        rocm_ldd_path = triton.backends.backends["amd"].compiler.path_to_rocm_lld()
+        rocm_ldd_path = triton.backends.backends["hcu"].compiler.path_to_rocm_lld()
         rocm_dir = os.path.dirname(rocm_ldd_path)
         amdgpu_arch_path = os.path.abspath(os.path.join(rocm_dir, "amdgpu-arch"))
 

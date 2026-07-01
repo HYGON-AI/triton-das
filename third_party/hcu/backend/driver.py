@@ -10,8 +10,11 @@ from triton.backends.driver import GPUDriver
 from triton.runtime import _allocation
 from triton.runtime.build import compile_module_from_src
 
-dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")]
+dirname = os.path.dirname(__file__)
+include_dirs = [
+    os.path.join(dirname, "include"),
+    os.path.join(dirname, "../amd/include"),
+]
 PyTDMDescriptor = None
 
 
@@ -64,12 +67,22 @@ def _find_already_mmapped_dylib_on_linux(lib_name):
 
 
 @functools.lru_cache()
+def _is_dtk():
+    """Check if running under DTK (vs vanilla ROCm)."""
+    rocm_path = os.getenv("ROCM_PATH")
+    if rocm_path is not None:
+        return "dtk" in rocm_path.lower()
+    return Path("/opt/dtk").is_dir()
+
+
+@functools.lru_cache()
 def _get_path_to_hip_runtime_dylib():
-    lib_name = "libamdhip64.so"
+    # DTK uses libgalaxyhip.so as the primary HIP runtime library.
+    lib_name = "libgalaxyhip.so" if _is_dtk() else "libamdhip64.so"
 
     # If we are told explicitly what HIP runtime dynamic library to use, obey that.
     if env_libhip_path := knobs.amd.libhip_path:
-        if env_libhip_path.endswith(lib_name) and os.path.exists(env_libhip_path):
+        if os.path.exists(env_libhip_path):
             return env_libhip_path
         raise RuntimeError(f"TRITON_LIBHIP_PATH '{env_libhip_path}' does not point to a valid {lib_name}")
 
@@ -151,7 +164,10 @@ def _get_path_to_hip_runtime_dylib():
         paths.append(loc)
 
     # As a last resort, guess if we have it in some common installation path.
-    common_install_path = os.path.join('/opt/rocm/lib/', lib_name)
+    if _is_dtk():
+        common_install_path = os.path.join('/opt/dtk/lib/', lib_name)
+    else:
+        common_install_path = os.path.join('/opt/rocm/lib/', lib_name)
     if os.path.exists(common_install_path):
         return common_install_path
     paths.append(common_install_path)
@@ -159,11 +175,11 @@ def _get_path_to_hip_runtime_dylib():
     raise RuntimeError(f"cannot locate {lib_name} after attempted paths {paths}")
 
 
-class HIPUtils(object):
+class HCUUtils(object):
 
     def __new__(cls):
         if not hasattr(cls, "instance"):
-            cls.instance = super(HIPUtils, cls).__new__(cls)
+            cls.instance = super(HCUUtils, cls).__new__(cls)
         return cls.instance
 
     def __init__(self):
@@ -173,6 +189,9 @@ class HIPUtils(object):
         # This way we don't need to escape-quote C code curly brackets and we can replace
         # exactly once.
         src = src.replace('/*py_libhip_search_path*/', libhip_path, 1)
+        # DTK uses hipGetDeviceProperties_v2, ROCm uses hipGetDevicePropertiesR0600.
+        hip_dev_props_sym = "hipGetDeviceProperties_v2" if _is_dtk() else "hipGetDevicePropertiesR0600"
+        src = src.replace('/*py_hip_get_device_properties_sym*/NULL', f'"{hip_dev_props_sym}"', 1)
         mod = compile_module_from_src(src=src, name="hip_utils", include_dirs=include_dirs)
         self.load_binary = mod.load_binary
         self.get_device_properties = mod.get_device_properties
@@ -346,6 +365,9 @@ def make_launcher(constants, signature, warp_size, tensordesc_meta):
     params = [f"&arg{i}" for i, ty in signature.items() if ty != "constexpr"]
     params.append("&global_scratch")
     params.append("&profile_scratch")
+    # DTK: primary lib is libgalaxyhip.so; ROCm: primary lib is libamdhip64.so
+    _noload_primary = "libgalaxyhip.so" if _is_dtk() else "libamdhip64.so"
+    _noload_secondary = "libamdhip64.so" if _is_dtk() else "libgalaxyhip.so"
     src = f"""
 #define __HIP_PLATFORM_AMD__
 #include <hip/hip_runtime.h>
@@ -417,8 +439,11 @@ struct HIPSymbolTable {{
 static struct HIPSymbolTable hipSymbolTable;
 
 bool initSymbolTable() {{
-  // Use the HIP runtime library loaded into the existing process if it exits.
-  void *lib = dlopen("libamdhip64.so", RTLD_NOLOAD);
+  // Use the HIP runtime library loaded into the existing process if it exists.
+  void *lib = dlopen("{_noload_primary}", RTLD_NOLOAD);
+  if (!lib) {{
+    lib = dlopen("{_noload_secondary}", RTLD_NOLOAD);
+  }}
 
   // Otherwise, go through the list of search paths to dlopen the first HIP
   // driver library.
@@ -432,7 +457,7 @@ bool initSymbolTable() {{
     }}
   }}
   if (!lib) {{
-    PyErr_SetString(PyExc_RuntimeError, "cannot open libamdhip64.so");
+    PyErr_SetString(PyExc_RuntimeError, "cannot open HIP runtime library");
     return false;
   }}
 
@@ -446,7 +471,7 @@ bool initSymbolTable() {{
   error = dlerror();
   if (error) {{
     PyErr_SetString(PyExc_RuntimeError,
-                    "cannot query 'hipGetProcAddress' from libamdhip64.so");
+                    "cannot query 'hipGetProcAddress' from HIP runtime library");
     dlclose(lib);
     return false;
   }}
@@ -463,7 +488,7 @@ bool initSymbolTable() {{
   if (required && status != hipSuccess) {{                                     \
     PyErr_SetString(PyExc_RuntimeError,                                        \
                     "cannot get address for '" #hipSymbolName                  \
-                    "' from libamdhip64.so");                                  \
+                    "' from HIP runtime library");                             \
     dlclose(lib);                                                              \
     return false;                                                              \
   }}
@@ -697,7 +722,7 @@ PyMODINIT_FUNC PyInit___triton_launcher(void) {{
   if(data_ptr_str == NULL) {{
     return NULL;
   }}
-  PyObject* driver_mod = PyImport_ImportModule("triton.backends.amd.driver");
+  PyObject* driver_mod = PyImport_ImportModule("triton.backends.hcu.driver");
   if (driver_mod == NULL) {{
     return NULL;
   }}
@@ -746,7 +771,7 @@ def make_tensordesc_arg(arg, kernel_metadata, tensordesc_metadata):
     num_warps = kernel_metadata[0]
 
     driver = triton.runtime.driver.active
-    assert isinstance(driver, HIPDriver)
+    assert isinstance(driver, HCUDriver)
 
     desc = driver.utils.create_tdm_descriptor(elem_bits, block_size, num_warps, pad_interval, pad_amount, shape,
                                               strides, base)
@@ -797,7 +822,7 @@ def wrap_handle_tensordesc(launcher, signature, tensordesc_metadata):
     return inner
 
 
-class HIPLauncher(object):
+class HCULauncher(object):
 
     def __init__(self, src, metadata):
         constants = src.constants if hasattr(src, "constants") else dict()
@@ -828,12 +853,12 @@ class HIPLauncher(object):
         self.launch(self.launch_cooperative_grid, gridX, gridY, gridZ, stream, function, profile_scratch, *args)
 
 
-class HIPDriver(GPUDriver):
+class HCUDriver(GPUDriver):
 
     def __init__(self):
         super().__init__()
-        self.utils = HIPUtils()
-        self.launcher_cls = HIPLauncher
+        self.utils = HCUUtils()
+        self.launcher_cls = HCULauncher
 
     def get_device_interface(self):
         import torch
@@ -843,13 +868,9 @@ class HIPDriver(GPUDriver):
     def is_active():
         try:
             import torch
-            if not (torch.cuda.is_available() and (torch.version.hip is not None)):
-                return False
             arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-            if arch in {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}:
-                return False
-            return True
-        except ImportError:
+            return arch in {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
+        except:
             return False
 
     def map_python_to_cpp_type(self, ty: str) -> str:

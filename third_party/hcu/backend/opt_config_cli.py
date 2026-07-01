@@ -25,7 +25,7 @@ triton_major_version = int(triton_version.split(".")[0])
 triton_minor_version = int(triton_version.split(".")[1])
 triton_version_float = triton_major_version + float(triton_minor_version / 10)
 
-from triton.backends.amd.autotuner import ConfigLoader, GraphConfigLoader, get_string_hash
+from triton.backends.hcu.autotuner import ConfigLoader, GraphConfigLoader, get_string_hash
 
 def get_triton_cache_dir():
     if triton_version_float >= 3.3:

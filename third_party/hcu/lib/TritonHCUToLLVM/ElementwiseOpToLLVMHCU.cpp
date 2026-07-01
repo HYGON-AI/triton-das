@@ -1,6 +1,6 @@
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "TargetInfo.h"
-#include "Utility.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -2618,8 +2618,8 @@ private:
 };
 } // namespace
 
-namespace mlir::triton::AMD {
-void adjustModeRegister(ModuleOp mod, const TargetInfo &targetInfo) {
+namespace mlir::triton::HCU {
+void adjustModeRegister(ModuleOp mod, const AMD::TargetInfo &targetInfo) {
   MLIRContext *ctx = mod->getContext();
   Location loc = mod->getLoc();
   mlir::OpBuilder builder(ctx);
@@ -2663,7 +2663,7 @@ void adjustModeRegister(ModuleOp mod, const TargetInfo &targetInfo) {
 void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns, bool ftz,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, ModuleAllocation &allocation,
-    const TargetInfo &targetInfo, PatternBenefit benefit) {
+    const AMD::TargetInfo &targetInfo, PatternBenefit benefit) {
 
   // fmin (return NaN if either op is NaN)
   patterns.add<mlir::triton::gpu::ElementwiseOpConversion<
@@ -2729,4 +2729,4 @@ void populateElementwiseOpToLLVMPatterns(
   triton::populateClampFOpToLLVMPattern(typeConverter, patterns,
                                         axisInfoAnalysis, targetInfo, benefit);
 }
-} // namespace mlir::triton::AMD
+} // namespace mlir::triton::HCU

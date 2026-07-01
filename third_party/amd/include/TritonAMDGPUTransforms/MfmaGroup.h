@@ -16,19 +16,29 @@ inline bool isF8F6F4(mlir::Type type) {
 }
 
 struct MfmaIntrinsic {
-  // Chooses a suitable mfma instrinsic for the given input case.s
+  // Chooses a suitable mfma instrinsic for the given input case.s.
+  // The overload without HCUISAFeature is the upstream AMD version.
+  static FailureOr<MfmaIntrinsic> selectFor(Location loc, int version,
+                                            unsigned mDim, unsigned nDim,
+                                            unsigned inputKDim,
+                                            Type aElemType, Type bElemType,
+                                            bool withScale, bool useTF32);
   static FailureOr<MfmaIntrinsic> selectFor(Location loc, int version,
                                             unsigned mDim, unsigned nDim,
                                             unsigned inputKDim,
                                             Type aElemType, Type bElemType,
                                             bool withScale, bool useTF32,
-                                            HCUISAFeature features = HCUISAFeature::NONE);
+                                            HCUISAFeature features);
   // Gets the mfma intrinsic based on exact match of all parameters.
   static FailureOr<MfmaIntrinsic> get(Location loc, int version, unsigned mDim,
                                       unsigned nDim, unsigned kDim,
                                       Type aElemType, Type bElemType,
+                                      bool withScale, bool useTF32);
+  static FailureOr<MfmaIntrinsic> get(Location loc, int version, unsigned mDim,
+                                      unsigned nDim, unsigned kDim,
+                                      Type aElemType, Type bElemType,
                                       bool withScale, bool useTF32,
-                                      HCUISAFeature features = HCUISAFeature::NONE);
+                                      HCUISAFeature features);
 
   MfmaIntrinsic(StringRef symbol, unsigned m, unsigned n, unsigned k,
                 unsigned kB, Type aET, Type bET)

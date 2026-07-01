@@ -9,12 +9,12 @@ import subprocess
 os.environ["TRITON_HCUTUNE"] = "1"
 import triton
 import triton.language as tl
-from triton.backends.amd.autotuner import (
+from triton.backends.hcu.autotuner import (
     get_config_key, get_gpu_label, get_cache_dir, get_graph_cache_dir,
     get_config_cache_dir, graphtune, ConfigLoader, PruneConfigLoader,
     merge_caches, GraphConfigLoader
 )
-from triton.backends.amd.testing import (
+from triton.backends.hcu.testing import (
     split_x_vals, set_device
 )
 
@@ -990,7 +990,7 @@ def test_dist_launch(monkeypatch, world_size, sharding):
 
     device = 'cuda'
 
-    cmd = ["python3", "-m", "triton.backends.amd.hcutune_cli", "--nproc", str(world_size),
+    cmd = ["python3", "-m", "triton.backends.hcu.hcutune_cli", "--nproc", str(world_size),
            "--devices", "0,0,0,0"]
     if sharding != "":
         cmd.append(sharding)
@@ -1118,7 +1118,7 @@ def test_compile_only(code: str):
         f.write(code.strip())
         temp_filename = f.name
 
-    cmd = ["python3", "-m", "triton.backends.amd.hcutune_cli", "--nproc",
+    cmd = ["python3", "-m", "triton.backends.hcu.hcutune_cli", "--nproc",
             "2", "--compile-only", temp_filename]
     res = subprocess.run(cmd, stdout=subprocess.PIPE)
     assert res.returncode == 0
@@ -1175,7 +1175,7 @@ def _dist_sub_kernel(
     output = x - y
     tl.store(out_ptr + offsets, output, mask=mask)
 
-from triton.backends.amd.autotuner import graphtune
+from triton.backends.hcu.autotuner import graphtune
 @graphtune
 def dist_add_sub(x, y, out, n, block_size):
     grid = lambda META: (triton.cdiv(n, META['BLOCK_SIZE']), )

@@ -1,5 +1,5 @@
 r"""
-`triton.backend.amd.hcutune_cli` is a module that spawns up multiple distributed
+`triton.backends.hcu.hcutune_cli` is a module that spawns up multiple distributed
 processes for auto-tuning.
 
 The utility can be used for single-process auto-tuning, in which one or

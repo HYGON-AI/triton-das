@@ -40,8 +40,10 @@ enum class DppCtrl : uint32_t {
   BCAST31 = 0x143
 };
 
-// HCU ISA features
-enum class HCUISAFeature : uint64_t{
+// ISA capability features shared between AMD and HCU.
+// The enum type lives here so that AMD public headers (e.g. MfmaGroup.h)
+// can use it in function signatures without depending on HCU headers.
+enum class HCUISAFeature : uint64_t {
   NONE          = 0,
   MMAC_LAYOUT   = 1 << 0,
   MAMC_FP8      = 1 << 1,
@@ -59,8 +61,6 @@ enum class HCUISAFeature : uint64_t{
 inline constexpr HCUISAFeature operator~(HCUISAFeature feature) {
   return static_cast<HCUISAFeature>(~static_cast<uint64_t>(feature));
 }
-
-// Proxy for (features & flag) so that "if (features & HCUISAFeature::X)" works directly.
 struct HCUISAFeatureMask {
   uint64_t bits;
   operator bool() const { return bits != 0; }
@@ -78,6 +78,7 @@ inline constexpr HCUISAFeature &operator&=(HCUISAFeature &lhs, HCUISAFeature rhs
   lhs = static_cast<HCUISAFeature>(static_cast<uint64_t>(lhs) & static_cast<uint64_t>(rhs));
   return lhs;
 }
+
 HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch);
 bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature);
 

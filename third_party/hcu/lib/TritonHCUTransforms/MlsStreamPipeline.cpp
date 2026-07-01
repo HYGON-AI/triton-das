@@ -1,4 +1,5 @@
 #include "TritonAMDGPUTransforms/Passes.h"
+#include "TritonHCU/Passes.h"
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "third_party/amd/include/Analysis/AxisInfoExt.h"
@@ -34,8 +35,8 @@ namespace tta = mlir::triton::amdgpu;
 
 namespace mlir {
 
-#define GEN_PASS_DEF_TRITONAMDGPUMLSSTREAMPIPELINE
-#include "TritonAMDGPUTransforms/Passes.h.inc"
+#define GEN_PASS_DEF_TRITONHCUMLSSTREAMPIPELINE
+#include "TritonHCU/Passes.h.inc"
 
 namespace {
 
@@ -1145,7 +1146,7 @@ bool skipLoopWithOutMatrixLoadOp(scf::ForOp forOp) {
 
 } // namespace
 
-struct MlsPipelinePass : impl::TritonAMDGPUMlsStreamPipelineBase<MlsPipelinePass> {
+struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
   using Base::Base;
 
   void runOnOperation() override {

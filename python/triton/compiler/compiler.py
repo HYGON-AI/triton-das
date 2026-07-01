@@ -362,6 +362,14 @@ def compile(src, target=None, options=None, _env_vars=None):
 
 def make_backend(target: GPUTarget) -> BaseBackend:
     actives = [x.compiler for x in backends.values() if x.compiler.supports_target(target)]
+    if len(actives) > 1:
+        # Disambiguate: HCU arch prefers hcu backend; others prefer amd backend.
+        _HCU_ARCHS = frozenset({'gfx926', 'gfx928', 'gfx936', 'gfx938', 'gfx92a', 'gfx946'})
+        preferred = [c for c in actives
+                     if (target.arch in _HCU_ARCHS and 'hcu' in c.__module__)
+                     or (target.arch not in _HCU_ARCHS and 'hcu' not in c.__module__)]
+        if preferred:
+            actives = preferred
     if len(actives) != 1:
         raise RuntimeError(
             f"{len(actives)} compatible backends for target ({target.backend}) ({actives}). There should only be one.")

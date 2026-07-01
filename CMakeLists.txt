@@ -156,6 +156,8 @@ include_directories(${PROJECT_SOURCE_DIR}/third_party)
 include_directories(${PROJECT_BINARY_DIR}/third_party) # Tablegen'd files
 # backend
 include_directories(${PROJECT_SOURCE_DIR}/third_party/amd/include)
+include_directories(${PROJECT_BINARY_DIR}/third_party/hcu/include)
+include_directories(${PROJECT_SOURCE_DIR}/third_party/hcu/include)
 include_directories(${PROJECT_SOURCE_DIR}/third_party/nvidia/include)
 
 # link_directories(${LLVM_LIBRARY_DIR})

@@ -8,10 +8,10 @@ add_triton_library(TritonAMDGPUToLLVM
     MemoryOpToLLVM.cpp
     MaskedOpsToLLVM.cpp
     DotOpToLLVM/FMA.cpp
-    # DotOpToLLVM/MFMA.cpp
+    DotOpToLLVM/MFMA.cpp
     DotOpToLLVM/WMMA.cpp
     DotOpToLLVM.cpp
-    # ElementwiseOpToLLVM.cpp
+    ElementwiseOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     GCNAsmFormat.cpp
     TritonGPUToLLVM.cpp
@@ -26,15 +26,9 @@ add_triton_library(TritonAMDGPUToLLVM
     UpcastMXFPToLLVM.cpp
     Fp4ToFpOpToLLVM.cpp
     MembarUtility.cpp
-    WaitCntHCUUtility.cpp
     ScalarizePackedFOps.cpp
     TDMUtility.cpp
     BarrierOpToLLVM.cpp
-    # ---- HCU code ---- #
-    DotOpToLLVM/MMAC.cpp
-    ElementwiseOpToLLVMHCU.cpp
-    MlsOpToLLVM.cpp
-    ConvertWarpSpecializeToLLVM.cpp
 
     DEPENDS
     TritonAMDGPUConversionPassIncGen

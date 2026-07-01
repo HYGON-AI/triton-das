@@ -98,33 +98,9 @@ bool isRDNA(ISAFamily isaFamily) {
   return false;
 }
 
-// HCU ISA features
-HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch) {
-  HCUISAFeature commonFeatures1 = HCUISAFeature::MMAC_LAYOUT|HCUISAFeature::MAMC_FP8|
-                                  HCUISAFeature::MLS|HCUISAFeature::CVT_FP8F32;
-  HCUISAFeature commonFeatures2 = HCUISAFeature::MMAC_FP6FP4 | HCUISAFeature::MLS_FP6FP4;
-  HCUISAFeature commonFeatures3 = HCUISAFeature::MMAC_SCALE | HCUISAFeature::MLS_B4;
-  static const llvm::DenseMap<llvm::AMDGPU::GPUKind, HCUISAFeature> hcuIsaFeatures = {
-    {llvm::AMDGPU::GK_GFX928, HCUISAFeature::NONE },
-    {llvm::AMDGPU::GK_GFX936, HCUISAFeature::NONE },
-    {llvm::AMDGPU::GK_GFX938, commonFeatures1 },
-    {llvm::AMDGPU::GK_GFX92A, (~HCUISAFeature::MMAC_LAYOUT & commonFeatures1) | commonFeatures2 },
-    {llvm::AMDGPU::GK_GFX946, commonFeatures1 | commonFeatures2 | commonFeatures3 },
-  };
-
-  llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::parseArchAMDGCN(arch);
-  auto it = hcuIsaFeatures.find(kind);
-  if (it == hcuIsaFeatures.end())
-    return HCUISAFeature::NONE;
-  return it->second;
-}
-
-bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature) {
-  HCUISAFeature hcuIsaFeatures = deduceHCUISAFeature(arch);
-  uint64_t featureBits = static_cast<uint64_t>(feature);
-  return (uint64_t(hcuIsaFeatures) & featureBits) == featureBits;
-}
-
+// ==========================================
+// Buffer cache swizzle: kongming (gfx926), zhongda (gfx928), bmz (gfx936),
+// nmz (gfx938), yueying (gfx92a). All use 14-bit stride (64*2^n bytes).
 bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
   static constexpr llvm::StringRef kCacheSwizzleArchs[] = {
       "gfx926", // kongming
@@ -153,6 +129,9 @@ static int64_t roundUpLegacyCacheSwizzleStrideBytes(int64_t strideBytes) {
   return kLegacyMax;
 }
 
+// Round stride up to a legal 14-bit swizzle value (64*2^n, max 16383). If
+// minStrideBytes > 0 (matrix row pitch), the result is at least that value.
+// Normalized stride is capped at 8192 bytes (8KB).
 int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
                                          int64_t minStrideBytes) {
   if (strideBytes <= 0 && minStrideBytes <= 0)
@@ -173,6 +152,32 @@ int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
     return 0;
 
   return normalized;
+}
+
+// HCU ISA features
+HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch) {
+  HCUISAFeature commonFeatures1 = HCUISAFeature::MMAC_LAYOUT|HCUISAFeature::MAMC_FP8|
+                                  HCUISAFeature::MLS|HCUISAFeature::CVT_FP8F32;
+  HCUISAFeature commonFeatures2 = HCUISAFeature::MMAC_FP6FP4 | HCUISAFeature::MLS_FP6FP4;
+  HCUISAFeature commonFeatures3 = HCUISAFeature::MMAC_SCALE | HCUISAFeature::MLS_B4;
+  static const llvm::DenseMap<llvm::AMDGPU::GPUKind, HCUISAFeature> hcuIsaFeatures = {
+    {llvm::AMDGPU::GK_GFX928, HCUISAFeature::NONE },
+    {llvm::AMDGPU::GK_GFX936, HCUISAFeature::NONE },
+    {llvm::AMDGPU::GK_GFX938, commonFeatures1 },
+    {llvm::AMDGPU::GK_GFX92A, (~HCUISAFeature::MMAC_LAYOUT & commonFeatures1) | commonFeatures2 },
+    {llvm::AMDGPU::GK_GFX946, commonFeatures1 | commonFeatures2 | commonFeatures3 },
+  };
+  llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::parseArchAMDGCN(arch);
+  auto it = hcuIsaFeatures.find(kind);
+  if (it == hcuIsaFeatures.end())
+    return HCUISAFeature::NONE;
+  return it->second;
+}
+
+bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature) {
+  HCUISAFeature hcuIsaFeatures = deduceHCUISAFeature(arch);
+  uint64_t featureBits = static_cast<uint64_t>(feature);
+  return (uint64_t(hcuIsaFeatures) & featureBits) == featureBits;
 }
 
 } // namespace mlir::triton::AMD

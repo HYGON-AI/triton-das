@@ -1,9 +1,9 @@
-#include "TritonAMDGPUToLLVM/WaitCntHCUUtility.h"
+#include "TritonHCU/WaitCntHCUUtility.h"
 
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
-namespace mlir::triton::AMD {
+namespace mlir::triton::HCU {
 namespace {
 
 bool isStore0Waitcnt(Operation *op) {
@@ -47,4 +47,4 @@ void addWaitCntHCU(ModuleOp mod) {
   }
 }
 
-} // namespace mlir::triton::AMD
+} // namespace mlir::triton::HCU

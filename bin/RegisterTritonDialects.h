@@ -1,7 +1,7 @@
 #pragma once
 #include "triton/Dialect/Distributed/IR/Dialect.h"
 #include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "amd/include/TritonAMDGPUTransforms/Passes.h"
+#include "TritonHCU/RegisterPasses.h"
 #include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
 #include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 #include "proton/Dialect/include/Conversion/ProtonGPUToLLVM/Passes.h"
@@ -96,7 +96,6 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerConvertTritonAMDGPUToLLVM();
   mlir::triton::registerConvertBuiltinFuncToLLVM();
   mlir::triton::registerOptimizeAMDLDSUsage();
-  mlir::triton::registerAMDGPUConvertWarpSpecializeToLLVM();
 
   mlir::ub::registerConvertUBToLLVMInterface(registry);
   mlir::registerConvertNVVMToLLVMInterface(registry);
@@ -121,10 +120,8 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerTritonAMDGPULowerInstructionSchedHints();
   mlir::registerTritonAMDFoldTrueCmpI();
   mlir::triton::amdgpu::registerTritonAMDGPUOptimizeDotOperands();
-  /* HCU Passes */
-  mlir::registerTritonAMDGPUMlsEncodingInsertion();
-  mlir::registerTritonAMDGPUMlsLowering();
-  mlir::registerTritonAMDGPUMlsStreamPipeline();
+  // HCU passes
+  mlir::registerTritonHCUPasses();
 
   // NVWS passes
   mlir::triton::registerNVWSTransformsPasses();

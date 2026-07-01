@@ -12,11 +12,12 @@
 #include "llvm/ADT/STLExtras.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
-#include "TritonAMDGPUTransforms/MlsGroup.h"
+#include "TritonHCU/MlsGroup.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "Utility.h"
+#include "TritonHCU/Utility.h"
+using namespace ::mlir::triton::HCU;
 
 using namespace mlir;
 namespace tt = mlir::triton;
@@ -380,22 +381,22 @@ public:
 
 namespace mlir {
 
-#define GEN_PASS_DEF_TRITONAMDGPUMLSENCODINGINSERTION
-#include "TritonAMDGPUTransforms/Passes.h.inc"
+#define GEN_PASS_DEF_TRITONHCUMLSENCODINGINSERTION
+#include "TritonHCU/Passes.h.inc"
 
-class TritonAMDGPUMlsEncodingInsertionPass
-    : public impl::TritonAMDGPUMlsEncodingInsertionBase<
-          TritonAMDGPUMlsEncodingInsertionPass> {
+class TritonHCUMlsEncodingInsertionPass
+    : public impl::TritonHCUMlsEncodingInsertionBase<
+          TritonHCUMlsEncodingInsertionPass> {
 public:
-  using impl::TritonAMDGPUMlsEncodingInsertionBase<
-      TritonAMDGPUMlsEncodingInsertionPass>::TritonAMDGPUMlsEncodingInsertionBase;
+  using impl::TritonHCUMlsEncodingInsertionBase<
+      TritonHCUMlsEncodingInsertionPass>::TritonHCUMlsEncodingInsertionBase;
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
     auto arch = getAMDArch(mod);
     assert(arch.has_value() && "expected arch");
-    auto features = triton::AMD::deduceHCUISAFeature(*arch);
+    auto features = mlir::triton::HCU::deduceHCUISAFeature(*arch);
     auto mlsVersion = getMlsVersionFromFeatures(features);
     mlir::RewritePatternSet patterns(context);
     patterns.add<MlsEncodingInsertion>(context, mlsVersion);
