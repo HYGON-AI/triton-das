@@ -3,6 +3,9 @@ from triton.runtime.jit import constexpr_function
 
 __all__ = ["current_target"]
 
+HIP_CDNA3_ARCHS = {"gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"}
+HIP_CDNA4_ARCHS = {"gfx946", "gfx950"}
+
 
 def current_target():
     try:
@@ -45,10 +48,10 @@ def is_hip():
 @constexpr_function
 def is_hip_cdna3():
     target = current_target()
-    return target is not None and target.arch == "gfx942"
+    return target is not None and target.backend == "hip" and target.arch in HIP_CDNA3_ARCHS
 
 
 @constexpr_function
 def is_hip_cdna4():
     target = current_target()
-    return target is not None and target.arch == "gfx950"
+    return target is not None and target.backend == "hip" and target.arch in HIP_CDNA4_ARCHS

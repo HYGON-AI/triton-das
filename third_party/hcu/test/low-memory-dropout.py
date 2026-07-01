@@ -39,6 +39,19 @@ import triton
 import triton.language as tl
 
 
+def _get_current_arch():
+    try:
+        target = triton.runtime.driver.active.get_current_target()
+    except Exception:
+        return None
+    return getattr(target, "arch", None)
+
+
+if _get_current_arch() == "gfx92a":
+    print("skip low-memory-dropout.py: gfx92a does not support fp32 MMAC")
+    raise SystemExit(0)
+
+
 @triton.jit
 def _dropout(
     x_ptr,  # pointer to the input

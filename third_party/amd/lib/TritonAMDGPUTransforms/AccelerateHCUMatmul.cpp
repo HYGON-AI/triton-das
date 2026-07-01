@@ -1553,7 +1553,8 @@ public:
 
     if (mfmaVersion != 4) {
       return rewriter.notifyMatchFailure(
-          dotOp, "F8F6F4 scaled dot is only natively supported on gfx950");
+          dotOp,
+          "F8F6F4 scaled dot requires CDNA4 MFMA or HCU MMAC_FP6FP4");
     }
 
     RankedTensorType oldRetType = dotOp.getType();
@@ -2233,15 +2234,17 @@ struct TritonAMDGPUAccelerateMatmulPass
     }
 
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
-    case ISAFamily::CDNA4:
-      mfmaPatterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
-            context, getMfmaVersion(isaFamily), matrixInstructionSize, mmacLayout,
-            features,
-            /*benefit=*/10);
-      [[fallthrough]];
     case ISAFamily::CDNA1:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
+    case ISAFamily::CDNA4:
+      if (isaFamily == ISAFamily::CDNA4 ||
+          (features & HCUISAFeature::MMAC_FP6FP4)) {
+        mfmaPatterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
+            context, /*mfmaVersion=*/4, matrixInstructionSize, mmacLayout,
+            features,
+            /*benefit=*/10);
+      }
       mfmaPatterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
           mmacLayout, features,

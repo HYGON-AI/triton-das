@@ -22,6 +22,9 @@ torch_float8_dtypes = ['float8_e4m3fn', 'float8_e5m2']
 torch_dtypes = ['bool'] + int_dtypes + ['uint8'] + float_dtypes + ['bfloat16']
 tma_dtypes = sorted(set(dtypes_with_bfloat16) - {"int64", "uint64", "float64"})
 
+HIP_CDNA3_ARCHS = {"gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"}
+HIP_CDNA4_ARCHS = {"gfx946", "gfx950"}
+
 
 def is_interpreter():
     return os.environ.get('TRITON_INTERPRET', '0') == '1'
@@ -70,12 +73,12 @@ def is_hip_cdna2():
 
 def is_hip_cdna3():
     target = get_current_target()
-    return target is not None and target.backend == 'hip' and target.arch == 'gfx942'
+    return target is not None and target.backend == 'hip' and target.arch in HIP_CDNA3_ARCHS
 
 
 def is_hip_cdna4():
     target = get_current_target()
-    return target is not None and target.backend == 'hip' and target.arch == 'gfx950'
+    return target is not None and target.backend == 'hip' and target.arch in HIP_CDNA4_ARCHS
 
 
 def is_hip_gfx11():

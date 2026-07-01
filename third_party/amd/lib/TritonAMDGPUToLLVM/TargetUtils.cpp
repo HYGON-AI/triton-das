@@ -33,8 +33,8 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
   case llvm::AMDGPU::GK_GFX928: /* ZD */
   case llvm::AMDGPU::GK_GFX936: /* BMZ */
   case llvm::AMDGPU::GK_GFX938: /* NMZ */
-    return ISAFamily::CDNA3;
   case llvm::AMDGPU::GK_GFX92A: /* YY */
+    return ISAFamily::CDNA3;
   case llvm::AMDGPU::GK_GFX946: /* SB */
     return ISAFamily::CDNA4;
   default:

@@ -3,6 +3,8 @@ import triton
 import triton.language as tl
 
 from triton.language.target_info import (
+    HIP_CDNA3_ARCHS,
+    HIP_CDNA4_ARCHS,
     cuda_capability_geq,
     is_cuda,
     is_hip,
@@ -26,16 +28,15 @@ __all__ = [
 @triton.constexpr_function
 def get_cdna_version():
     """
-    Gets the AMD architecture version, i.e. CDNA3 or CDNA4, currently
-    only supports 3 (gfx942) or 4 (gfx950). Returns -1 if it is not AMD
-    hardware or unsupported architecture
+    Gets the AMD architecture version, i.e. CDNA3 or CDNA4. Returns -1 if it
+    is not AMD hardware or an unsupported architecture.
     """
     target = tl.target_info.current_target()
     if target.backend != 'hip':
         return -1
-    if target.arch == 'gfx942':
+    if target.arch in HIP_CDNA3_ARCHS:
         return 3
-    if target.arch == 'gfx950':
+    if target.arch in HIP_CDNA4_ARCHS:
         return 4
     return -1
 

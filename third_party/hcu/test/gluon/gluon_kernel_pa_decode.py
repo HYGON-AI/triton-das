@@ -53,9 +53,9 @@ except ImportError:
 @lru_cache(maxsize=1)
 def get_cdna_version():
     """Get CDNA version lazily to avoid CUDA initialization during import."""
-    if arch_info.get_arch() in ["gfx950"]:
+    if arch_info.get_arch() in ["gfx946", "gfx950"]:
         return 4
-    elif arch_info.get_arch() in ["gfx938", "gfx942"]:
+    elif arch_info.get_arch() in ["gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"]:
         return 3
     else:
         return -1
@@ -3397,7 +3397,7 @@ def pa_decode_gluon(
     assert cdna_version in [
         3,
         4,
-    ], f"pa_decode_gluon only supports gfx938/gfx942 (CDNA3) and gfx950 (CDNA4) now, but got {arch_info.get_arch()}"
+    ], f"pa_decode_gluon only supports CDNA3/CDNA4 HCU targets now, but got {arch_info.get_arch()}"
     # Extract tensor dimensions from input tensors
     num_query_heads = query.shape[1]
     head_size = query.shape[-1]
