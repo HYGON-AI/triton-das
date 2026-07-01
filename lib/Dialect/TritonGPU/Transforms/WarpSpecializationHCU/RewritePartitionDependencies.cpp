@@ -393,6 +393,14 @@ LogicalResult DependencyRewriter::run() {
     // Find all consumers of all outputs of this partition, tracking the
     // specific partition and distance of each use.
     auto &useInfo = partitionUseInfo.emplace_back();
+    // Skip the root (default) partition: its ops are replicated into every
+    // warp group region by the partition-loops pass, so their outputs do not
+    // need to be passed across partitions through shared memory. This also
+    // avoids the "only tensor SSA dependencies" limitation for shared scalar
+    // loop counters (e.g. the async buffer index/phase) which live in the
+    // root partition.
+    if (&partition == schedule.getRootPartition())
+      continue;
     auto callback = [&](OpResult output, OpOperand &use, unsigned distance) {
       Operation *user = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
       Partition *usePartition = schedule.getPartition(user);

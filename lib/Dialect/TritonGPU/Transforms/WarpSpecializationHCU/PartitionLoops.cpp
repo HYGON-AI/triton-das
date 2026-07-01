@@ -376,8 +376,14 @@ LogicalResult partitionLoop(scf::ForOp loop) {
   if (failed(schedule.verify(loop)))
     return failure();
 
-  // Only the root node should have consumers at this point.
+  // Only the root node should have consumers at this point. The root (default)
+  // partition is replicated into every warp group region, so its outputs are
+  // allowed to be consumed by any partition; skip it here. Non-root partitions
+  // must have had their cross-partition SSA dependencies cut by the
+  // rewrite-partition-dependencies pass.
   for (const Partition &partition : schedule.getPartitions()) {
+    if (&partition == schedule.getRootPartition())
+      continue;
     bool failed = false;
     auto callback = [&](OpResult output, OpOperand &use, unsigned distance) {
       Operation *owner = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
@@ -445,8 +451,12 @@ LogicalResult partitionLoop(scf::ForOp loop) {
     auto wsTag = op->getAttrOfType<IntegerAttr>(kWarpSpecializeTagAttrName);
     if (!wsTag || wsTag.getInt() != schedule.getTag())
       continue;
-    if (auto partitionId = op->getAttrOfType<IntegerAttr>(kPartitionAttrName)) {
-      cloneOp(op, builders, {static_cast<size_t>(partitionId.getInt())});
+    // The partition attribute is a DenseI32ArrayAttr (upstream faeb1eb54
+    // changed it from IntegerAttr); companion ops carry a single partition id.
+    if (hasPartition(op)) {
+      auto ids = getPartitionIds(op);
+      assert(ids.size() == 1 && "expected single partition for companion op");
+      cloneOp(op, builders, {static_cast<size_t>(ids[0])});
       opsToErase.push_back(op);
     } else {
       assert(loop.getOperation() == op && "Unexpected op");

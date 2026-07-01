@@ -437,6 +437,10 @@ class HIPBackend(BaseBackend):
             # Note: when register spill after ds_read_matrix, result is wrong for compiler backend. disable current.
             "-mllvm=-hcu-pre-emit-load-store-opt=false",
             "-mllvm=-vgpr-greedy-alloc-mode=local-wave" if options.wdra_enabled else "",
+            # On the model (PMD/gem5), s_trap is not implemented; this tells the
+            # HCUInsertWDRAInit pass to skip emitting the s_trap-based wdra init
+            # prologue while keeping the rest of the WDRA setup.
+            "-mllvm=-run-on-model=true" if (options.wdra_enabled and os.environ.get("PMD_PATH")) else "",
             *options_args,
             "-O3",
         ]
@@ -697,7 +701,7 @@ class HIPBackend(BaseBackend):
             fns[0].add_fn_attr("hcu-wdra-waves-per-tg", str(total_num_warps))
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{options.num_warps*options.warp_size}")
+        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{total_num_warps*options.warp_size}")
         if "memory-bound-attention" in options.schedule_hint.split(','):
             fns[0].add_fn_attr("amdgpu-sched-strategy", "iterative-ilp")
         fns[0].add_fn_attr("uniform-work-group-size", "true")
@@ -765,6 +769,10 @@ class HIPBackend(BaseBackend):
         metadata["shared"] = src.get_int_attr("ttg.shared")
         metadata["profile_scratch_size"] = src.get_int_attr("ttg.profile_scratch_memory_size") or 0
         metadata["profile_scratch_align"] = src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
+
+        # warp-specialization mutates num_warps: the launcher must dispatch all
+        # warp groups (load + mma), so use the total warp count, not options.num_warps.
+        metadata["num_warps"] = total_num_warps
 
         amd.cleanup_bitcode_metadata(llvm_mod)
         # Disable inlining of print related functions,

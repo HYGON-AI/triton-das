@@ -5,9 +5,11 @@
 // async task ids that were assigned by the data-partitioning pass.
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 
@@ -65,13 +67,19 @@ struct SplitMmaPartitions
         stages.push_back(static_cast<int32_t>(ia.getInt()));
       }
 
-      // Collect ops per existing partition index.
+      // Collect ops per existing partition index. The partition attribute is a
+      // DenseI32ArrayAttr (upstream faeb1eb54 changed it from IntegerAttr); use
+      // getPartitionIds to read it. Ops in this HCU pipeline belong to a single
+      // partition, so take the sole id.
       DenseMap<int, SmallVector<Operation *>> opsPerPartition;
       for (Operation &op : loop.getBody()->without_terminator()) {
-        if (auto attr = op.getAttrOfType<IntegerAttr>(kPartitionAttrName)) {
-          int idx = static_cast<int>(attr.getInt());
-          opsPerPartition[idx].push_back(&op);
-        }
+        if (!hasPartition(&op))
+          continue;
+        auto ids = getPartitionIds(&op);
+        if (ids.size() != 1)
+          continue;
+        int idx = ids[0];
+        opsPerPartition[idx].push_back(&op);
       }
 
       // Find the (single) partition that contains MMA ops.
@@ -142,7 +150,6 @@ struct SplitMmaPartitions
       //  - ops only in keepKey stay;
       //  - ops only in moveKey move to the new partition;
       //  - ops in both are cloned so that each partition gets its own copy.
-      auto i32Ty = IntegerType::get(mod.getContext(), 32);
       for (Operation *op : opsPerPartition[*mmaPartitionIdx]) {
         auto asyncIds = getAsyncTaskIds(op);
 
@@ -166,7 +173,7 @@ struct SplitMmaPartitions
         // Only in move group: retag op to new partition.
         if (!inKeep && inMove) {
           op->setAttr(kPartitionAttrName,
-                      IntegerAttr::get(i32Ty, newPartitionIdx));
+                      DenseI32ArrayAttr::get(op->getContext(), {newPartitionIdx}));
           continue;
         }
 
@@ -178,7 +185,8 @@ struct SplitMmaPartitions
           IRMapping mapping;
           Operation *clone = opBuilder.clone(*op, mapping);
           clone->setAttr(kPartitionAttrName,
-                         IntegerAttr::get(i32Ty, newPartitionIdx));
+                         DenseI32ArrayAttr::get(clone->getContext(),
+                                                {newPartitionIdx}));
 
           for (auto it : llvm::enumerate(op->getResults())) {
             OpResult origResult = it.value();

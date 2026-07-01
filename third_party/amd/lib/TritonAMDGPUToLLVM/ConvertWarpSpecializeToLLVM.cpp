@@ -98,6 +98,17 @@ static void createBarrier(TritonLLVMIRRewriter &b, unsigned barIdx,
   }
 }
 
+static bool isWarpGroupBarrierOp(Operation *op) {
+  return isa<ROCDL::BarrierOp, ROCDL::SBarrierOp>(op);
+}
+
+static void rewriteBarrierOp(Operation *op, unsigned barIdx,
+                             std::optional<unsigned> numWarps) {
+  TritonLLVMIRRewriter b(op->getLoc(), op);
+  createBarrier(b, barIdx, numWarps);
+  op->erase();
+}
+
 static void lowerHCUAbarrierArriveOp(ROCDL::HCUAbarrierArriveOp bar, unsigned barIdx, unsigned warpStartId, unsigned numWarps) {
   TritonLLVMIRRewriter b(bar.getLoc(), bar);
   Value warpId = b.create<ROCDL::HCUGetWaveIdOp>();
@@ -204,10 +215,8 @@ static LogicalResult rewriteWarpGroupBarriers(LLVM::LLVMFuncOp func,
     if (isa<WarpSpecializePartitionsOp>(op))
       return WalkResult::skip();
 
-    if (auto bar = dyn_cast<ROCDL::BarrierOp>(op)) {
-      TritonLLVMIRRewriter b(bar.getLoc(), bar);
-      createBarrier(b, kDefaultWarpGroupBarrierIdx, defaultNumWarps);
-      bar.erase();
+    if (isWarpGroupBarrierOp(op)) {
+      rewriteBarrierOp(op, kDefaultWarpGroupBarrierIdx, defaultNumWarps);
       return WalkResult::skip();
     }
 
@@ -226,10 +235,10 @@ static LogicalResult rewriteWarpGroupBarriers(LLVM::LLVMFuncOp func,
       }
       unsigned warpGroupSize = op.getPartitionNumWarps()[idx];
       unsigned warpStartId = (*op.getWarpGroupStartIds())[idx];
-      partition->walk([&](ROCDL::BarrierOp bar) {
-        TritonLLVMIRRewriter b(bar.getLoc(), bar);
-        createBarrier(b, barIdx, warpGroupSize);
-        bar.erase();
+      partition->walk([&](Operation *bar) {
+        if (!isWarpGroupBarrierOp(bar))
+          return;
+        rewriteBarrierOp(bar, barIdx, warpGroupSize);
       });
     }
   }
@@ -404,6 +413,15 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
 
   // Create the switch op in the first block.
   b.setInsertionPointToStart(header);
+  // Declare per-branch VGPR sizes once at kernel entry for WDRA. The backend
+  // HCUInsertWDRAInit pass consumes this: on HW it emits the s_trap 0xff wdra
+  // prologue with s_set_vgpr_size per branch; on the model (PMD) it lowers to a
+  // comment and VGPR allocation is resolved from HSACO metadata. Branches are
+  // ordered by ascending wave id: branch1=mma main (wave 0-3), branch2=load
+  // (wave 4-7), branch3=mma tail (wave 8-11), branch4=unused (wave 12-15).
+  if (wdraEnabled)
+    b.create<ROCDL::HCUWdraInitOp>(wdraNumMmaRegsMain, wdraNumLoadRegs,
+                                   wdraNumMmaRegsTail, /*branch4=*/0);
   Value wid = b.create<ROCDL::HCUGetWaveIdOp>();
 
   // The number of warps in each partition is limited to 4 if wdra is enabled.

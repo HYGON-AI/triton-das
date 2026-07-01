@@ -1,9 +1,12 @@
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "third_party/nvidia/include/Dialect/NVWS/Transforms/Passes.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Partition.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/AbarrierIdManager.h"
@@ -13,6 +16,38 @@ using namespace mlir;
 using namespace triton;
 using namespace triton::gpu;
 namespace ttng = triton::nvidia_gpu;
+
+namespace {
+// Annotate unannotated ops inside warp-specialized loops with the root
+// partition (index 0). Upstream WS passes annotate every op, but legacy HCU
+// passes (and the ops they create) may leave ops unannotated, relying on the
+// old convention that unannotated ops implicitly belong to the root partition.
+// After upstream faeb1eb54, `getPartitionIds` assumes the `ttg.partition`
+// attribute is present, so a missing annotation is undefined behavior. This
+// pass materializes the root annotation before any HCU pass calls
+// `WarpSchedule::deserialize`, restoring the legacy "unannotated == root"
+// semantics without special-casing the shared `Partition.cpp` infrastructure.
+//
+// HCU warp specialization is encoded as a `ttg.warp_specialize.tag` attribute
+// on an `scf.for` (not as a `ttg.warp_specialize` op), so we walk every such
+// loop and annotate ops within its body.
+struct AnnotateRootPartitionPass
+    : PassWrapper<AnnotateRootPartitionPass, OperationPass<ModuleOp>> {
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    SetVector<int> rootId;
+    rootId.insert(0);
+    module.walk([&](scf::ForOp loop) {
+      if (!loop->hasAttr(kWarpSpecializeTagAttrName))
+        return;
+      loop.getBody()->walk([&](Operation *op) {
+        if (!hasPartition(op))
+          setPartition(op, rootId);
+      });
+    });
+  }
+};
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // Pass Definition
@@ -41,9 +76,12 @@ void AutomaticWarpSpecialization::runOnOperation() {
 
   OpPassManager pm;
   pm.addPass(createTritonGPUConvertLayoutThroughShared());
+  pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
   pm.addPass(createTritonGPUPartitionSchedulingHCU());
+  pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
   pm.addPass(createTritonGPULoadMMASpecializationHCU(
       {numStages, wdraEnabled, waspNumLoadWarps, waspNumMmaWarps}));
+  pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
   pm.addPass(createTritonGPURewritePartitionDependenciesHCU());
   // `int-range-optimizations` and SCCP are good at cleaning up loop arithmetic.
   // FIXME: Re-enable integer range analysis once it is fixed.
@@ -56,6 +94,7 @@ void AutomaticWarpSpecialization::runOnOperation() {
     pm.addPass(createTritonGPUDataPartition());
     pm.addPass(createTritonGPUSplitMmaPartitions());
   }
+  pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
   pm.addPass(createTritonGPUPartitionLoopsHCU());
   pm.addPass(createNVWSLowerWarpGroup());
   if (failed(runPipeline(pm, getOperation())))
