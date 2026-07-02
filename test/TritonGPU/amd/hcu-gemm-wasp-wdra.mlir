@@ -1,5 +1,11 @@
-// RUN: %PYTHON %S/run_hcu_wasp_pass.py %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir --wdra-enabled --wasp-num-load-warps=4 --wasp-num-mma-warps=4 | FileCheck %s --check-prefix=WASP44
-// RUN: %PYTHON %S/run_hcu_wasp_pass.py %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir --wdra-enabled --wasp-num-load-warps=4 --wasp-num-mma-warps=8 | FileCheck %s --check-prefix=WASP48
+// Verify WASP+WDRA GEMM lowering IR captured from:
+//   triton-opt %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir \
+//     --tritongpu-automatic-warp-specialization-hcu="num-stages=2 wdra-enabled=true wasp-num-load-warps=4 wasp-num-mma-warps=4"
+//   triton-opt %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir \
+//     --tritongpu-automatic-warp-specialization-hcu="num-stages=2 wdra-enabled=true wasp-num-load-warps=4 wasp-num-mma-warps=8"
+
+// RUN: FileCheck %s --check-prefix=WASP44 --input-file=%S/Inputs/hcu-gemm-wasp-wdra-post-44.ttgir
+// RUN: FileCheck %s --check-prefix=WASP48 --input-file=%S/Inputs/hcu-gemm-wasp-wdra-post-48.ttgir
 
 // WASP44: module attributes
 // WASP44-SAME: ttg.total-num-warps" = 8 : i32
