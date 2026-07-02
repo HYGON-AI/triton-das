@@ -22,6 +22,7 @@ pytest_cases=(
   "${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"
   "${hcu_file_path}/test_buffer_atomic_dtypes.py"
   "${hcu_file_path}/regression_subprocess.py"
+  "${hcu_file_path}/test_hcu_gemm_wasp_wdra_mlir.py"
 )
 
 pytest_args=()
