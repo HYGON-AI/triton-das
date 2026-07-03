@@ -20,6 +20,23 @@ unsigned getNumScratchElemsPaddedCvt(RankedTensorType srcTy,
   return getNumScratchElements(scratchConfig.paddedRepShape);
 }
 
+static int32_t getMaxPreferredScratchBytes(Operation *op) {
+  auto mod = op->getParentOfType<ModuleOp>();
+  if (!mod)
+    return 0;
+  auto target = mod->getAttrOfType<StringAttr>(gpu::AttrTargetName);
+  if (!target)
+    return 0;
+  auto arch = target.strref();
+  if (!arch.consume_front("hip:"))
+    return 0;
+  if (arch == "gfx1250")
+    return 320 * 1024;
+  if (arch == "gfx946" || arch == "gfx950")
+    return 160 * 1024;
+  return 64 * 1024;
+}
+
 SmallVector<unsigned> getRepShapeForCvt(RankedTensorType srcTy,
                                         RankedTensorType dstTy) {
   Attribute srcLayout = srcTy.getEncoding();
@@ -121,14 +138,16 @@ ScratchConfig getScratchConfigForCvt(RankedTensorType srcTy,
 
 unsigned getConvertLayoutScratchInBytes(RankedTensorType srcTy,
                                         RankedTensorType dstTy,
-                                        bool usePadding) {
+                                        bool usePadding,
+                                        int32_t maxPreferredScratchBytes) {
   if (!cvtNeedsSharedMemory(srcTy, dstTy))
     return 0;
   unsigned elems = 0;
   if (usePadding) {
     elems = getNumScratchElemsPaddedCvt(srcTy, dstTy);
   } else {
-    elems = getNumScratchElemsSwizzledCvt(srcTy, dstTy);
+    elems = getNumScratchElemsSwizzledCvt(srcTy, dstTy,
+                                          maxPreferredScratchBytes);
   }
   return elems * getBitwidth(srcTy) / 8;
 }
@@ -158,8 +177,9 @@ unsigned AMDAllocationAnalysisScratchSizeFn(Operation *op) {
   if (auto cvtLayout = dyn_cast<mlir::triton::gpu::ConvertLayoutOp>(op)) {
     auto srcTy = cvtLayout.getSrc().getType();
     auto dstTy = cvtLayout.getType();
-    return getConvertLayoutScratchInBytes(srcTy, dstTy,
-                                          op->hasAttr(AttrSharedMemPadded));
+    return getConvertLayoutScratchInBytes(
+        srcTy, dstTy, op->hasAttr(AttrSharedMemPadded),
+        getMaxPreferredScratchBytes(op));
   }
 
   if (isa<amdgpu::BufferAtomicCASOp, amdgpu::BufferAtomicRMWOp>(op))

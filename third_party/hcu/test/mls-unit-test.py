@@ -26,19 +26,13 @@ def get_autotune_config():
     return [
         # autotune winners for 5120x5120 fp16 matmul (waves_per_eu=1)
         triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=2),
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=8, num_stages=3),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
             num_warps=8, num_stages=2),
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
@@ -50,73 +44,86 @@ def get_autotune_config():
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
             num_warps=8, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=16, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 512, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=16, num_stages=2),
         triton.Config(
             {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=2),
+            num_warps=4, num_stages=1),
         triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
             num_warps=4, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=1),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+            num_warps=4, num_stages=1),
         # triton.Config(
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+        #     num_warps=4, num_stages=1),
         # triton.Config(
-        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
-        #     num_warps=4, num_stages=2),  # <E8><BF><99><E4><B8><AA> config<E4><BC><9A><E6><8E><89><E5><8D><A1>, <E5><9C><A8> (2048, 7168, 256) <E6><97><B6><E4><BC><9A><E6><8E><89><E5><<8D><A1><EF><BC><8C> <E9><9C><80><E8><A6><81><E6><94><B9><E7><94><B5><E5><8E><8B><E5><92><8C><E9><A2><91><E7><8E><87> <E6><89><8D><E6><AD><A3><E5><B8><B8><E3><80><82>
-
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=2, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-            num_warps=4, num_stages=2),
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+        #     num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=2, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+        #     num_warps=4, num_stages=2),
     ]
 
     # configs = []
 
-    # block_sizes = [16, 32, 64, 128, 256]
-    # num_warps_list = [4, 8]
+    # block_sizes = [16, 32, 64, 128, 256, 512]
+    # num_warps_list = [4, 8, 16]
     # num_stages_list = [1, 2, 3, 4]
 
     # for block_m in block_sizes:
@@ -329,7 +336,7 @@ def prune_configs(configs, nargs, **kwargs):
 #     key=['M', 'N', 'K', 'stride_am', 'stride_ak', 'stride_bk', 'stride_bn', 'block_k_diviable', 'mix_load',
 #          'boundary_check', 'use_mask', 'dtype_bits', 'a_is_row_major', 'b_is_row_major'],
 #     prune_configs_by={"early_config_prune": prune_configs},
-#     perf_debug=False,
+#     # perf_debug=False,
 # )
 @triton.heuristics({
     'block_k_diviable': lambda nargs: nargs['K'] % nargs['BLOCK_SIZE_K'] == 0,
@@ -671,7 +678,7 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
     if config is None:
         config = {}
 
-    matmul_kernel[grid](
+    compiled_kernel=matmul_kernel[grid](
         a, b, c,  #
         M, N, K,  #
         stride_am, stride_ak,  #
@@ -687,6 +694,7 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
         OUTPUT_DTYPE=output_dtype_str,  #
         **config,
     )
+    # print(f"share_mem: {compiled_kernel.metadata.shared} bytes, config: {config}")
     return c
 
 
@@ -702,20 +710,20 @@ def compare_matmul_outputs(triton_output, expected_output, dtype, label="Triton 
     triton_output_cpu = triton_output.cpu()
     expected_output_cpu = expected_output.cpu()
     if torch.allclose(triton_output_cpu, expected_output_cpu, atol=1e-2, rtol=rtol):
-        print(f"✅ {label} match")
+        # print(f"✅ {label} match")
         return True
 
-    print(f"❌ {label} differ")
-    print(f"Max diff: {torch.max(torch.abs(triton_output_cpu - expected_output_cpu))}")
+    # print(f"❌ {label} differ")
+    # print(f"Max diff: {torch.max(torch.abs(triton_output_cpu - expected_output_cpu))}")
 
     diff = torch.abs(triton_output_cpu - expected_output_cpu)
     max_diff = torch.max(diff).item()
-    print(f"最大差异: {max_diff}")
+    # print(f"最大差异: {max_diff}")
 
     triton_nan_count = torch.isnan(triton_output_cpu).sum().item()
     expected_nan_count = torch.isnan(expected_output_cpu).sum().item()
-    print(f"Triton输出中nan值数量: {triton_nan_count}")
-    print(f"参考输出中nan值数量: {expected_nan_count}")
+    # print(f"Triton输出中nan值数量: {triton_nan_count}")
+    # print(f"参考输出中nan值数量: {expected_nan_count}")
 
     threshold = 1e-2 if dtype == torch.float16 else 1
     triton_nan_indices = torch.where(torch.isnan(triton_output_cpu))
@@ -724,38 +732,37 @@ def compare_matmul_outputs(triton_output, expected_output, dtype, label="Triton 
     finite_diff = torch.where(torch.isfinite(diff), diff, torch.zeros_like(diff))
     diff_indices = torch.where(finite_diff > threshold)
 
-    print(f"\n=== 差异分析 ===")
-    print(f"Triton输出nan位置: {len(triton_nan_indices[0]) if len(triton_nan_indices[0]) > 0 else '无'}")
-    print(f"参考输出nan位置: {len(expected_nan_indices[0]) if len(expected_nan_indices[0]) > 0 else '无'}")
-    print(f"有限数值差异位置: {len(diff_indices[0]) if len(diff_indices[0]) > 0 else '无'}")
+    # print(f"\n=== 差异分析 ===")
+    # print(f"Triton输出nan位置: {len(triton_nan_indices[0]) if len(triton_nan_indices[0]) > 0 else '无'}")
+    # print(f"参考输出nan位置: {len(expected_nan_indices[0]) if len(expected_nan_indices[0]) > 0 else '无'}")
+    # print(f"有限数值差异位置: {len(diff_indices[0]) if len(diff_indices[0]) > 0 else '无'}")
 
-    if len(triton_nan_indices[0]) > 0:
-        print("\nTriton输出中的nan位置:")
-        for i in range(min(100, len(triton_nan_indices[0]))):
-            row, col = triton_nan_indices[0][i].item(), triton_nan_indices[1][i].item()
-            expected_val = expected_output_cpu[row, col].item()
-            print(f"  [{row}, {col}]: Triton=nan, Ref={expected_val:.6f}")
+    # if len(triton_nan_indices[0]) > 0:
+    #     print("\nTriton输出中的nan位置:")
+    #     for i in range(min(100, len(triton_nan_indices[0]))):
+    #         row, col = triton_nan_indices[0][i].item(), triton_nan_indices[1][i].item()
+    #         expected_val = expected_output_cpu[row, col].item()
+    #         print(f"  [{row}, {col}]: Triton=nan, Ref={expected_val:.6f}")
 
-    if len(expected_nan_indices[0]) > 0:
-        print("\n参考输出中的nan位置:")
-        for i in range(min(100, len(expected_nan_indices[0]))):
-            row, col = expected_nan_indices[0][i].item(), expected_nan_indices[1][i].item()
-            triton_val = triton_output_cpu[row, col].item()
-            print(f"  [{row}, {col}]: Triton={triton_val:.6f}, Ref=nan")
+    # if len(expected_nan_indices[0]) > 0:
+    #     print("\n参考输出中的nan位置:")
+    #     for i in range(min(100, len(expected_nan_indices[0]))):
+    #         row, col = expected_nan_indices[0][i].item(), expected_nan_indices[1][i].item()
+    #         triton_val = triton_output_cpu[row, col].item()
+    #         print(f"  [{row}, {col}]: Triton={triton_val:.6f}, Ref=nan")
 
-    if len(diff_indices[0]) > 0:
-        print("\n有限数值差异元素位置 (行, 列) 和值:")
-        print("索引\t行\t列\tTriton值\tRef值\t差异")
-        for i in range(min(100, len(diff_indices[0]))):
-            row, col = diff_indices[0][i].item(), diff_indices[1][i].item()
-            triton_val = triton_output_cpu[row, col].item()
-            expected_val = expected_output_cpu[row, col].item()
-            print(f"{i}\t{row}\t{col}\t{triton_val:.6f}\t{expected_val:.6f}\t{diff[row, col].item():.6f}")
-
-        if len(diff_indices[0]) > 100:
-            print(f"... 和另外 {len(diff_indices[0]) - 100} 个差异元素未显示")
-    else:
-        print("没有找到有限数值的差异元素")
+    # if len(diff_indices[0]) > 0:
+    #     print("\n有限数值差异元素位置 (行, 列) 和值:")
+    #     print("索引\t行\t列\tTriton值\tRef值\t差异")
+    #     for i in range(min(100, len(diff_indices[0]))):
+    #         row, col = diff_indices[0][i].item(), diff_indices[1][i].item()
+    #         triton_val = triton_output_cpu[row, col].item()
+    #         expected_val = expected_output_cpu[row, col].item()
+    #         print(f"{i}\t{row}\t{col}\t{triton_val:.6f}\t{expected_val:.6f}\t{diff[row, col].item():.6f}")
+    #     if len(diff_indices[0]) > 100:
+    #         print(f"... 和另外 {len(diff_indices[0]) - 100} 个差异元素未显示")
+    # else:
+    #     print("没有找到有限数值的差异元素")
 
     if len(diff_indices[0]) > 0:
         expected_vals = expected_output_cpu[diff_indices]
@@ -763,10 +770,10 @@ def compare_matmul_outputs(triton_output, expected_output, dtype, label="Triton 
         denom = torch.clamp(torch.abs(expected_vals), min=1e-6)
         rel_errors = torch.abs(triton_vals - expected_vals) / denom
         if torch.all(rel_errors <= 0.05):
-            print("✅ 所有差异位置的相对误差均不超过 5%，判定为通过")
+            # print("✅ 所有差异位置的相对误差均不超过 5%，判定为通过")
             return False if len(triton_nan_indices[0]) > 0 else True
         else:
-            print("❌ 所有差异位置的相对误差均超过 5%，判定为失败")
+            # print("❌ 所有差异位置的相对误差均超过 5%，判定为失败")
             return False
 
     return True
@@ -1222,16 +1229,16 @@ torch.manual_seed(0)
 # -----------------------------
 
 matrix_mls_test_sizes = [
-    # (M, N, K)
+    # # (M, N, K)
     # (128, 128, 128),
     # (256, 256, 256),
     # (512, 512, 512),
     # (1024, 1024, 1024),
     # (2048, 2048, 2048),
     (4096, 4096, 4096),
-    # (5120, 5120, 5120),
-    # (8192, 8192, 8192),
-    # (16384, 16384, 16384),
+    (5120, 5120, 5120),
+    (8192, 8192, 8192),
+    (16384, 16384, 16384),
     # # moe gemm1 case
     # (32, 256, 7168),
     # (64, 256, 7168),
@@ -1342,7 +1349,7 @@ def verify_triton_vs_ref(triton_output, a, b, a_layout, b_layout, dtype, label="
     )
 
 
-matrix_load_line_vals = ["ref"] + (["mls", "buffer_load"] if is_hcu_support_mls() else ["buffer_load"])
+matrix_load_line_vals = ["ref"] + (["mls","buffer_load"] if is_hcu_support_mls() else ["buffer_load"])
 matrix_load_line_names = ["REF(tflops)"] + (["MLS(tflops)", "BUF_LOAD(tflops)"] if is_hcu_support_mls() else ["BUF_LOAD(tflops)"])
 matrix_load_line_styles = [("blue", "-")] + ([("green", "-"), ("orange", "-")] if is_hcu_support_mls() else [("orange", "-")])
 benchmark_matmul_mls_configs = []
@@ -1407,24 +1414,34 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
 
 
 # Performance:
+# NMZ: TRITON_BUFFER_CACHE_SWIZZLE=1:
 # matmul-load-performance-row-col-fp16:
-#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0  4096.0  4096.0  4096.0            271.232538            179.931715                 193.772765
-# 1  5120.0  5120.0  5120.0            265.693622            166.854566                 187.980140
+#          M        N        K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0   4096.0   4096.0   4096.0            270.890410            216.643996                 203.167954
+# 1   5120.0   5120.0   5120.0            265.022106            200.840628                 209.244486
+# 2   8192.0   8192.0   8192.0            280.843148            171.046173                 204.955461
+# 3  16384.0  16384.0  16384.0            220.005396            155.280768                 191.895972
 # matmul-load-performance-row-row-fp16:
-#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0  4096.0  4096.0  4096.0            295.186747            173.639268                 112.316187
-# 1  5120.0  5120.0  5120.0            314.297782            182.828173                 116.824893
-# ---------------------------------------------------------------------------
-# After:
+#          M        N        K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0   4096.0   4096.0   4096.0            295.186747            230.416696                 116.949512
+# 1   5120.0   5120.0   5120.0            314.297782            257.773921                 121.148307
+# 2   8192.0   8192.0   8192.0            246.147677            277.699474                 129.568981
+# 3  16384.0  16384.0  16384.0            218.747429            221.737069                 104.517362
+#
+#------------------------------------------------------------------------------
+# BMZ: TRITON_BUFFER_CACHE_SWIZZLE=1:
 # matmul-load-performance-row-col-fp16:
-#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0  4096.0  4096.0  4096.0            271.232538            216.808036                 194.210876
-# 1  5120.0  5120.0  5120.0            265.693622            201.673620                 187.580814
+#          M        N        K  REF(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0   4096.0   4096.0   4096.0            322.323995                 267.016917
+# 1   5120.0   5120.0   5120.0            371.341653                 333.675729
+# 2   8192.0   8192.0   8192.0            380.801855                 306.209241
+# 3  16384.0  16384.0  16384.0            297.914112                 238.599453
 # matmul-load-performance-row-row-fp16:
-#         M       N       K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0  4096.0  4096.0  4096.0            295.186747            211.262526                 112.316089
-# 1  5120.0  5120.0  5120.0            314.297782            185.712064                 116.597590
+#          M        N        K  REF(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
+# 0   4096.0   4096.0   4096.0            341.548106                 139.492283
+# 1   5120.0   5120.0   5120.0            415.792205                 157.695423
+# 2   8192.0   8192.0   8192.0            325.391717                 153.707343
+# 3  16384.0  16384.0  16384.0            275.601357                 143.071677
 
 # if __name__ == "__main__":
 #     benchmark_matmul_mls.run(show_plots=True, print_data=True)

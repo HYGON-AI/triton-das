@@ -30,14 +30,16 @@ namespace mlir {
 namespace triton {
 
 unsigned getNumScratchElemsSwizzledCvt(RankedTensorType srcTy,
-                                       RankedTensorType dstTy) {
+                                       RankedTensorType dstTy,
+                                       int32_t maxPreferredScratchBytes) {
   auto *ctx = srcTy.getContext();
   auto srcLayout = gpu::toLinearLayout(srcTy);
   auto dstLayout = gpu::toLinearLayout(dstTy);
   srcLayout = actionRemoveBroadcastedRegs(srcLayout).apply(srcLayout);
   dstLayout = actionRemoveBroadcastedRegs(dstLayout).apply(dstLayout);
   auto bitwidth = getBitwidth(srcTy);
-  auto smem = gpu::optimalSwizzlingLdSt(srcLayout, dstLayout, bitwidth);
+  auto smem = gpu::optimalSwizzlingLdSt(srcLayout, dstLayout, bitwidth,
+                                        maxPreferredScratchBytes);
   auto reps = smem.getInDimSize(StringAttr::get(ctx, "reps"));
   return smem.getTotalOutDimSize() / reps;
 }

@@ -21,7 +21,8 @@ using AllocationAnalysisScratchSizeFn = std::function<unsigned(Operation *)>;
 unsigned defaultAllocationAnalysisScratchSizeFn(Operation *op);
 
 unsigned getNumScratchElemsSwizzledCvt(RankedTensorType srcTy,
-                                       RankedTensorType dstTy);
+                                       RankedTensorType dstTy,
+                                       int32_t maxPreferredScratchBytes = 0);
 
 } // namespace triton
 

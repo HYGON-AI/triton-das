@@ -666,6 +666,10 @@ bool TargetInfo::supportsLDSTransLoadHCU(int bitWidth) const {
   return false;
 }
 
+int TargetInfo::getMaxPreferredScratchBytes() const {
+  return getSharedMemorySize();
+}
+
 bool TargetInfo::supportsMultiCTALaunch() const {
   return getISAFamily() == ISAFamily::GFX1250;
 }

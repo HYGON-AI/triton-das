@@ -9,6 +9,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <algorithm>
+
 #define DEBUG_TYPE "generic-swizzling"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 
@@ -139,6 +141,58 @@ LinearLayout buildReps(MLIRContext *ctx, const LinearLayout &src,
                                smem.getOutDims(),
                                /*requireSurjective=*/true);
   return smemReps;
+}
+
+// HCU Extension: Move bases that are vectorized in shared memory into the reps
+// dims.
+// Only bases that are registers in both the source and destination layouts are
+// moved, so this reduces the vectorized scratch footprint without changing the
+// represented element coverage.
+LinearLayout moveVectorBasesToReps(MLIRContext *ctx, const LinearLayout &src,
+                                   const LinearLayout &dst,
+                                   const LinearLayout &smem,
+                                   int32_t numBasesToMove) {
+  if (numBasesToMove <= 0)
+    return smem;
+
+  auto kVec = StringAttr::get(ctx, "vector");
+  auto kBank = StringAttr::get(ctx, "bank");
+  auto kSegment = StringAttr::get(ctx, "segment");
+  auto kReps = StringAttr::get(ctx, "reps");
+  auto kReg = StringAttr::get(ctx, "register");
+
+  SmallVector<int32_t> vec = flatten(smem, kVec);
+  SmallVector<int32_t> bank = flatten(smem, kBank);
+  SmallVector<int32_t> segment = flatten(smem, kSegment);
+  SmallVector<int32_t> reps = flatten(smem, kReps);
+
+  SetVector<int32_t> movableBases;
+  SetVector<int32_t> srcRegs(llvm::from_range_t{}, flatten(src, kReg));
+  SetVector<int32_t> dstRegs(llvm::from_range_t{}, flatten(dst, kReg));
+  for (int32_t basis : vec)
+    if (srcRegs.contains(basis) && dstRegs.contains(basis))
+      movableBases.insert(basis);
+
+  SmallVector<int32_t> keptVec;
+  SmallVector<int32_t> movedReps;
+  for (auto it = vec.rbegin(); it != vec.rend(); ++it) {
+    int32_t basis = *it;
+    if (numBasesToMove > 0 && movableBases.contains(basis)) {
+      movedReps.push_back(basis);
+      --numBasesToMove;
+    } else {
+      keptVec.push_back(basis);
+    }
+  }
+  std::reverse(keptVec.begin(), keptVec.end());
+  for (int32_t basis : llvm::reverse(movedReps))
+    reps.push_back(basis);
+
+  return LinearLayout({{kVec, unflatten(keptVec)},
+                       {kBank, unflatten(bank)},
+                       {kSegment, unflatten(segment)},
+                       {kReps, unflatten(reps)}},
+                      smem.getOutDims(), /*requireSurjective=*/true);
 }
 
 SmallVector<int32_t> computeSegment(const SmallVector<int32_t> &bankSrc,
@@ -390,7 +444,8 @@ LinearLayout optimalSwizzling(const LinearLayout &src, const LinearLayout &dst,
                               ArrayRef<int32_t> tileSrc,
                               ArrayRef<int32_t> tileDst,
                               ArrayRef<std::pair<StringAttr, int32_t>> outDims,
-                              int32_t leaveReps = 0) {
+                              int32_t leaveReps = 0,
+                              int32_t maxPreferredScratchBytes = 0) {
   // We work on the flattened tensors as the tensor dimensions are not relevant
   assert(src.getNumOutDims() == 1 && dst.getNumOutDims() == 1 &&
          "src and dst must have a single output dimension");
@@ -451,10 +506,25 @@ LinearLayout optimalSwizzling(const LinearLayout &src, const LinearLayout &dst,
                        src.getOutDims(), /*requireSurjective=*/true);
   basis1D = buildReps(ctx, src, dst, basis1D, leaveReps);
 
+  // HCU Extension: We try to reduce the number of scratch bytes by using reps
+  auto repsAttr = StringAttr::get(ctx, "reps");
+  auto scratchBytes = [&](const LinearLayout &smem) {
+    auto reps = smem.getInDimSize(repsAttr);
+    return smem.getTotalOutDimSize() / reps * bitwidth / 8;
+  };
+  if (maxPreferredScratchBytes > 0 &&
+      scratchBytes(basis1D) >= maxPreferredScratchBytes &&
+      basis1D.getInDimSize(vecAttr) * bitwidth == 128) {
+    auto reduced = moveVectorBasesToReps(ctx, src, dst, basis1D, 1);
+    if (scratchBytes(reduced) < scratchBytes(basis1D))
+      basis1D = std::move(reduced);
+  }
+
   return basis1D.reshapeOuts(outDims);
 }
 LinearLayout optimalSwizzlingLdSt(const LinearLayout &src,
-                                  const LinearLayout &dst, int32_t bitwidth) {
+                                  const LinearLayout &dst, int32_t bitwidth,
+                                  int32_t maxPreferredScratchBytes) {
   auto *ctx = src.getInDimNames().begin()->getContext();
   auto kReg = StringAttr::get(ctx, "register");
   auto kLane = StringAttr::get(ctx, "lane");
@@ -547,7 +617,8 @@ LinearLayout optimalSwizzlingLdSt(const LinearLayout &src,
   auto tileSrc = to_vector(ArrayRef(laneSrc).drop_back(log2Vec));
   auto tileDst = to_vector(ArrayRef(laneDst).drop_back(log2Vec));
   auto smem = optimalSwizzling(srcFlat, dstFlat, bitwidth, vbasis, tileSrc,
-                               tileDst, src.getOutDims());
+                               tileDst, src.getOutDims(), /*leaveReps=*/0,
+                               maxPreferredScratchBytes);
 
   // We might be able to vectorise a bit more the load or the store
   // This may happen when there is broadcasting

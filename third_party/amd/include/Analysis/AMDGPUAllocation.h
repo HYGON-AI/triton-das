@@ -10,7 +10,8 @@ constexpr char AttrSharedMemPadded[] = "amdg.use_padded_scratch_shmem";
 
 unsigned getConvertLayoutScratchInBytes(RankedTensorType srcTy,
                                         RankedTensorType dstTy,
-                                        bool usePadding);
+                                        bool usePadding,
+                                        int32_t maxPreferredScratchBytes = 0);
 
 unsigned AMDAllocationAnalysisScratchSizeFn(Operation *op);
 

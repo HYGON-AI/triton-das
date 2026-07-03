@@ -98,6 +98,10 @@ class HIPOptions:
     #    - see get_options_args() to get more options.
     sched_latency: str = 'none'
 
+    # Extend options for HCU, used for buffer ops with cache swizzle enable or disalbe.
+    # mls ignore this and enable default due to better performance.
+    buffer_cache_swizzle: bool = False
+
     # wasp options
     wasp_enabled: bool = False
     wdra_enabled: bool = False
@@ -189,6 +193,9 @@ class HIPBackend(BaseBackend):
         # `schedule_hint`. If both are present, keep the explicit schedule_hint.
         if args.get("schedule_hint", "none") == "none" and legacy_sched_variant is not None:
             args["schedule_hint"] = legacy_sched_variant
+
+        if "buffer_cache_swizzle" not in opts:
+            args["buffer_cache_swizzle"] = knobs.amd.buffer_cache_swizzle
 
         if args.get("wasp_enabled"):
             if args.get("wdra_enabled"):
@@ -564,7 +571,7 @@ class HIPBackend(BaseBackend):
                 knobs.amd.use_buffer_atomics,
                 knobs.amd.buffer_ops_analyze_small_tensor_range,
                 knobs.amd.emit_buffer_ops_offset_assert,
-                knobs.amd.buffer_cache_swizzle,
+                options.buffer_cache_swizzle,
             )
 
         amd.passes.ttgpuir.add_fold_true_cmpi(pm)

@@ -38,7 +38,8 @@ optimalSwizzling(const LinearLayout &src, const LinearLayout &dst,
                  llvm::ArrayRef<LocalMemOpTile> dstTiles, int32_t bitwidth);
 
 LinearLayout optimalSwizzlingLdSt(const LinearLayout &src,
-                                  const LinearLayout &dst, int32_t bitwidth);
+                                  const LinearLayout &dst, int32_t bitwidth,
+                                  int32_t maxPreferredScratchBytes = 0);
 
 std::pair<int, int> bankConflictsLdSt(const LinearLayout &src,
                                       const LinearLayout &dst,

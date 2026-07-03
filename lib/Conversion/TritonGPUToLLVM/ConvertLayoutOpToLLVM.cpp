@@ -166,7 +166,9 @@ struct ConvertLayoutOpConversion
     // At this point we have a type that's at least 8-bit
     // and we don't have broadcasting in the registers
     auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
-    auto smem = optimalSwizzlingLdSt(srcLayout, dstLayout, bitwidth);
+    auto smem = optimalSwizzlingLdSt(
+        srcLayout, dstLayout, bitwidth,
+        targetInfo.getMaxPreferredScratchBytes());
 
     // Extract reps from smem
     auto kReg = str_attr("register");

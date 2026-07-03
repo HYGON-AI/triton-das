@@ -109,6 +109,10 @@ public:
 
   // HCU: extend to query support for LDSTransLoad
   bool supportsLDSTransLoadHCU(int bitWidth) const;
+
+  // convert layout max preferred scratch bytes.
+  int getMaxPreferredScratchBytes() const override;
+
 private:
   void printfImpl(Value formatStrStart, int formatStrByteCount, ValueRange args,
                   ArrayRef<bool> isSigned, RewriterBase &rewriter,
