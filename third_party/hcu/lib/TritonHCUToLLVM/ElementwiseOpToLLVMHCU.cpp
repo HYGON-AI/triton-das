@@ -2346,22 +2346,18 @@ struct TruncFOpConversion
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
     auto outElemTy = getElementType(op.getOut());
-  #if 0 // TODO: AMD code, need full check
     auto inElemTy = getElementType(op.getIn());
     if (inElemTy.isF32() && (outElemTy.isBF16() || outElemTy.isF16())) {
       return Fp32_to_F16_RTNE(loc, rewriter, inElemTy, outElemTy, operands,
                               isaFamily, capBF16F32);
     }
-    return {LLVM::FPTruncOp::create(rewriter, loc, elemTy, operands[0][0])};
-  #endif
-    if (outElemTy.isBF16()) {
-      auto inElemTy = getElementType(op.getIn());
-      assert(inElemTy.isF32() && "unsupported conversion");
-      return {convertFp32ToBf16(loc, rewriter, operands[0][0],
-                                RoundingMode::RTNE, capBF16F32)};
-    } else {
-      return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
+    // HCU: will remove this in future due to aillvm clang-18 fixed the issue.
+    if (inElemTy.isF64() && outElemTy.isBF16()) {
+      Value f32 = LLVM::FPTruncOp::create(rewriter, loc, f32_ty, operands[0][0]);
+      return {convertFp32ToBf16(loc, rewriter, f32, RoundingMode::RTNE,
+                                capBF16F32)};
     }
+    return {LLVM::FPTruncOp::create(rewriter, loc, elemTy, operands[0][0])};
   }
 };
 
