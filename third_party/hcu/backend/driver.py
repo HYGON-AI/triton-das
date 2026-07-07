@@ -868,9 +868,8 @@ class HCUDriver(GPUDriver):
     def is_active():
         try:
             import torch
-            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-            return arch in {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
-        except:
+            return torch.cuda.is_available() and (torch.version.hip is not None)
+        except Exception:
             return False
 
     def map_python_to_cpp_type(self, ty: str) -> str:

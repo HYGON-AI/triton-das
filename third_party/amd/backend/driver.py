@@ -841,16 +841,19 @@ class HIPDriver(GPUDriver):
 
     @staticmethod
     def is_active():
-        try:
-            import torch
-            if not (torch.cuda.is_available() and (torch.version.hip is not None)):
-                return False
-            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-            if arch in {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}:
-                return False
-            return True
-        except ImportError:
-            return False
+        # Hygon deployments use triton.backends.hcu for HIP; AMD driver must not
+        # claim the device (also avoids fork-unsafe torch.cuda probes in Inductor).
+        # try:
+        #     import torch
+        #     if not (torch.cuda.is_available() and (torch.version.hip is not None)):
+        #         return False
+        #     arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+        #     if arch in {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}:
+        #         return False
+        #     return True
+        # except ImportError:
+        #     return False
+        return False
 
     def map_python_to_cpp_type(self, ty: str) -> str:
         return ty_to_cpp(ty)
