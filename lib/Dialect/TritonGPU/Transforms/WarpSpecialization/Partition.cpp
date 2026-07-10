@@ -1,4 +1,6 @@
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -276,11 +278,29 @@ void setPartition(Operation *op, ArrayRef<int> partitionIds) {
   Builder b(op->getContext());
   auto sorted = llvm::to_vector(partitionIds);
   llvm::sort(sorted);
+  auto sortedSet = SetVector<int>(sorted.begin(), sorted.end());
   op->setAttr(kPartitionAttrName, b.getDenseI32ArrayAttr(sorted));
+  // The TritonGPU dialect verifier requires every non-yield/poison child op of
+  // a partitioned op to carry ttg.partition, and the parent's partition to
+  // contain the union of the children's partitions. Ops with "combine" regions
+  // such as tt.reduce get a partition during scheduling, but the ops inside
+  // their regions (e.g. the arith.maxnumf combiner) may retain a stale
+  // partition from an earlier pass (e.g. AnnotateRootPartition assigning root
+  // 0). Propagate the parent's partition to any region child whose current
+  // partition is not already a subset of the new parent partition, so the
+  // verifier stays satisfied. Children that already hold a legitimate
+  // sub-partition (e.g. independently partitioned scf.for/scf.if bodies) are
+  // left untouched.
   for (auto &region : op->getRegions()) {
     for (auto &block : region.getBlocks()) {
-      auto terminator = block.getTerminator();
-      terminator->setAttr(kPartitionAttrName, b.getDenseI32ArrayAttr(sorted));
+      for (Operation &child : block.getOperations()) {
+        if (isa<scf::YieldOp, ub::PoisonOp>(child))
+          continue;
+        if (!hasPartition(&child) ||
+            !llvm::all_of(getPartitionIds(&child),
+                          [&](int id) { return sortedSet.contains(id); }))
+          child.setAttr(kPartitionAttrName, b.getDenseI32ArrayAttr(sorted));
+      }
     }
   }
 }

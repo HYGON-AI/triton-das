@@ -4,6 +4,7 @@
 // splitting a single MMA partition into multiple partitions based on
 // async task ids that were assigned by the data-partitioning pass.
 
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -143,6 +144,17 @@ struct SplitMmaPartitions
       int newPartitionIdx = static_cast<int>(newStagesAttrs.size());
       newStagesAttrs.push_back(mmaStageAttr);
 
+      // Process MMA-partition ops in topological order so that when an op is
+      // cloned for the move group, its operands can be rerouted to use the
+      // move-group clones of their defining ops (if those were also cloned).
+      SetVector<Operation *> mmaOpSet(mmaOps.begin(), mmaOps.end());
+      SmallVector<Operation *> sortedMmaOps = topologicalSort(mmaOpSet).takeVector();
+
+      // Map from original op (in the MMA partition) to its move-group clone.
+      // Used to reroute cloned ops' operands to the corresponding move-group
+      // clone results.
+      DenseMap<Operation *, Operation *> origToMoveClone;
+
       // For all ops in the MMA partition, adjust their partition index
       // according to async_task_id:
       //  - ops without async_task_id are treated as belonging to both groups
@@ -150,7 +162,7 @@ struct SplitMmaPartitions
       //  - ops only in keepKey stay;
       //  - ops only in moveKey move to the new partition;
       //  - ops in both are cloned so that each partition gets its own copy.
-      for (Operation *op : opsPerPartition[*mmaPartitionIdx]) {
+      for (Operation *op : sortedMmaOps) {
         auto asyncIds = getAsyncTaskIds(op);
 
         bool inKeep = false;
@@ -170,10 +182,25 @@ struct SplitMmaPartitions
         if (inKeep && !inMove)
           continue;
 
-        // Only in move group: retag op to new partition.
+        // Only in move group: retag op to new partition. Also reroute its
+        // operands to use move-group clones where available, so the retagged
+        // op does not reference keep-partition SSA values.
         if (!inKeep && inMove) {
-          op->setAttr(kPartitionAttrName,
-                      DenseI32ArrayAttr::get(op->getContext(), {newPartitionIdx}));
+          SetVector<int> newIds;
+          newIds.insert(newPartitionIdx);
+          setPartition(op, newIds);
+          for (auto &operand : op->getOpOperands()) {
+            Value val = operand.get();
+            if (Operation *defOp = val.getDefiningOp()) {
+              auto it = origToMoveClone.find(defOp);
+              if (it != origToMoveClone.end()) {
+                if (auto res = dyn_cast<OpResult>(val)) {
+                  unsigned resIdx = res.getResultNumber();
+                  operand.set(it->second->getResult(resIdx));
+                }
+              }
+            }
+          }
           continue;
         }
 
@@ -183,10 +210,26 @@ struct SplitMmaPartitions
           OpBuilder opBuilder(op->getContext());
           opBuilder.setInsertionPointAfter(op);
           IRMapping mapping;
+          // Before cloning, reroute operands that have move-group clones so
+          // the clone in the move partition uses move-partition SSA values
+          // instead of referencing the original (keep-partition) operands.
+          for (auto &operand : op->getOpOperands()) {
+            Value val = operand.get();
+            if (Operation *defOp = val.getDefiningOp()) {
+              auto it = origToMoveClone.find(defOp);
+              if (it != origToMoveClone.end()) {
+                if (auto res = dyn_cast<OpResult>(val)) {
+                  unsigned resIdx = res.getResultNumber();
+                  mapping.map(val, it->second->getResult(resIdx));
+                }
+              }
+            }
+          }
           Operation *clone = opBuilder.clone(*op, mapping);
-          clone->setAttr(kPartitionAttrName,
-                         DenseI32ArrayAttr::get(clone->getContext(),
-                                                {newPartitionIdx}));
+          SetVector<int> newIds;
+          newIds.insert(newPartitionIdx);
+          setPartition(clone, newIds);
+          origToMoveClone[op] = clone;
 
           for (auto it : llvm::enumerate(op->getResults())) {
             OpResult origResult = it.value();
@@ -194,6 +237,73 @@ struct SplitMmaPartitions
             for (OpOperand &use :
                  llvm::make_early_inc_range(origResult.getUses())) {
               Operation *user = use.getOwner();
+              // If the user is a move-group clone we already created, reroute
+              // it to use this clone's result.
+              if (auto it2 = origToMoveClone.find(user);
+                  it2 != origToMoveClone.end()) {
+                use.set(cloneResult);
+                continue;
+              }
+              auto userIds = getAsyncTaskIds(user);
+              bool userInMove =
+                  llvm::is_contained(userIds, moveKey) &&
+                  !llvm::is_contained(userIds, keepKey);
+              if (userInMove)
+                use.set(cloneResult);
+            }
+          }
+        }
+      }
+
+      // Companion ops created by the data-partitioning pass (e.g.
+      // memdesc_subslice views of partitioned local_allocs) carry an
+      // async_task_id but no ttg.partition attribute, so by the legacy
+      // convention they are implicitly treated as root and would be cloned
+      // into every partition by PartitionLoops. After the split above, their
+      // producing local_alloc may live in a specific MMA sub-partition, so
+      // cloning the companion into all partitions leaves clones that reference
+      // the original (about-to-be-erased) local_alloc -> "operation destroyed
+      // but still has uses". Assign each unannotated companion op to the MMA
+      // sub-partition matching its async_task_id so it follows its producer.
+      for (Operation &opRef : loop.getBody()->without_terminator()) {
+        Operation *op = &opRef;
+        // Skip ops that already have an explicit partition assignment.
+        if (hasPartition(op))
+          continue;
+        auto asyncIds = getAsyncTaskIds(op);
+        if (asyncIds.empty())
+          continue;
+        bool inKeep = llvm::is_contained(asyncIds, keepKey);
+        bool inMove = llvm::is_contained(asyncIds, moveKey);
+        if (!inKeep && !inMove)
+          continue;
+
+        SetVector<int> keepIds, moveIds;
+        if (inKeep && !inMove) {
+          keepIds.insert(*mmaPartitionIdx);
+          setPartition(op, keepIds);
+        } else if (!inKeep && inMove) {
+          moveIds.insert(newPartitionIdx);
+          setPartition(op, moveIds);
+        } else {
+          // Shared by both sub-partitions: keep the original in the keep
+          // partition and clone it into the move partition, routing move-group
+          // consumers to the clone (mirroring the both-groups handling above).
+          keepIds.insert(*mmaPartitionIdx);
+          setPartition(op, keepIds);
+          OpBuilder opBuilder(op->getContext());
+          opBuilder.setInsertionPointAfter(op);
+          IRMapping mapping;
+          Operation *clone = opBuilder.clone(*op, mapping);
+          moveIds.insert(newPartitionIdx);
+          setPartition(clone, moveIds);
+          for (auto it : llvm::enumerate(op->getResults())) {
+            OpResult cloneResult = clone->getResult(it.index());
+            for (OpOperand &use :
+                 llvm::make_early_inc_range(it.value().getUses())) {
+              Operation *user = use.getOwner();
+              if (user == clone)
+                continue;
               auto userIds = getAsyncTaskIds(user);
               bool userInMove =
                   llvm::is_contained(userIds, moveKey) &&

@@ -404,7 +404,15 @@ static bool getBackwardSliceToPartition(Value v,
       partitionScheme.dotPartitionOperand[dotOp] = currentDim == 0 ? 0 : 1;
     } else if (isa<ttng::ReinterpretTensorDescOp, MakeTensorDescOp>(op)) {
       return true;
-    } else if (isa<triton::gpu::LocalAllocOp>(op)) {
+    } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
+      // Recurse into the source operand so that the data chain feeding the
+      // allocation (e.g. truncf -> exp2 -> ... -> dot) is also partitioned.
+      // Without this, the original full-width chain stays alive because the
+      // local_alloc still references it.
+      if (allocOp.getSrc())
+        if (!getBackwardSliceToPartition(allocOp.getSrc(), partitionScheme,
+                                         currentDim))
+          return false;
       return true;
     } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
       // track yield value
@@ -964,7 +972,21 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
-  } else if (isa<triton::gpu::LocalAllocOp>(op)) {
+  } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
+    // Empty pipelined buffers (e.g. matmul A/B: local_alloc : () -> memdesc)
+    // are shared by load (full tile) and MMA (M-sliced). Cloning them creates
+    // extra LDS (192KB instead of 128KB). Keep the original alloc; LocalLoad
+    // creates memdesc_subslice views. Only clone allocs that materialize a
+    // tensor src (e.g. FA P staging: local_alloc %tensor).
+    if (!allocOp.getSrc()) {
+      mappings.map(op, op);
+      reverseMappings.map(op, op);
+      for (Value v : op->getResults()) {
+        mappings.map(v, v);
+        reverseMappings.map(v, v);
+      }
+      return op;
+    }
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
@@ -1099,13 +1121,28 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     reverseMappings.map(newV, v);
   } else if (isa<StoreOp, LoadOp, LocalLoadOp>(op)) {
     if (auto localLdOp = dyn_cast<LocalLoadOp>(op)) {
-      // LocalLoad：不向地址的 definingOp 传导 slice，只在此处对 local_load 的地址做 offset 切片。
+      // For pipelined empty buffers, do not clone LocalAlloc / shrink
+      // MemDescIndex — view the shared full tile with memdesc_subslice.
+      // For LocalAlloc with a tensor src (FA P), recurse so the producer
+      // chain is sliced and the cloned alloc is used directly.
       Value src = localLdOp.getSrc();
-      if (dim != DataPartitionScheme::noOpPartitionDim) {
-        if (auto memTy = dyn_cast<MemDescType>(src.getType())) {
+      Operation *srcDef = src.getDefiningOp();
+      auto srcAlloc = dyn_cast_or_null<LocalAllocOp>(srcDef);
+      bool sliceSrcAlloc = srcAlloc && srcAlloc.getSrc();
+      if (sliceSrcAlloc) {
+        sliceOp(src, offset, mappings, reverseMappings, partitionScheme);
+        if (Value mappedSrc = mappings.lookupOrNull(src))
+          mappings.map(localLdOp.getSrc(), mappedSrc);
+      } else if (dim != DataPartitionScheme::noOpPartitionDim) {
+        Value base = mappings.lookupOrNull(src);
+        if (!base)
+          base = src;
+        if (auto memTy = dyn_cast<MemDescType>(base.getType())) {
           SmallVector<int64_t> shape{memTy.getShape().begin(),
                                      memTy.getShape().end()};
-          if (shape.size() > dim && shape[dim] > 0) {
+          if (shape.size() > dim && shape[dim] > 0 &&
+              shape[dim] % static_cast<int64_t>(numOfPartitions) == 0 &&
+              shape[dim] / static_cast<int64_t>(numOfPartitions) < shape[dim]) {
             int64_t sliceSize =
                 shape[dim] / static_cast<int64_t>(numOfPartitions);
             int32_t addrOffset =
@@ -1124,68 +1161,24 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
             builder.setInsertionPoint(op);
             auto viewOp =
                 builder.createWithAsyncTaskIds<MemDescSubsliceOp>(
-                    op->getLoc(), slicedTy, src, offsets);
+                    op->getLoc(), slicedTy, base, offsets);
 
             mappings.map(localLdOp.getSrc(), viewOp.getResult());
           }
         }
       }
-      // 只对非地址的 operand（如 token）做 slice，不递归到 src 的 definingOp。
+      // Only slice non-address operands (e.g. token); do not recurse into
+      // empty-buffer / memdesc_index src (handled above).
       for (Value operand : op->getOperands())
         if (operand != localLdOp.getSrc())
           sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     } else {
-      // LoadOp / StoreOp：先 slice 所有 operand，再对 base ptr 做 offset。
+      // LoadOp / StoreOp: only slice operands. Do NOT also AddPtr by
+      // offset*sliceSize — MakeRange / index chains already carry the
+      // partition row offset after operand slicing. Adding both double-
+      // offsets task1 loads (e.g. FA Q: make_range(32,64) + AddPtr(+32)).
       for (Value operand : op->getOperands())
         sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
-      if (dim != DataPartitionScheme::noOpPartitionDim && offset) {
-        if (auto loadOp = dyn_cast<LoadOp>(op)) {
-          SmallVector<int64_t> shape = getShape(loadOp.getResult());
-          if (shape.size() > dim && shape[dim] > 0) {
-            int64_t sliceSize =
-                shape[dim] / static_cast<int64_t>(numOfPartitions);
-            int64_t elemOffset = offset * sliceSize;
-
-            if (elemOffset != 0) {
-              Value ptr = mappings.lookupOrNull(loadOp.getPtr());
-              if (!ptr)
-                ptr = loadOp.getPtr();
-
-              builder.setInsertionPoint(op);
-              Value offsetVal =
-                  builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
-                      op->getLoc(), elemOffset, 32);
-              Value newPtr = builder.createWithAsyncTaskIds<triton::AddPtrOp>(
-                  op->getLoc(), ptr.getType(), ptr, offsetVal);
-
-              mappings.map(loadOp.getPtr(), newPtr);
-            }
-          }
-        } 
-        //else if (auto storeOp = dyn_cast<StoreOp>(op)) {
-        //  SmallVector<int64_t> shape = getShape(storeOp.getValue());
-        //  if (shape.size() > dim && shape[dim] > 0) {
-        //    int64_t sliceSize =
-        //        shape[dim] / static_cast<int64_t>(numOfPartitions);
-        //    int64_t elemOffset = offset * sliceSize;
-
-        //    if (elemOffset != 0) {
-        //      Value ptr = mappings.lookupOrNull(storeOp.getPtr());
-        //      if (!ptr)
-        //        ptr = storeOp.getPtr();
-
-        //      builder.setInsertionPoint(op);
-        //      Value offsetVal =
-        //          builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
-        //              op->getLoc(), elemOffset, 32);
-        //      Value newPtr = builder.createWithAsyncTaskIds<triton::AddPtrOp>(
-        //          op->getLoc(), ptr.getType(), ptr, offsetVal);
-
-        //      mappings.map(storeOp.getPtr(), newPtr);
-        //    }
-        //  }
-        //}
-      }
     }
     newOp = cloneAndSetResultType(op);
   } else if (isa<DescriptorLoadOp, DescriptorStoreOp>(op)) {
@@ -1224,11 +1217,20 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
   } else if (auto tensorDescOp = dyn_cast<MakeTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
   } else if (auto memDescIndexOp = dyn_cast<MemDescIndexOp>(op)) {
-    // Slice the src operand (localAlloc or memdesc_subslice) first so that
-    // cloneAndSetResultType uses the sliced value from mappings.
-    sliceOp(memDescIndexOp.getSrc(), offset, mappings, reverseMappings,
-            partitionScheme);
-    newOp = cloneAndSetResultType(op);
+    // Keep the full stage tile (e.g. 128x128). Do not slice/clone the
+    // underlying empty LocalAlloc — MMA takes an M-subslice later via
+    // LocalLoad's memdesc_subslice, while load still stores the full tile.
+    builder.setInsertionPoint(op);
+    newOp = builder.clone(*op, mappings);
+    hcu::setAsyncTaskIds(newOp, sliceTaskIds);
+    mappings.map(op, newOp);
+    reverseMappings.map(newOp, op);
+    for (auto [oldV, newV] :
+         llvm::zip(op->getResults(), newOp->getResults())) {
+      mappings.map(oldV, newV);
+      reverseMappings.map(newV, oldV);
+    }
+    // Intentionally do not retype: result stays full MxK / KxN.
   } else if (auto tensorDescOp = dyn_cast<ttng::ReinterpretTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
   } else if (isa<TransOp, MemDescTransOp>(op)) {

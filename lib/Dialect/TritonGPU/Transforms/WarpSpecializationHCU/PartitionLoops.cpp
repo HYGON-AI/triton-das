@@ -392,12 +392,16 @@ LogicalResult partitionLoop(scf::ForOp loop) {
           usePartition == &partition)
         return;
       failed = true;
+      Operation *defOp = output.getDefiningOp();
       InFlightDiagnostic diag =
-          mlir::emitWarning(output.getLoc(), "non-root partition #")
-          << partition.getIndex() << " has direct SSA consumer";
+          mlir::emitError(output.getLoc(), "non-root partition #")
+          << partition.getIndex() << " has direct SSA consumer in partition #"
+          << usePartition->getIndex() << " (distance=" << distance << ")";
+      if (defOp)
+        diag.attachNote(defOp->getLoc()) << "producer op: " << defOp->getName();
       diag.attachNote(use.getOwner()->getLoc())
-          << "use at distance " << distance << " in partition #"
-          << usePartition->getIndex() << " here";
+          << "consumer op: " << use.getOwner()->getName()
+          << " operand #" << use.getOperandNumber();
     };
     schedule.iterateUses(loop, &partition, callback);
     if (failed)

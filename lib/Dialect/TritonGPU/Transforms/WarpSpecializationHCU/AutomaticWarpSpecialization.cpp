@@ -38,7 +38,16 @@ struct AnnotateRootPartitionPass
     SetVector<int> rootId;
     rootId.insert(0);
     module.walk([&](scf::ForOp loop) {
-      if (!loop->hasAttr(kWarpSpecializeTagAttrName))
+      // A loop is warp-specialized if it carries either the legacy
+      // `ttg.warp_specialize.tag` attribute or the `tt.warp_specialize` unit
+      // attribute (the latter is what `tl.range(warp_specialize=True)` lowers
+      // to). Annotate every op nested under such a loop that lacks a partition
+      // with the root partition (index 0), so that downstream HCU passes which
+      // assume `ttg.partition` is present (and the dialect verifier which
+      // requires all children of a `tt.warp_specialize` loop / partitioned op to
+      // carry it) don't trip on ops inside e.g. `tt.reduce` bodies.
+      if (!loop->hasAttr(kWarpSpecializeTagAttrName) &&
+          !loop->hasAttr("tt.warp_specialize"))
         return;
       loop.getBody()->walk([&](Operation *op) {
         if (!hasPartition(op))

@@ -118,6 +118,7 @@ function run_lit() {
     "${LIT_TEST_DIR}/TritonGPU/wsmaterialization.mlir"
     "${LIT_TEST_DIR}/TritonGPU/wsmutex.mlir"
     "${LIT_TEST_DIR}/TritonGPU/wspipeline.mlir"
+    "${LIT_TEST_DIR}/TritonGPU/amd/hcu-gemm-wasp-wdra.mlir"
   )
   test_exclude=(
     "${LIT_TEST_DIR}/Conversion/AMDGPU/mfma_variants.mlir"

@@ -175,6 +175,16 @@ static std::optional<WarpSchedule> getInitialSchedule(scf::ForOp loop) {
       succeeded(scheduleOr))
     return {std::move(*scheduleOr)};
 
+  // AnnotateRootPartitionPass runs before this pass to satisfy the dialect
+  // verifier (which requires every child of a `tt.warp_specialize` loop to
+  // carry `ttg.partition`). Those pre-annotations assign everything to the
+  // root partition (index 0), which would cause every `trySchedule` below to
+  // fail. Clear them so scheduling starts from a clean slate.
+  loop.getBody()->walk([&](Operation *op) {
+    op->removeAttr(kPartitionAttrName);
+    op->removeAttr(kPartitionOutputsAttrName);
+  });
+
   // Start by creating the default partition, a partition for for all loads, and
   // a partition for all MMAs.
   WarpSchedule schedule;

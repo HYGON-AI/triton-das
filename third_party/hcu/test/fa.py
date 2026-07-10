@@ -1379,10 +1379,18 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, config_list, USE_FP8=False, 
     os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
     torch.manual_seed(20)
     
-    # Create test data
-    q = torch.randn((Z, Q_H, N_CTX, D_HEAD), dtype=torch.float32 if USE_FP8 else torch.float16, device="cpu")
-    k = torch.randn((Z, K_H, N_CTX, D_HEAD), dtype=torch.float32 if USE_FP8 else torch.float16, device="cpu")
-    v = torch.randn((Z, K_H, N_CTX, D_HEAD), dtype=torch.float32 if USE_FP8 else torch.float16, device="cpu")
+    # Create test data. Patterned (non-constant) K/V for load checks.
+    # Duplicate Q within each BLOCK_M=64 tile so MMA main (rows 0-31) and
+    # MMA tail (rows 32-63) see identical Q; with shared K/V their results
+    # should match, which makes itrace store comparison straightforward.
+    dtype = torch.float32 if USE_FP8 else torch.float16
+    q = torch.randn((Z, Q_H, N_CTX, D_HEAD), dtype=dtype, device="cpu")
+    for tile_start in range(0, N_CTX, 64):
+        q[:, :, tile_start + 32:tile_start + 64, :] = q[:, :, tile_start:tile_start + 32, :]
+    n = torch.arange(N_CTX, dtype=torch.float32).view(1, 1, N_CTX, 1)
+    d = torch.arange(D_HEAD, dtype=torch.float32).view(1, 1, 1, D_HEAD)
+    k = ((n + 1) * 0.01 + d * 0.001).expand(Z, K_H, N_CTX, D_HEAD).to(dtype).contiguous()
+    v = ((n + 1) * 0.02 + d * 0.002).expand(Z, K_H, N_CTX, D_HEAD).to(dtype).contiguous()
     
     # GQA/MQA support - repeat KV heads for Q heads
     q_num_per_group = Q_H // K_H
@@ -1450,8 +1458,9 @@ if __name__ == "__main__":
         "wasp_num_load_warps": 4,
         "wasp_num_mma_warps": 8,
         "wdra_enabled": True,
-        "wdra_num_load_regs": 100,
-        "wdra_num_mma_regs": 100
+        "wdra_num_load_regs": 52,
+        "wdra_num_mma_regs_main": 160,
+        "wdra_num_mma_regs_tail": 160,
     }
     print("accuracy test (fwd fp16) Z=%s Q_H=%s K_H=%s N_CTX=%s D_HEAD=%s causal=%s config=%s"
           % (Z, Q_H, K_H, N_CTX, D_HEAD, causal, config))

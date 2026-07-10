@@ -121,7 +121,7 @@ def matmul(a, b, activation="", json_config_path=None, compile_only=False):
         "GROUP_SIZE_M": 1,
         "wasp_enabled": True,
         "wasp_num_load_warps": 4,
-        "wasp_num_mma_warps": 4,
+        "wasp_num_mma_warps": 8,
         "wdra_enabled": True,
         "wdra_num_load_regs": 88,
         "wdra_num_mma_regs_main": 144,

@@ -81,6 +81,14 @@ public:
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     addLegalOp<triton::amdgpu::InstructionSchedHint>();
+    // The warp-specialize ops are lowered later by the dedicated
+    // `triton-hcu-convert-warp-specialize-to-llvm` pass (which runs after this
+    // pass in the pipeline). Keep them legal here so `applyPartialConversion`
+    // does not try to legalize them (and fail) before that pass runs.
+    addLegalOp<triton::gpu::WarpSpecializeOp>();
+    addLegalOp<triton::gpu::WarpYieldOp>();
+    addLegalOp<triton::gpu::WarpSpecializePartitionsOp>();
+    addLegalOp<triton::gpu::WarpReturnOp>();
   }
 };
 
