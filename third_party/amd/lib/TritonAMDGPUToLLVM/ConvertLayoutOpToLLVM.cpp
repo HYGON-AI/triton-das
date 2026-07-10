@@ -89,8 +89,8 @@ public:
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-    const char *instr0 = lBit == 5 ? "llvm.amdgcn.permlane32.swap"
-                                   : "llvm.amdgcn.permlane16.swap";
+    const char *instr0 = lBit == 5 ? AMD::getPermlane32SwapIntrinsic(amdTargInfo.getArch()).data()
+                                   : AMD::getPermlane16SwapIntrinsic(amdTargInfo.getArch()).data();
     Type retTy = struct_ty({i32_ty, i32_ty});
     Value f = b.false_val();
     auto permlaneSwap = [&](Value v0, Value v1, auto instr) {
@@ -188,8 +188,8 @@ public:
         outVals[r1] = swapped0[1];
         if (isThreeCycle) {
           // E.g., we factor (r_i l5 l4) = (r_i l4)(r_i l5), read right to left.
-          const char *instr1 = lBit == 5 ? "llvm.amdgcn.permlane16.swap"
-                                         : "llvm.amdgcn.permlane32.swap";
+          const char *instr1 = lBit == 5 ? AMD::getPermlane16SwapIntrinsic(amdTargInfo.getArch()).data()
+                                         : AMD::getPermlane32SwapIntrinsic(amdTargInfo.getArch()).data();
           auto swapped1 = permlaneSwap(outVals[r0], outVals[r1], instr1);
           outVals[r0] = swapped1[0];
           outVals[r1] = swapped1[1];

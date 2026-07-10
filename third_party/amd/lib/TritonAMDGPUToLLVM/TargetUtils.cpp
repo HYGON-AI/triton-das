@@ -180,4 +180,16 @@ bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature) {
   return (uint64_t(hcuIsaFeatures) & featureBits) == featureBits;
 }
 
+llvm::StringRef getPermlane16SwapIntrinsic(llvm::StringRef arch) {
+  if (llvm::AMDGPU::parseArchAMDGCN(arch) == llvm::AMDGPU::GK_GFX946)
+    return "llvm.hcu.permlane16.swap.b32";
+  return "llvm.amdgcn.permlane16.swap";
+}
+
+llvm::StringRef getPermlane32SwapIntrinsic(llvm::StringRef arch) {
+  if (llvm::AMDGPU::parseArchAMDGCN(arch) == llvm::AMDGPU::GK_GFX946)
+    return "llvm.hcu.permlane32.swap.b32";
+  return "llvm.amdgcn.permlane32.swap";
+}
+
 } // namespace mlir::triton::AMD

@@ -92,6 +92,11 @@ bool supportsBufferCacheSwizzle(llvm::StringRef arch);
 int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
                                          int64_t minStrideBytes = 0);
 
+// Return the LLVM intrinsic name for permlane swap on the given arch.
+// gfx946 uses HCU builtins; CDNA4 (gfx950) uses amdgcn intrinsics.
+llvm::StringRef getPermlane16SwapIntrinsic(llvm::StringRef arch);
+llvm::StringRef getPermlane32SwapIntrinsic(llvm::StringRef arch);
+
 } // namespace mlir::triton::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTOLLVM_TARGETUTILS_H_
