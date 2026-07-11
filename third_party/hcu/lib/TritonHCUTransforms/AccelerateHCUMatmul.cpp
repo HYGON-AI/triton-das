@@ -19,6 +19,7 @@ using namespace ::mlir::triton::HCU;
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
@@ -38,6 +39,18 @@ namespace {
 using triton::AMD::ISAFamily;
 constexpr char AttrDecomposedDotScaledSource[] =
     "amdg.decomposed_dot_scaled_source";
+
+bool isDsReadMEnabled() {
+  // Default-on while keeping the ENABLE_* name: getBoolEnv() treats unset as
+  // false, so parse explicitly here instead of changing the public helper.
+  std::string s = triton::tools::getStrEnv("TRITON_HCU_ENABLE_DS_READ_M");
+  if (s.empty())
+    return true;
+  if (auto v = triton::tools::isEnvValueBool(s))
+    return *v;
+  return true;
+}
+
 struct MatrixLoadInfo {
   triton::MatrixLoadOp matrixOp;
   bool isKMajor;
@@ -1007,6 +1020,28 @@ public:
       tilesPerWarp[nIndex] = tileN/instN;
       warpsPerTile = warpsPerTileMFMA(dotOp, retShape, numWarps, {tileM, tileN});
     }
+
+    // ds_read_m on buffer-load B (not MLS): tileN=32 panel, same split as MLS.
+    // b16 -> K=16; b8 -> K=32.
+    bool dsReadMDot = false;
+    unsigned bits =
+        aElemType.isIntOrFloat() ? aElemType.getIntOrFloatBitWidth() : 0;
+    unsigned dsKPerTile = bits == 16 ? 16 : bits == 8 ? 32 : 0;
+    int64_t bK = oldBType.getShape()[0];
+    int64_t bN = oldBType.getShape()[1];
+    if (isDsReadMEnabled() && !useMatrixLoad && rank == 2 && mDim == 16 &&
+        nDim == 16 && dsKPerTile && kDim == dsKPerTile &&
+        bElemType.isIntOrFloat() &&
+        bElemType.getIntOrFloatBitWidth() == bits && bK >= dsKPerTile &&
+        bK % dsKPerTile == 0 && bN >= 32 && bN % 32 == 0 &&
+        bN == retShape[1] && oldAType.getShape()[1] == bK) {
+      unsigned tileM = mDim, tileN = 32;
+      tilesPerWarp = {tileM / mDim, tileN / nDim}; // {1, 2}
+      warpsPerTile =
+          warpsPerTileMFMA(dotOp, retShape, numWarps, {tileM, tileN});
+      dsReadMDot = true;
+    }
+
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
       mfmaAccType = rewriter.getIntegerType(32);
@@ -1021,8 +1056,8 @@ public:
     auto is16BitElemTy = (aElemTy.isF16() || aElemTy.isBF16());
     // Match AMD chained-dot transpose selection, but materialize the choice
     // through mmacLayout on HCU instead of encoding isTransposed=true.
-    if (mfmaVersion >= 3 && is16BitElemTy && mDim == 16 && nDim == 16 &&
-        rank == 2 && !hasPreShuffledScale &&
+    if (!dsReadMDot && mfmaVersion >= 3 && is16BitElemTy &&
+        mDim == 16 && nDim == 16 && rank == 2 && !hasPreShuffledScale &&
         !useMatrixLoad && (features & HCUISAFeature::MMAC_LAYOUT) != 0) {
       if (isChainDotHead(dotOp, 0u) &&
           retShape.front() >= 16 * 2 * warpsPerTile.front() &&

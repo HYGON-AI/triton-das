@@ -508,6 +508,9 @@ class amd_knobs(base_knobs):
     buffer_ops_analyze_small_tensor_range: env_bool = env_bool("AMDGCN_ANALYZE_SMALL_TENSOR_RANGE", False)
     emit_buffer_ops_offset_assert: env_bool = env_bool("TRITON_AMDGPU_EMIT_BUFFER_OPS_OFFSET_ASSERT", False)
     buffer_cache_swizzle: env_bool = env_bool("TRITON_BUFFER_CACHE_SWIZZLE", False)
+    # HCU ds_read_m for N-major B; default on. C++ also treats unset as enabled
+    # (getBoolEnv cannot express default-true). Assigning this knob setenv's the var.
+    enable_ds_read_m: env_bool = env_bool("TRITON_HCU_ENABLE_DS_READ_M", True)
     optimize_epilogue: env_bool = env_bool("OPTIMIZE_EPILOGUE", False)
     dump_amdgcn: env_bool = env_bool("AMDGCN_ENABLE_DUMP")
     libhip_path: env_opt_str = env_opt_str("TRITON_LIBHIP_PATH")

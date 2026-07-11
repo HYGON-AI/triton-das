@@ -47,6 +47,9 @@ void adjustModeRegister(ModuleOp mod, const AMD::TargetInfo &targetInfo);
 void populateHCUDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                     RewritePatternSet &patterns,
                                     PatternBenefit benefit);
+void populateDsReadMToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                   RewritePatternSet &patterns,
+                                   PatternBenefit benefit);
 } // namespace mlir::triton::HCU
 
 namespace {
@@ -260,6 +263,8 @@ struct ConvertTritonHCUToLLVM
     populatePatterns7(mlir::triton::populateGatherOpToLLVMPatterns,
                       commonBenefit);
 
+    HCU::populateDsReadMToLLVMPatterns(typeConverter, patterns,
+                                        MLSBenefit + 1);
     AMD::populateMemoryOpToLLVMPatterns(typeConverter, patterns, targetInfo,
                                         AMDBenefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,

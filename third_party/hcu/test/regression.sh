@@ -14,6 +14,7 @@ pytest_cases=(
   "${hcu_file_path}/rmsnorm.py"
   "${hcu_file_path}/fused-attention.py"
   "${hcu_file_path}/mls-unit-test.py"
+  "${hcu_file_path}/gemm-ds-read-m.py"
   "${hcu_file_path}/test_elementwise_fma.py"
   "${hcu_file_path}/test_amd_buffer_ops_4gb.py"
   "${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"
