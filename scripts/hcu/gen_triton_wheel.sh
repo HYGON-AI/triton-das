@@ -61,6 +61,8 @@ mkdir ~/.triton/
 cd ~/.triton/
 wget http://10.16.1.201:8000/Jenkins/CompileDep/triton/nvidia.3.6.x.tar.gz
 tar -zxf nvidia.3.6.x.tar.gz
+wget http://10.16.1.201:8000/Jenkins/CompileDep/triton/json-v3.11.3.tar.gz
+tar -zxf json-v3.11.3.tar.gz
 cd $CUR_PATH/../../
 
 for python_app in ${PYTHON_LIST[@]}; do
