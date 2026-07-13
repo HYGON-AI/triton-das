@@ -164,7 +164,15 @@ class Hcutuner(Autotuner):
             del kwargs['warmup']
             return self.warmup(*args, **kwargs)
 
+        old_threshold = os.getenv("TRITON_AUTO_DNS_THRESHOLD", None)
+        # temporarily disable auto do-not-specialize to avoid affecting the tuning result
+        os.environ["TRITON_AUTO_DNS_THRESHOLD"] = "0"
+
         ret = super().run(*args, **kwargs)
+
+        # restore the original threshold
+        if old_threshold:
+            os.environ["TRITON_AUTO_DNS_THRESHOLD"] = old_threshold
 
         # got new config
         if (hasattr(self, 'configs_timings') and self.configs_timings) or len(self.configs) == 1:
@@ -213,12 +221,17 @@ class Hcutuner(Autotuner):
         """
         key_name, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
         node_key = f"{self._fn_name}-{str(key)}-{str(uuid.uuid4()).replace('-', '_')}"
+        if triton_version_float >= 3.5:
+            asm_files = [Path(p) for c, p in compiled.metadata_group.items() if not c.endswith(".json")]
+            kernel_path = os.path.dirname(str(asm_files[0]))
+        else:
+            kernel_path = os.path.basename(compiled.perf_ir_path)
         if node_key not in graph_step_cache:
             graph_step_cache[node_key] = {
                 'key': key_name,
                 'config': self.best_config.all_kwargs(),
                 'timings': self._configs_timings[key],
-                'path': os.path.basename(compiled.perf_ir_path),
+                'path': kernel_path,
             }
 
     def cache_config(self, *args, **kwargs):

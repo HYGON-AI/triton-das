@@ -10,6 +10,7 @@ class MPMark(triton.testing.Mark):
                 run_id = str(uuid.uuid4()) # random run_id for multiprocessing
                 save_path = os.path.join(save_path, run_id)
                 os.makedirs(save_path, exist_ok=True)
+            self._save_path = save_path
         return super().run(show_plots=show_plots, print_data=print_data, save_path=save_path,
                            return_df=return_df, **kwargs)
 

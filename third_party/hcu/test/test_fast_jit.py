@@ -45,7 +45,7 @@ def test_fast_jit(device):
     assert os.path.isfile(fpath)
 
     with open(fpath) as fp:
-        data = json.load(fp)
+        data = json.load(fp)['cache']
 
     keys = list(data.keys())
     assert len(keys) == 1
@@ -91,7 +91,7 @@ def test_jit_key(device, key):
     assert os.path.isfile(fpath)
 
     with open(fpath) as fp:
-        data = json.load(fp)
+        data = json.load(fp)['cache']
 
     keys = list(data.keys())
     assert len(keys) == 1
@@ -293,3 +293,77 @@ def test_fast_jit_err_json_file(device):
     # compile kernel by triton.jit
     fn[(4, )](x, y, out, 4, 4)
     triton.testing.assert_close(out, x + y)
+
+
+@pytest.mark.parametrize('device', ['cuda'])
+def test_fast_jit_auto_do_not_specialize(monkeypatch, device):
+    monkeypatch.setenv("TRITON_AUTO_DNS_THRESHOLD", "0")
+
+    @triton.jit
+    def add_kernel_do_not_specialize(
+        in_ptr0,
+        in_ptr1,
+        out_ptr,
+        n_elements,
+        BLOCK_SIZE: "tl.constexpr",
+    ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(in_ptr0 + offsets, mask=mask)
+        y = tl.load(in_ptr1 + offsets, mask=mask)
+        output = x + y
+        tl.store(out_ptr + offsets, output, mask=mask)
+
+    fn = add_kernel_do_not_specialize
+
+    x = torch.randn(4, device=device)
+    y = torch.randn(4, device=device)
+    out = torch.zeros_like(x)
+    kernels = set()
+    # compile kernel by triton.jit
+    # TRITON_AUTO_SPECIALIZE_THRESHOLD=0, disable auto-do-not-specialize
+    kernels.add(fn[(4, )](x, y, out, 4, 4).hash)
+    kernels.add(fn[(4, )](x, y, out, 8, 4).hash)
+    kernels.add(fn[(4, )](x, y, out, 12, 4).hash)
+    kernels.add(fn[(4, )](x, y, out, 32, 4).hash)
+    triton.testing.assert_close(out, x + y)
+    kernels.add(fn[(4, )](x, y, out, 64, 4).hash)
+    kernels.add(fn[(4, )](x, y, out, 128, 4).hash)
+
+    fpath = f"{get_saved_kernel_cache_dir()}/add_kernel_do_not_specialize-{get_saved_kernel_cache_hash(fn)}.json"
+    with open(fpath) as fp:
+        assert len(json.load(fp)['dns']) == 0
+
+    monkeypatch.setenv("TRITON_AUTO_DNS_THRESHOLD", "5")
+
+    fn = triton.jit(add_kernel_do_not_specialize.fn)
+
+    kernels.add(fn[(4, )](x, y, out, 4, 8).hash)
+    triton.testing.assert_close(out, x + y)
+    kernels.add(fn[(4, )](x, y, out, 16, 16).hash)
+    kernels.add(fn[(4, )](x, y, out, 32, 32).hash)
+    kernels.add(fn[(4, )](x, y, out, 64, 64).hash)
+
+    fpath = f"{get_saved_kernel_cache_dir()}/add_kernel_do_not_specialize-{get_saved_kernel_cache_hash(fn)}.json"
+    with open(fpath) as fp:
+        assert len(json.load(fp)['dns']) == 0
+
+    # TRITON_AUTO_SPECIALIZE_THRESHOLD=5, n_elements has now accumulated 5 distinct values,
+    # so it do-not-specialize
+    new_kernel = fn[(4, )](x, y, out, 8, 4).hash # the new kernel
+
+    fpath = f"{get_saved_kernel_cache_dir()}/add_kernel_do_not_specialize-{get_saved_kernel_cache_hash(fn)}.json"
+    with open(fpath) as fp:
+        assert json.load(fp)['dns'] == ["n_elements"]
+
+    new_kernels = set()
+    new_kernels.add(fn[(4, )](x, y, out, 7, 4).hash)
+    triton.testing.assert_close(out, x + y)
+    new_kernels.add(fn[(4, )](x, y, out, 8, 4).hash)
+    triton.testing.assert_close(out, x + y)
+    new_kernels.add(fn[(4, )](x, y, out, 100, 4).hash)
+    triton.testing.assert_close(out, x + y)
+    assert len(new_kernels) == 1 and new_kernels.pop() == None, f"No new kernel should be generation after auto do-not-specialize!"
+    assert new_kernel not in kernels, f"The new kernel should be not in the previous kernel! {new_kernel} vs. {kernels}"

@@ -61,6 +61,8 @@ build:triton-wheel:
     - pip install dist/*manylinux*.whl
     - export HIP_VISIBLE_DEVICES=$(CIsmi need 1 --timeout ${CISMI_TIMEOUT})
     - bash third_party/hcu/test/regression.sh
+    - python -m pytest -s third_party/hcu/test/test_hcutuner.py
+    - python -m pytest -s third_party/hcu/test/test_fast_jit.py
   artifacts:
     paths:
       - dist/*.whl
