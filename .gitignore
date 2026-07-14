@@ -93,3 +93,8 @@ docs/sg_execution_times.rst
 
 # macOS
 .DS_Store
+
+# HCU perf compare
+third_party/aiter/
+perf_reports/
+.cache/
