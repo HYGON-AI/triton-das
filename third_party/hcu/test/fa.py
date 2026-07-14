@@ -183,7 +183,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
         K_ptr += BLOCK_N * stride_kn
     return acc, l_i, m_i
 
-'''
 @triton.jit
 def _attn_fwd_inner_mls(acc, l_i, m_i, q,
                     K_ptr, V_ptr,
@@ -195,82 +194,62 @@ def _attn_fwd_inner_mls(acc, l_i, m_i, q,
                     pre_load_v: tl.constexpr,
                     qk_scale: tl.constexpr,
                     p_descale: tl.constexpr):
-    # range of values handled by this stage
-    #STAGE==1是为了当casual=true时非mask部分
+    tl.assume(stride_vtk >= 0)
+    tl.assume(stride_vtn >= 0)
+    tl.assume(stride_kk >= 0)
+    tl.assume(stride_kn >= 0)
+    tl.assume(start_m >= 0)
+    tl.assume(N_CTX >= 0)
     if STAGE == 1:
         lo, hi = 0, start_m * BLOCK_M
-    #STAGE==2是与STAGE==1相对应的，当casual=true时，计算非mask部分。
     elif STAGE == 2:
         lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
         lo = tl.multiple_of(lo, BLOCK_M)
-    # causal = False
     else:
         lo, hi = 0, N_CTX
-    #研究这段代码我们可以直接先按照causal=false的情况分析，
-    #Q已经拿到数据块了，是[BLOCK_M,BLOCK_DMODEL]大小的矩阵，然后循环处理K，V，
-    #从0到N_CTX每次去BLOCK_N宽度，既k每次取[BLOCK_DMODEL,BLOCK_N],V每次取[BLOCK_N,BLOCK_DMODEL]
-    #这个地方就是我们公式中所描述的分块累加既f(1),f(2),L(1),L(2)的计算。
-    #目前要循环N=4096/BLOCK_N次，既我们会有N个局部最大值。
-    # loop over k, v and update accumulator
-    for start_n in range(lo, hi, BLOCK_N):
+    # MLS loads + WASP on the KV loop.
+    for start_n in tl.range(lo, hi, BLOCK_N, warp_specialize=True):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        # -- compute qk ----
         k = tl.matrix_load(
-            base=K_ptr,
-            shape=(BLOCK_DMODEL, N_CTX),
-            strides=(stride_kk, stride_kn),
-            offsets=(0, start_n),
-            block_shape=(BLOCK_DMODEL, BLOCK_N)
+            K_ptr,
+            shape=[BLOCK_DMODEL, N_CTX],
+            strides=[stride_kk, stride_kn],
+            block_shape=[BLOCK_DMODEL, BLOCK_N],
+            offsets=[0, start_n],
         )
-
         if pre_load_v:
             v = tl.matrix_load(
-                base=V_ptr,
-                shape=(N_CTX, BLOCK_DMODEL),
-                strides=(stride_vtk, stride_vtn),
-                offsets=(start_n, 0),
-                block_shape=(BLOCK_N, BLOCK_DMODEL)
+                V_ptr,
+                shape=[N_CTX, BLOCK_DMODEL],
+                strides=[stride_vtk, stride_vtn],
+                block_shape=[BLOCK_N, BLOCK_DMODEL],
+                offsets=[start_n, 0],
             )
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         if STAGE == 2:
             mask = offs_m[:, None] >= (start_n + offs_n)
             qk = tl.where(mask, qk, float("-inf"))
         qk += tl.dot(q, k)
-        
-        # Apply FP8 scaling (qk_scale already includes sm_scale * 1.44269504)
         qk = qk * qk_scale
-        
-        #找出当前块以及之前的所有块中最大的值。
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
-        #求出公式中的Xi-Mn
         qk = qk - m_ij[:, None]
-        #求局部的P
         p = tl.math.exp2(qk)
         l_ij = tl.sum(p, 1)
-        # -- update output accumulator --
-        #这都是公式中的变换e(m1-m2)
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not pre_load_v:
             v = tl.matrix_load(
-                base=V_ptr,
-                shape=(N_CTX, BLOCK_DMODEL),
-                strides=(stride_vtk, stride_vtn),
-                offsets=(start_n, 0),
-                block_shape=(BLOCK_N, BLOCK_DMODEL)
+                V_ptr,
+                shape=[N_CTX, BLOCK_DMODEL],
+                strides=[stride_vtk, stride_vtn],
+                block_shape=[BLOCK_N, BLOCK_DMODEL],
+                offsets=[start_n, 0],
             )
-        # Apply FP8 descaling (p_descale is 1.0 / p_scale)
         p = p * p_descale
         acc += tl.dot(p.to(v.dtype), v)
-        # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
-        # update m_i and l_i
         m_i = m_ij
-        #循环都最后就可以求出整行的最大值m_i和分母l_i了
-        #V_ptr += BLOCK_N
-        #K_ptr += BLOCK_N
     return acc, l_i, m_i
-'''
 
 
 # We don't run auto-tuning everytime to keep the tutorial fast. Uncommenting
@@ -384,7 +363,18 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     
     # load q: it will stay in SRAM throughout on NV GPUs but in VGPRs on AMD GPUs
     #分割数据块Q，每个线程块分配的数据块大小为[BLOCK_M,BLOCK_DMODEL]
-    q = tl.load(Q + q_offset + offs_m[:, None] * stride_qm + tl.arange(0, BLOCK_DMODEL)[None, :] * stride_qk)
+    # USE_MLS: Q also uses matrix_load (opIdx=0 / mls_shared), matching K/V.
+    if USE_MLS:
+        q = tl.matrix_load(
+            Q + q_offset,
+            shape=[N_CTX, BLOCK_DMODEL],
+            strides=[stride_qm, stride_qk],
+            block_shape=[BLOCK_M, BLOCK_DMODEL],
+            offsets=[start_m * BLOCK_M, 0],
+        )
+    else:
+        q = tl.load(Q + q_offset + offs_m[:, None] * stride_qm +
+                    tl.arange(0, BLOCK_DMODEL)[None, :] * stride_qk)
     #直接先把scale先融入到Q中，这样后面的计算直接不用写那么繁琐了。
     #q = (q * qk_scale).to(q.dtype)
     # stage 1: off-band
@@ -402,28 +392,48 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
         offs_n = offs_n_broad
 
     if STAGE & 1:
-        acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q,
-                                        K_ptr, V_ptr,
-                                        stride_vtk, stride_vtn, stride_kk, stride_kn,
-                                        start_m,
-                                        BLOCK_M, BLOCK_DMODEL, BLOCK_N,
-                                        4 - STAGE, offs_m, offs_n, N_CTX,
-                                        pre_load_v,
-                                        qk_scale, 1.0 / p_scale)
+        if USE_MLS:
+            acc, l_i, m_i = _attn_fwd_inner_mls(acc, l_i, m_i, q,
+                                            K_ptr, V_ptr,
+                                            stride_vtk, stride_vtn, stride_kk, stride_kn,
+                                            start_m,
+                                            BLOCK_M, BLOCK_DMODEL, BLOCK_N,
+                                            4 - STAGE, offs_m, offs_n, N_CTX,
+                                            pre_load_v,
+                                            qk_scale, 1.0 / p_scale)
+        else:
+            acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q,
+                                            K_ptr, V_ptr,
+                                            stride_vtk, stride_vtn, stride_kk, stride_kn,
+                                            start_m,
+                                            BLOCK_M, BLOCK_DMODEL, BLOCK_N,
+                                            4 - STAGE, offs_m, offs_n, N_CTX,
+                                            pre_load_v,
+                                            qk_scale, 1.0 / p_scale)
     # stage 2: on-band
     #计算受到mask影响的数据块。
     if STAGE & 2:
         # barrier makes it easier for compielr to schedule the
         # two loops independently
         tl.debug_barrier()
-        acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q,
-                                    K_ptr, V_ptr,
-                                    stride_vtk, stride_vtn, stride_kk, stride_kn,
-                                    start_m,
-                                    BLOCK_M, BLOCK_DMODEL, BLOCK_N,
-                                    2, offs_m, offs_n, N_CTX,
-                                    pre_load_v,
-                                    qk_scale, 1.0 / p_scale)
+        if USE_MLS:
+            acc, l_i, m_i = _attn_fwd_inner_mls(acc, l_i, m_i, q,
+                                        K_ptr, V_ptr,
+                                        stride_vtk, stride_vtn, stride_kk, stride_kn,
+                                        start_m,
+                                        BLOCK_M, BLOCK_DMODEL, BLOCK_N,
+                                        2, offs_m, offs_n, N_CTX,
+                                        pre_load_v,
+                                        qk_scale, 1.0 / p_scale)
+        else:
+            acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q,
+                                        K_ptr, V_ptr,
+                                        stride_vtk, stride_vtn, stride_kk, stride_kn,
+                                        start_m,
+                                        BLOCK_M, BLOCK_DMODEL, BLOCK_N,
+                                        2, offs_m, offs_n, N_CTX,
+                                        pre_load_v,
+                                        qk_scale, 1.0 / p_scale)
     # epilogue
     # write back m
     acc = acc * acc_scale
@@ -1379,14 +1389,22 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, config_list, USE_FP8=False, 
     os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
     torch.manual_seed(20)
     
-    # Create test data. Patterned (non-constant) K/V for load checks.
-    # Duplicate Q within each BLOCK_M=64 tile so MMA main (rows 0-31) and
-    # MMA tail (rows 32-63) see identical Q; with shared K/V their results
-    # should match, which makes itrace store comparison straightforward.
+    # Fixed Q/K/V for itrace debugging (IT0): easy-to-recognize fp16 values.
+    # Q is duplicated within each BLOCK_M tile so WDRA main/tail MMA see the
+    # same Q rows; with shared K/V their partial results should match.
+    # K[n,d] = (n+1)*0.01 + d*0.001; V[n,d] = (n+1)*0.02 + d*0.002
+    # (fp16 hex is stable — match itrace load results via 3rd-column ID).
     dtype = torch.float32 if USE_FP8 else torch.float16
-    q = torch.randn((Z, Q_H, N_CTX, D_HEAD), dtype=dtype, device="cpu")
-    for tile_start in range(0, N_CTX, 64):
-        q[:, :, tile_start + 32:tile_start + 64, :] = q[:, :, tile_start:tile_start + 32, :]
+    block_m = int(config_list.get("BLOCK_M", 64)) if isinstance(config_list, dict) else 64
+    half = block_m // 2
+    q = torch.full((Z, Q_H, N_CTX, D_HEAD), 1.0, dtype=dtype, device="cpu")
+    # Distinct but still duplicated across main/tail halves of each M-tile.
+    for tile_start in range(0, N_CTX, block_m):
+        mid = tile_start + half
+        end = min(tile_start + block_m, N_CTX)
+        # rows [tile, mid): 1.0; mirror into [mid, end)
+        q[:, :, tile_start:mid, :] = 1.0
+        q[:, :, mid:end, :] = q[:, :, tile_start:tile_start + (end - mid), :]
     n = torch.arange(N_CTX, dtype=torch.float32).view(1, 1, N_CTX, 1)
     d = torch.arange(D_HEAD, dtype=torch.float32).view(1, 1, 1, D_HEAD)
     k = ((n + 1) * 0.01 + d * 0.001).expand(Z, K_H, N_CTX, D_HEAD).to(dtype).contiguous()

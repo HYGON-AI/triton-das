@@ -1,6 +1,7 @@
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/MMAv5PipelineUtility.h"
@@ -13,6 +14,7 @@ using namespace mlir;
 using namespace triton;
 using namespace triton::gpu;
 namespace ttng = triton::nvidia_gpu;
+namespace tta = triton::amdgpu;
 
 // Find the users of an operation in the for loop, including future iterations
 static SmallVector<Operation *> findUsers(scf::ForOp loop, Operation *op) {
@@ -193,22 +195,49 @@ static std::optional<WarpSchedule> getInitialSchedule(scf::ForOp loop) {
   Partition *loadPartition = schedule.addPartition(0);
 
   // Find loads to pipeline.
+  // Supported producers:
+  //   - tt.load (+ local_alloc/local_store path)
+  //   - amdgpu.matrix_load_to_local (MLS: global→LDS directly, no local_store)
   SmallVector<Operation *> loadsAndAllocs;
   for (Operation &op : loop.getOps()) {
-    // Only buffer loads are supported at the moment.
-    if (!isa<LoadOp>(op))
+    if (isa<LoadOp>(op)) {
+      schedule.trySchedule(loadPartition, &op);
+      loadsAndAllocs.push_back(&op);
+
+      for (Operation *user : findUsers(loop, &op)) {
+        if (auto alloc = dyn_cast<LocalAllocOp>(user)) {
+          schedule.trySchedule(loadPartition, alloc);
+          loadsAndAllocs.push_back(alloc);
+        } else if (isa<ttng::TMEMAllocOp>(user)) {
+          schedule.trySchedule(loadPartition, user);
+          loadsAndAllocs.push_back(user);
+        }
+      }
+      continue;
+    }
+
+    auto mlsLoad = dyn_cast<tta::MatrixLoadToLocalOp>(op);
+    if (!mlsLoad)
       continue;
     schedule.trySchedule(loadPartition, &op);
     loadsAndAllocs.push_back(&op);
 
-    SharedEncodingTrait sharedEnc = getSharedEncoding(&op);
+    // MLS dest is an empty local_alloc; keep it in the load partition.
+    if (auto alloc = mlsLoad.getDest().getDefiningOp<LocalAllocOp>()) {
+      schedule.trySchedule(loadPartition, alloc);
+      loadsAndAllocs.push_back(alloc);
+    }
+    // Async commit/wait after matrix_load_to_local stay with the load warps.
     for (Operation *user : findUsers(loop, &op)) {
-      if (auto alloc = dyn_cast<LocalAllocOp>(user)) {
-        schedule.trySchedule(loadPartition, alloc);
-        loadsAndAllocs.push_back(alloc);
-      } else if (isa<ttng::TMEMAllocOp>(user)) {
-        schedule.trySchedule(loadPartition, user);
-        loadsAndAllocs.push_back(user);
+      if (!isa<AsyncCommitGroupOp>(user))
+        continue;
+      schedule.trySchedule(loadPartition, user);
+      loadsAndAllocs.push_back(user);
+      for (Operation *waitUser : findUsers(loop, user)) {
+        if (isa<AsyncWaitOp>(waitUser)) {
+          schedule.trySchedule(loadPartition, waitUser);
+          loadsAndAllocs.push_back(waitUser);
+        }
       }
     }
   }

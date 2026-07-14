@@ -17,6 +17,11 @@ endif()
 
 add_subdirectory(lib)
 
+# DataPartition (core TritonGPUTransforms) reselects MLS tiles for WDRA slices.
+if(TARGET TritonGPUTransforms)
+  target_link_libraries(TritonGPUTransforms PUBLIC TritonHCUTransforms)
+endif()
+
 if(TRITON_BUILD_PYTHON_MODULE)
   find_package(LLD REQUIRED CONFIG PATHS "${LLD_DIR}" NO_DEFAULT_PATH)
   include_directories(${LLD_INCLUDE_DIRS})

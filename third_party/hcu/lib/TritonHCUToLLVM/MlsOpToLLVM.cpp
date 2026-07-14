@@ -68,13 +68,32 @@ Value getLinearWarpId(Location loc, RewriterBase &rewriter,
   unsigned warpSize = targetInfo.getWarpSize();
   assert(warpSize == 64);
 
+  // Prefer computing warp id at the current insertion point. Hoisting to the
+  // function entry is invalid when the consumer lives in an IsolatedFromAbove
+  // region (e.g. ttg.warp_specialize partition), which is the MLS+WASP path.
   auto insertPt = rewriter.saveInsertionPoint();
-  Operation *parentOp = insertPt.getBlock()->getParentOp();
-  while (!isa<LLVM::LLVMFuncOp>(parentOp))
-    parentOp = parentOp->getParentOp();
+  Block *curBlock = insertPt.getBlock();
+  bool inIsolatedRegion = false;
+  if (curBlock) {
+    Operation *parentOp = curBlock->getParentOp();
+    while (parentOp && !isa<LLVM::LLVMFuncOp, triton::FuncOp>(parentOp)) {
+      if (parentOp->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+        inIsolatedRegion = true;
+        break;
+      }
+      parentOp = parentOp->getParentOp();
+    }
+  }
 
-  auto funcOp = cast<LLVM::LLVMFuncOp>(parentOp);
-  rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+  if (!inIsolatedRegion) {
+    Operation *parentOp = curBlock->getParentOp();
+    while (parentOp && !isa<LLVM::LLVMFuncOp>(parentOp))
+      parentOp = parentOp->getParentOp();
+    if (auto funcOp = dyn_cast_or_null<LLVM::LLVMFuncOp>(parentOp)) {
+      rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+    }
+  }
+
   auto entryBuilder = TritonLLVMOpBuilder(loc, rewriter);
   Value threadId = getThreadId(rewriter, loc);
   Value warpId = entryBuilder.udiv(threadId, entryBuilder.i32_val(warpSize));
@@ -1131,7 +1150,16 @@ private:
            "mls tile kdim and shape kdim should be divisible!");
 
     unsigned mlsNumRepK = shapeE[kDimIdx] / mlsTile[kDimIdx2D];
-    unsigned mlsNumRepNonK = mfmaTileNumRepNonK;
+    // One MFMA "tile" may cover multiple MLS tiles along non-K when
+    // tilesPerWarp > 1 (e.g. WDRA M-split repaired to tilesPerWarp=[2,1]
+    // with mlsTile M=16 and MFMA tile M=32). Count MLS reps from the MFMA
+    // tile coverage, not from mfmaTileNumRep alone.
+    unsigned mfmaTileNonKExtent =
+        mfmaInstrsPerWarpNonK * mfmaInstrNonK; // == getMfmaTile()[nonK] typically
+    assert(mfmaTileNonKExtent % mlsTile[nonKDimIdx2D] == 0 &&
+           "MFMA tile extent must be a multiple of MLS tile along non-K");
+    unsigned mlsPerMfmaTileNonK = mfmaTileNonKExtent / mlsTile[nonKDimIdx2D];
+    unsigned mlsNumRepNonK = mfmaTileNumRepNonK * mlsPerMfmaTileNonK;
     SmallVector<unsigned> mlsNumReps{mlsNumRepNonK, mlsNumRepK};
     if (opIdx == 1) {
       std::swap(mlsNumReps[0], mlsNumReps[1]);
@@ -1161,7 +1189,14 @@ private:
                                     dsInsnAttr.instrShape[nonKDimIdx2D] / iWarpSize) / (isB4PackedDotOperand ? 2 : 1);
     unsigned totalElemsMfma = repB * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems;
     unsigned totalElemsMls  = repB * mlsNumRepNonK * mlsNumRepK * dsLoadsPerK * numOfElemsPerDsInsn;
-    assert(totalElemsMfma == totalElemsMls);
+    // WDRA M-split can leave MFMA tilesPerWarp sized for the full parent tile
+    // while MLS only covers the sliced shape. Emit loads for the MLS coverage
+    // and zero-pad the remaining MFMA register lanes so packLLElements matches
+    // the DotOperand layout (avoids unrealized_conversion_cast).
+    assert(totalElemsMls > 0);
+    assert(totalElemsMfma >= totalElemsMls &&
+           totalElemsMfma % totalElemsMls == 0 &&
+           "MFMA register file must be an integer multiple of MLS coverage");
 
     SmallVector<Value> loadedValues(totalElemsMfma);
     for (int batchIdx = 0; batchIdx < repB; ++batchIdx) {
@@ -1169,7 +1204,8 @@ private:
       Value batchOffset = b.mul(b.i32_val(operandSize),
                               b.add(warpIdInBatch, b.i32_val(batchIdx * warpsPerBatch)));
       for (int mlsNonK = 0; mlsNonK < mlsNumRepNonK; ++mlsNonK) {
-        int mfmaTileNonKIdx = mlsNonK;
+        int mfmaTileNonKIdx = mlsNonK / static_cast<int>(mlsPerMfmaTileNonK);
+        int mlsIdxInMfmaTile = mlsNonK % static_cast<int>(mlsPerMfmaTileNonK);
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
           int mfmaTileKIdx = mlsKIdx * (mlsTile[kDimIdx2D] / mfmaTileK);
 
@@ -1197,7 +1233,9 @@ private:
             unsigned elemsPerGroup = unpackedValues.size() / mfmaGroupPerDsInsn;
 
             for (int i = 0; i < mfmaGroupPerDsInsn; ++i) {
-              int mfmaInsnNonKIdxInTile = loadNonKIdx * mfmaGroupPerDsInsn + i;
+              int mfmaInsnNonKIdxInTile =
+                  mlsIdxInMfmaTile * static_cast<int>(mlsTile[nonKDimIdx2D] / mfmaInstrNonK) +
+                  loadNonKIdx * mfmaGroupPerDsInsn + i;
               int mfmaInsnKIdxInTile = loadKIdx * mfmaKStridePerDsInsn;
               unsigned groupOffset = batchIdx * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems /* batch idx */ +
                                      mfmaTileNonKIdx * mfmaInstrsPerWarpNonK * numRepK * numOfElems /* block idx*/ +
@@ -1211,6 +1249,26 @@ private:
           }
         }
       }
+    }
+
+    // Zero-fill MFMA lanes not covered by the sliced MLS footprint.
+    Value zeroPad;
+    for (unsigned i = 0; i < loadedValues.size(); ++i) {
+      if (loadedValues[i])
+        continue;
+      if (!zeroPad) {
+        Type elemLLVMTy;
+        for (Value v : loadedValues) {
+          if (v) {
+            elemLLVMTy = v.getType();
+            break;
+          }
+        }
+        assert(elemLLVMTy && "MLS LocalLoad produced no values");
+        zeroPad = rewriter.create<LLVM::ConstantOp>(
+            loc, elemLLVMTy, rewriter.getZeroAttr(elemLLVMTy));
+      }
+      loadedValues[i] = zeroPad;
     }
 
     assert(loadedValues.size() == totalElemsMfma);

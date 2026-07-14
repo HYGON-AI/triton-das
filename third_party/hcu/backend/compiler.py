@@ -523,7 +523,12 @@ class HIPBackend(BaseBackend):
             global_prefetch = 1
 
         async_copy_single_buffer = options.async_copy_use_single_buffer and (options.num_stages == 2 and not global_prefetch)
-        hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, async_copy_single_buffer)
+        # When WASP is enabled, skip MLS software pipelining (same rationale as
+        # skipping amd stream_pipeline): WASP owns multi-buffering / sync for
+        # matrix_load_to_local. Running mls_stream_pipeline first injects scf.if
+        # epilogue peeling that PartitionLoopsHCU cannot handle.
+        if not options.wasp_enabled:
+            hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, async_copy_single_buffer)
 
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
@@ -814,10 +819,19 @@ class HIPBackend(BaseBackend):
         # features = '-real-true16' if 'gfx11' in options.arch else ''
         # amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
         #                                False)
+        # Staging LLVM renamed MLS matrix_load intrinsics to lowercase (32x16),
+        # but the PMD/deployed ROCm clang (1464499b74) still expects uppercase
+        # (32X16). Without this rewrite, clang treats them as external calls and
+        # hsaco linking fails with undefined symbol llvm.hcu.matrix.load.*.
+        src = re.sub(
+            r"llvm\.hcu\.matrix\.load\.(\d+)x(\d+)\.",
+            r"llvm.hcu.matrix.load.\1X\2.",
+            str(src),
+        )
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix=".ll", delete=False) as f:
                 llir_file = f.name
-                f.write(str(src))
+                f.write(src)
 
             asm_file = tempfile.mktemp(suffix=".amdgcn")
 

@@ -624,8 +624,13 @@ LogicalResult partitionLoop(scf::ForOp loop) {
   // All ops in opsToClone are epilogue ops in the same block after wgOp.
   // After cloning them into the MMA partitions, the originals should no longer
   // execute, so we erase them unconditionally in reverse order.
-  for (Operation *op : llvm::reverse(opsToClone))
+  // Ops with regions were skipped above; do not erase them (would leave
+  // dangling uses, e.g. scf.if from MLS stream pipeline).
+  for (Operation *op : llvm::reverse(opsToClone)) {
+    if (op->getNumRegions() != 0)
+      continue;
     op->erase();
+  }
 
   // Some ops in opsToErase might already have been erased as part of
   // opsToClone. Guard on getBlock() to avoid double-erasing.

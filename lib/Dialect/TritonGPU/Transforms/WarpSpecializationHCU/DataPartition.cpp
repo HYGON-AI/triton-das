@@ -14,14 +14,18 @@
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "triton/Analysis/Utility.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "TritonHCU/MlsGroup.h"
 
 using namespace mlir;
 using namespace mlir::triton;
 using namespace mlir::triton::gpu;
 namespace ttng = mlir::triton::nvidia_gpu;
+namespace tta = mlir::triton::amdgpu;
+namespace hcuMls = mlir::triton::HCU;
 
 namespace mlir {
   namespace hcu {
@@ -45,17 +49,31 @@ namespace mlir {
       return asyncTaskIds;
     }
 
+    // Read the real async_task_id attribute (may be empty for load-partition
+    // ops). Used when cloning MLS producers so they stay out of MMA partitions.
+    SmallVector<AsyncTaskId> getAsyncTaskIdsFromAttr(Operation *op) {
+      SmallVector<AsyncTaskId> asyncTaskIds;
+      if (auto attr = op->getAttrOfType<DenseI32ArrayAttr>("async_task_id")) {
+        for (AsyncTaskId asyncTaskId : attr.asArrayRef()) {
+          if (asyncTaskIds.empty() || asyncTaskIds.back() != asyncTaskId)
+            asyncTaskIds.push_back(asyncTaskId);
+        }
+      }
+      return asyncTaskIds;
+    }
+
     bool hasAsyncTaskId(Operation *op, AsyncTaskId asyncTaskId) {
       return llvm::is_contained(hcu::getAsyncTaskIds(op), asyncTaskId);
     }
 
     void setAsyncTaskIds(Operation *op, ArrayRef<AsyncTaskId> asyncTaskIds) {
+      if (asyncTaskIds.empty()) {
+        op->removeAttr("async_task_id");
+        return;
+      }
       SmallVector<AsyncTaskId> sortedAsyncTaskIds(asyncTaskIds.begin(),
                                                   asyncTaskIds.end());
       sort(sortedAsyncTaskIds);
-      auto i32Ty = IntegerType::get(op->getContext(), 32);
-      auto size = static_cast<int64_t>(sortedAsyncTaskIds.size());
-      auto vecTy = VectorType::get(size, i32Ty);
       op->setAttr("async_task_id",
                   DenseI32ArrayAttr::get(op->getContext(), sortedAsyncTaskIds));
     }
@@ -207,6 +225,8 @@ struct DataPartitionScheme {
   DenseMap<Operation *, SetVector<unsigned>> rematerializedOps;
   // Ops should not be partitioned due to rematerialization.
   DenseSet<Operation *> opsToSkip;
+  // Shared (noOp) MLS write chain: clone once across WDRA consumer offsets.
+  DenseMap<Operation *, Operation *> sharedMlsClones;
 
   // op with noOpPartitionDim will be duplicated instead of partitioned.
   // Use -2 to avoid conflict with Empty/Tombstone value.
@@ -223,6 +243,8 @@ struct DataPartitionScheme {
       rematerializedOps.insert(op);
     for (auto op : other.opsToSkip)
       opsToSkip.insert(op);
+    for (auto &kv : other.sharedMlsClones)
+      sharedMlsClones.insert(kv);
   }
 
   bool partitionIsCompatible() { return true; }
@@ -303,10 +325,440 @@ static SmallVector<int64_t> getShape(Type type) {
 
 static SmallVector<int64_t> getShape(Value v) { return getShape(v.getType()); }
 
+// Forward declaration: used while collecting MLS producer chains.
+static bool getBackwardSliceToPartition(Value v,
+                                        DataPartitionScheme &partitionScheme,
+                                        unsigned currentDim);
+
+// MLS LDS addressing is paired with ds_read_matrix; memdesc_subslice on
+// mls_shared is invalid.
+//
+// Only the *partitioned* dot operand (A on M-split, B on N-split) needs a
+// per-consumer matrix_load_to_local + LocalAlloc. The other operand stays a
+// shared full-tile MLS write that every WDRA consumer reads.
+static bool isMlsSharedEncoding(Attribute encoding) {
+  return isa_and_nonnull<AMDMlsSharedEncodingAttr>(encoding);
+}
+
+static bool isMlsSharedMemDesc(Type type) {
+  auto memTy = dyn_cast<MemDescType>(type);
+  return memTy && isMlsSharedEncoding(memTy.getEncoding());
+}
+
+static bool isMlsSharedValue(Value v) { return isMlsSharedMemDesc(v.getType()); }
+
+// Identity-map an op in slice mappings (share original across WDRA partitions).
+static void mapOpIdentity(Operation *op, IRMapping &mappings,
+                          IRMapping &reverseMappings) {
+  mappings.map(op, op);
+  reverseMappings.map(op, op);
+  for (Value v : op->getResults()) {
+    mappings.map(v, v);
+    reverseMappings.map(v, v);
+  }
+}
+
+// Recompute warpsPerCTA for a sliced MLS tile (mirrors MlsEncodingInsertion).
+static SmallVector<unsigned>
+warpsPerCTAMatrixLoad(ArrayRef<int64_t> shape, ArrayRef<unsigned> shapePerWarp,
+                      ArrayRef<unsigned> order, int numWarps) {
+  unsigned rank = shape.size();
+  SmallVector<unsigned> warpsPerCTA(rank, 1);
+  if (rank == 0 || order.size() != rank || numWarps <= 0)
+    return warpsPerCTA;
+
+  unsigned remainingWarps = static_cast<unsigned>(numWarps);
+  unsigned prevWarps = 1;
+  for (unsigned d = 0; d + 1 < rank; ++d) {
+    unsigned i = order[d];
+    unsigned maxWarpsInDim =
+        std::max<unsigned>(1, static_cast<unsigned>(shape[i]) / shapePerWarp[i]);
+    warpsPerCTA[i] = std::clamp<unsigned>(remainingWarps, 1, maxWarpsInDim);
+    remainingWarps /= warpsPerCTA[i];
+    prevWarps *= warpsPerCTA[i];
+  }
+  warpsPerCTA[order[rank - 1]] =
+      std::max<unsigned>(1, static_cast<unsigned>(numWarps) / prevWarps);
+  return warpsPerCTA;
+}
+
+// MlsEncodingInsertion accepts a tile only when it divides the tensor and
+// tile*numWarps fits in the tensor volume. Sliced WDRA tiles often inherit a
+// full-tile mlsTile (e.g. 64x64 into 32x64) that violates this — re-select a
+// valid hardware tile from the MLS DB (same candidates as chooseMlsInstruction).
+static bool mlsTileFitsShape(ArrayRef<unsigned> tile, ArrayRef<int64_t> shape,
+                             unsigned numWarps) {
+  if (tile.empty() || tile.size() != shape.size())
+    return false;
+  int64_t tileProd = 1, shapeProd = 1;
+  for (size_t i = 0; i < tile.size(); ++i) {
+    if (tile[i] == 0 || shape[i] <= 0 || shape[i] % tile[i] != 0)
+      return false;
+    tileProd *= tile[i];
+    shapeProd *= shape[i];
+  }
+  return tileProd * static_cast<int64_t>(numWarps) <= shapeProd;
+}
+
+static bool opIdxKMajor(unsigned opIdx, ArrayRef<unsigned> order) {
+  // Mirrors MlsEncodingInsertion / MlsInsn order convention.
+  if (order.size() < 2)
+    return opIdx == 0;
+  return opIdx == 0 ? order[0] == 1 : order[0] == 0;
+}
+
+static SmallVector<unsigned>
+reselectMlsTileForShape(unsigned opIdx, bool kMajor, unsigned bitwidth,
+                        unsigned version, ArrayRef<int64_t> shape,
+                        unsigned numWarps, ArrayRef<unsigned> fallbackTile) {
+  auto cands = hcuMls::MlsInsn::getMlsElemsTileCandidates(
+      opIdx, kMajor, bitwidth, MlsElemBitTyKind::None, version,
+      hcuMls::MlsInterleaveKind::InterleaveNone);
+  SmallVector<unsigned> best;
+  // Largest → smallest (same order as chooseMlsInstruction).
+  for (int i = static_cast<int>(cands.size()) - 1; i >= 0; --i) {
+    unsigned nonK = cands[i].first;
+    unsigned kTile = cands[i].second;
+    SmallVector<unsigned> tile =
+        opIdx == 0 ? SmallVector<unsigned>{nonK, kTile}
+                   : SmallVector<unsigned>{kTile, nonK};
+    if (!mlsTileFitsShape(tile, shape, numWarps))
+      continue;
+    best = tile;
+    int64_t vol = shape[0] * shape[1];
+    if (static_cast<int64_t>(nonK) * kTile * numWarps <= vol)
+      break;
+  }
+  if (!best.empty())
+    return best;
+  // Last resort: keep fallback (caller may still fail downstream).
+  return SmallVector<unsigned>(fallbackTile.begin(), fallbackTile.end());
+}
+
+// When M/N-splitting a dot result, warps*tiles*instr may still describe the
+// full parent tile (e.g. tilesPerWarp=[4,1] after M 64→32). Shrink
+// tilesPerWarp so coverage matches `shape`. Do NOT shrink warpsPerCTA —
+// layouts that already place enough warps on the split dim remain valid
+// after shape slicing alone.
+static Attribute repairMfmaEncodingForShape(Attribute encoding,
+                                            ArrayRef<int64_t> shape) {
+  if (!encoding)
+    return encoding;
+  if (auto mfma = dyn_cast<AMDMfmaEncodingAttr>(encoding)) {
+    SmallVector<unsigned> tiles(mfma.getTilesPerWarp().begin(),
+                                mfma.getTilesPerWarp().end());
+    auto warps = mfma.getWarpsPerCTA();
+    auto instr = mfma.getInstrShape();
+    bool changed = false;
+    unsigned dims = std::min<unsigned>(
+        {static_cast<unsigned>(shape.size()),
+         static_cast<unsigned>(tiles.size()),
+         static_cast<unsigned>(warps.size()),
+         static_cast<unsigned>(instr.size())});
+    for (unsigned d = 0; d < dims; ++d) {
+      if (tiles[d] <= 1 || shape[d] <= 0)
+        continue;
+      int64_t perTile = static_cast<int64_t>(warps[d]) * instr[d];
+      if (perTile <= 0 || shape[d] % perTile != 0)
+        continue;
+      unsigned need = static_cast<unsigned>(shape[d] / perTile);
+      if (need >= 1 && need < tiles[d] && tiles[d] % need == 0) {
+        tiles[d] = need;
+        changed = true;
+      }
+    }
+    if (!changed)
+      return encoding;
+    return AMDMfmaEncodingAttr::get(
+        mfma.getContext(), mfma.getVersion(), mfma.getWarpsPerCTA(),
+        mfma.getInstrShape(), mfma.getIsTransposed(), mfma.getCTALayout(),
+        tiles, mfma.getElementBitWidth(), mfma.getMmacLayout());
+  }
+  if (auto sliceEnc = dyn_cast<SliceEncodingAttr>(encoding)) {
+    // Reconstruct a parent shape: keep dims use `shape`, sliced-out dim uses
+    // the coverage implied by the current parent encoding.
+    auto parent = sliceEnc.getParent();
+    auto parentMfma = dyn_cast<AMDMfmaEncodingAttr>(parent);
+    if (!parentMfma)
+      return encoding;
+    unsigned pRank = parentMfma.getWarpsPerCTA().size();
+    SmallVector<int64_t> parentShape(pRank, 1);
+    auto warps = parentMfma.getWarpsPerCTA();
+    auto tiles = parentMfma.getTilesPerWarp();
+    auto instr = parentMfma.getInstrShape();
+    for (unsigned d = 0; d < pRank; ++d)
+      parentShape[d] = static_cast<int64_t>(warps[d]) * tiles[d] * instr[d];
+    unsigned sliceDim = sliceEnc.getDim();
+    for (unsigned i = 0, j = 0; i < pRank; ++i) {
+      if (i == sliceDim)
+        continue;
+      if (j < shape.size())
+        parentShape[i] = shape[j++];
+    }
+    Attribute newParent = repairMfmaEncodingForShape(parent, parentShape);
+    if (newParent == Attribute(parent))
+      return encoding;
+    return SliceEncodingAttr::get(sliceEnc.getContext(), sliceEnc.getDim(),
+                                  cast<DistributedEncodingTrait>(newParent));
+  }
+  if (auto dotEnc = dyn_cast<DotOperandEncodingAttr>(encoding)) {
+    // DotOperand parent describes C; infer the non-K parent extent from this
+    // operand's non-K shape (A: dim0=M, B: dim1=N). Leave the other parent
+    // dim at its current coverage so we do not invent an M size from B.
+    auto parentMfma = dyn_cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
+    if (!parentMfma || shape.size() < 2)
+      return encoding;
+    unsigned opIdx = dotEnc.getOpIdx();
+    unsigned nonK = opIdx == 0 ? 0 : 1;
+    auto warps = parentMfma.getWarpsPerCTA();
+    auto tiles = parentMfma.getTilesPerWarp();
+    auto instr = parentMfma.getInstrShape();
+    SmallVector<int64_t> parentShape(warps.size(), 1);
+    for (unsigned d = 0; d < warps.size() && d < tiles.size() && d < instr.size();
+         ++d)
+      parentShape[d] = static_cast<int64_t>(warps[d]) * tiles[d] * instr[d];
+    parentShape[nonK] = shape[nonK];
+    Attribute newParent =
+        repairMfmaEncodingForShape(parentMfma, parentShape);
+    if (newParent == Attribute(dotEnc.getParent()))
+      return encoding;
+    return DotOperandEncodingAttr::get(dotEnc.getContext(), dotEnc.getOpIdx(),
+                                       newParent, dotEnc.getKWidth(),
+                                       dotEnc.getMlsScaledExt());
+  }
+  return encoding;
+}
+
+static void setRankedTensorEncoding(Value v, Attribute newEnc) {
+  auto ty = dyn_cast<RankedTensorType>(v.getType());
+  if (!ty || newEnc == ty.getEncoding())
+    return;
+  auto newTy =
+      RankedTensorType::get(ty.getShape(), ty.getElementType(), newEnc);
+  if (auto constOp = v.getDefiningOp<arith::ConstantOp>()) {
+    if (auto valAttr = dyn_cast<DenseElementsAttr>(constOp.getValueAttr())) {
+      // Keep value-attr type and result type identical (verifier requirement).
+      auto newAttr = DenseElementsAttr::get(newTy, valAttr.getSplatValue<Attribute>());
+      constOp.setValueAttr(newAttr);
+      constOp.getResult().setType(newTy);
+      return;
+    }
+  }
+  v.setType(newTy);
+}
+
+// After WDRA shape slicing, MFMA tilesPerWarp may still cover the full parent
+// tile. Repair encodings now that the IR is finalized (original ops cleaned
+// up). All MFMA / SliceEncoding values that share the same MFMA "family"
+// (warps/instr/version/…) must adopt the Dot-repaired tilesPerWarp — the
+// N-side epilogue is not M-sliced so shape-based repair alone would leave
+// tiles[4,1] while broadcast results become tiles[2,1].
+static void repairMfmaTilesAfterPartition(triton::FuncOp funcOp) {
+  SmallVector<Attribute> targetMfmas;
+
+  auto sameMfmaFamily = [](AMDMfmaEncodingAttr a, AMDMfmaEncodingAttr b) {
+    return a.getVersion() == b.getVersion() &&
+           a.getWarpsPerCTA() == b.getWarpsPerCTA() &&
+           a.getInstrShape() == b.getInstrShape() &&
+           a.getIsTransposed() == b.getIsTransposed() &&
+           a.getCTALayout() == b.getCTALayout() &&
+           a.getElementBitWidth() == b.getElementBitWidth() &&
+           a.getMmacLayout() == b.getMmacLayout();
+  };
+
+  auto findTarget = [&](AMDMfmaEncodingAttr mfma) -> Attribute {
+    for (Attribute t : targetMfmas) {
+      auto tm = cast<AMDMfmaEncodingAttr>(t);
+      if (sameMfmaFamily(mfma, tm))
+        return t;
+    }
+    return Attribute();
+  };
+
+  // 1) Repair each tt.dot and record the target MFMA encodings.
+  funcOp.walk([&](Operation *op) {
+    if (!isa<DotOpInterface>(op) || op->getNumOperands() < 3 ||
+        op->getNumResults() < 1)
+      return;
+    auto resTy = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    if (!resTy || !isa<AMDMfmaEncodingAttr>(resTy.getEncoding()))
+      return;
+    auto oldMfma = cast<AMDMfmaEncodingAttr>(resTy.getEncoding());
+    Attribute repaired =
+        repairMfmaEncodingForShape(oldMfma, resTy.getShape());
+    if (repaired == Attribute(oldMfma))
+      return;
+    if (!findTarget(cast<AMDMfmaEncodingAttr>(repaired)))
+      targetMfmas.push_back(repaired);
+
+    setRankedTensorEncoding(op->getResult(0), repaired);
+    Value acc = op->getOperand(2);
+    setRankedTensorEncoding(acc, repaired);
+    if (auto bbArg = dyn_cast<BlockArgument>(acc)) {
+      if (auto forOp = dyn_cast<scf::ForOp>(bbArg.getOwner()->getParentOp())) {
+        unsigned argNo = bbArg.getArgNumber();
+        if (argNo >= 1 && argNo - 1 < forOp.getInitArgs().size()) {
+          unsigned resIdx = argNo - 1;
+          setRankedTensorEncoding(forOp.getInitArgs()[resIdx], repaired);
+          setRankedTensorEncoding(forOp.getResult(resIdx), repaired);
+        }
+      }
+    } else if (auto def = acc.getDefiningOp()) {
+      if (isa<triton::gpu::ConvertLayoutOp>(def) && def->getNumOperands() == 1) {
+        Value src = def->getOperand(0);
+        if (auto srcTy = dyn_cast<RankedTensorType>(src.getType())) {
+          if (isa<AMDMfmaEncodingAttr>(srcTy.getEncoding()))
+            setRankedTensorEncoding(src, repaired);
+        }
+      }
+    }
+    for (unsigned oi : {0u, 1u}) {
+      Value opnd = op->getOperand(oi);
+      auto opndTy = dyn_cast<RankedTensorType>(opnd.getType());
+      if (!opndTy)
+        continue;
+      auto dotEnc = dyn_cast<DotOperandEncodingAttr>(opndTy.getEncoding());
+      if (!dotEnc)
+        continue;
+      auto newDotEnc = DotOperandEncodingAttr::get(
+          dotEnc.getContext(), dotEnc.getOpIdx(), repaired, dotEnc.getKWidth(),
+          dotEnc.getMlsScaledExt());
+      setRankedTensorEncoding(opnd, newDotEnc);
+    }
+  });
+
+  if (targetMfmas.empty())
+    return;
+
+  // 2) Rewrite every MFMA / MFMA-slice / DotOperand in the same family to the
+  // Dot-repaired tilesPerWarp (covers N-side epilogue that was not M-split).
+  auto rewriteEnc = [&](Attribute enc) -> Attribute {
+    if (auto mfma = dyn_cast<AMDMfmaEncodingAttr>(enc)) {
+      Attribute t = findTarget(mfma);
+      return t ? t : enc;
+    }
+    if (auto slice = dyn_cast<SliceEncodingAttr>(enc)) {
+      auto parentMfma = dyn_cast<AMDMfmaEncodingAttr>(slice.getParent());
+      if (!parentMfma)
+        return enc;
+      Attribute t = findTarget(parentMfma);
+      if (!t)
+        return enc;
+      return SliceEncodingAttr::get(slice.getContext(), slice.getDim(),
+                                    cast<DistributedEncodingTrait>(t));
+    }
+    if (auto dotEnc = dyn_cast<DotOperandEncodingAttr>(enc)) {
+      auto parentMfma = dyn_cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
+      if (!parentMfma)
+        return enc;
+      Attribute t = findTarget(parentMfma);
+      if (!t)
+        return enc;
+      return DotOperandEncodingAttr::get(dotEnc.getContext(), dotEnc.getOpIdx(),
+                                         t, dotEnc.getKWidth(),
+                                         dotEnc.getMlsScaledExt());
+    }
+    return enc;
+  };
+
+  funcOp.walk([&](Operation *op) {
+    auto rewriteVal = [&](Value v) {
+      auto ty = dyn_cast<RankedTensorType>(v.getType());
+      if (!ty || !ty.getEncoding())
+        return;
+      Attribute newEnc = rewriteEnc(ty.getEncoding());
+      if (newEnc != ty.getEncoding())
+        setRankedTensorEncoding(v, newEnc);
+    };
+    for (Value v : op->getResults())
+      rewriteVal(v);
+    if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+      for (Value arg : forOp.getRegionIterArgs())
+        rewriteVal(arg);
+    }
+  });
+}
+
+// Retype an MLS LocalAlloc, optionally refreshing mlsTile on the shared
+// encoding so it still divides the sliced matrix dims.
+static MemDescType retypeMlsMemDesc(MemDescType memTy, ArrayRef<int64_t> shape,
+                                    unsigned numWarpsForTile) {
+  Attribute enc = memTy.getEncoding();
+  if (auto shared = dyn_cast_or_null<AMDMlsSharedEncodingAttr>(enc)) {
+    SmallVector<int64_t> matrixShape;
+    if (shape.size() >= 2)
+      matrixShape.assign(shape.end() - 2, shape.end());
+    SmallVector<unsigned> mlsTile(shared.getMlsTile().begin(),
+                                  shared.getMlsTile().end());
+    SmallVector<unsigned> order(shared.getOrder().begin(),
+                                shared.getOrder().end());
+    if (matrixShape.size() == 2 && mlsTile.size() == 2 &&
+        !mlsTileFitsShape(mlsTile, matrixShape, numWarpsForTile)) {
+      bool kMajor = opIdxKMajor(shared.getOpIdx(), order);
+      mlsTile = reselectMlsTileForShape(
+          shared.getOpIdx(), kMajor, shared.getElemBitWidth(),
+          shared.getVersion(), matrixShape, numWarpsForTile, mlsTile);
+    }
+    enc = AMDMlsSharedEncodingAttr::get(
+        memTy.getContext(), shared.getOpIdx(), mlsTile,
+        shared.getElemBitWidth(), shared.getElemBitTyKind(),
+        shared.getAlt2Kind(), shared.getVersion(), shared.getOrder(),
+        shared.getCTALayout());
+  }
+  return MemDescType::get(shape, memTy.getElementType(), enc,
+                          memTy.getMemorySpace(), memTy.getMutableMemory());
+}
+
+// Pull MatrixLoadToLocal (+ async commit/wait) that writes `dest` into the
+// partition scheme. For the partitioned operand, each WDRA consumer rematerializes
+// a matched MLS write/read; for noOp (shared operand) the chain is identity-mapped.
+static bool trackMlsProducerChain(Value dest, DataPartitionScheme &partitionScheme,
+                                  unsigned currentDim) {
+  for (Operation *user : dest.getUsers()) {
+    auto mlsOp = dyn_cast<tta::MatrixLoadToLocalOp>(user);
+    if (!mlsOp)
+      continue;
+    if (!partitionScheme.ops.insert(mlsOp)) {
+      if (partitionScheme.opPartitionDims[mlsOp] != currentDim)
+        return false;
+    } else {
+      partitionScheme.opPartitionDims[mlsOp] = currentDim;
+    }
+    // Async commit/wait that complete the MLS write.
+    for (Operation *commitUser : mlsOp->getUsers()) {
+      auto commit = dyn_cast<AsyncCommitGroupOp>(commitUser);
+      if (!commit)
+        continue;
+      if (partitionScheme.ops.insert(commit))
+        partitionScheme.opPartitionDims[commit] = currentDim;
+      for (Operation *waitUser : commit->getUsers()) {
+        if (!isa<AsyncWaitOp>(waitUser))
+          continue;
+        if (partitionScheme.ops.insert(waitUser))
+          partitionScheme.opPartitionDims[waitUser] = currentDim;
+      }
+    }
+    // Partition index chains that feed the MLS origin (same as tt.load).
+    for (Value idx : mlsOp.getIndices()) {
+      if (!getBackwardSliceToPartition(idx, partitionScheme, currentDim))
+        return false;
+    }
+    if (!getBackwardSliceToPartition(mlsOp.getBase(), partitionScheme,
+                                     currentDim))
+      return false;
+  }
+  return true;
+}
+
 static bool needToSlice(Value v, unsigned dim, int size) {
+  auto shape = getShape(v);
+  // Scalars / non-tensors: nothing to partition. Critical for noOpPartitionDim
+  // — without this, backward slice walks scf.for induction vars and crashes
+  // on getInitArgs()[argNumber-1].
+  if (shape.empty())
+    return false;
   if (dim == DataPartitionScheme::noOpPartitionDim)
     return true;
-  auto shape = getShape(v);
   return shape.size() > dim && shape[dim] > size;
 }
 
@@ -381,7 +833,7 @@ static bool getBackwardSliceToPartition(Value v,
             BroadcastOp, ExpandDimsOp, MakeRangeOp, SplatOp, ConvertLayoutOp,
             LoadOp, TransOp, MemDescTransOp,
             AtomicRMWOp, triton::AddPtrOp, DescriptorLoadOp,
-            LocalLoadOp,
+            LocalLoadOp, AsyncCommitGroupOp, AsyncWaitOp,
             nvidia_gpu::TMEMAllocOp, nvidia_gpu::TMEMLoadOp, FpToFpOp>(op)) {
       for (Value operand : op->getOperands())
         if (!getBackwardSliceToPartition(operand, partitionScheme, currentDim))
@@ -390,18 +842,55 @@ static bool getBackwardSliceToPartition(Value v,
       for (Value operand : op->getOperands())
         if (!getBackwardSliceToPartition(operand, partitionScheme, currentDim))
           return false;
+    } else if (auto mlsOp = dyn_cast<tta::MatrixLoadToLocalOp>(op)) {
+      // Dest is the MLS LDS buffer (LocalAlloc or MemDescIndex view).
+      if (!getBackwardSliceToPartition(mlsOp.getDest(), partitionScheme,
+                                       currentDim))
+        return false;
+      if (!getBackwardSliceToPartition(mlsOp.getBase(), partitionScheme,
+                                       currentDim))
+        return false;
+      for (Value idx : mlsOp.getIndices())
+        if (!getBackwardSliceToPartition(idx, partitionScheme, currentDim))
+          return false;
+      for (Value s : mlsOp.getShape())
+        if (!getBackwardSliceToPartition(s, partitionScheme, currentDim))
+          return false;
+      for (Value s : mlsOp.getStrides())
+        if (!getBackwardSliceToPartition(s, partitionScheme, currentDim))
+          return false;
     } else if (isa<MemDescIndexOp>(op)) {
+      // Stage index peels dim0 of a pipelined alloc; partition dim on the
+      // parent is currentDim+1. Shared (noOp) operands keep noOp on parent.
+      unsigned parentDim =
+          currentDim == DataPartitionScheme::noOpPartitionDim
+              ? currentDim
+              : currentDim + 1;
       for (Value operand : op->getOperands())
-        if (!getBackwardSliceToPartition(operand, partitionScheme, currentDim + 1))
+        if (!getBackwardSliceToPartition(operand, partitionScheme, parentDim))
+          return false;
+      // MLS writers target the stage view; pull them at the tile partition dim
+      // (or noOp for the shared non-partitioned operand).
+      if (isMlsSharedValue(op->getResult(0)))
+        if (!trackMlsProducerChain(op->getResult(0), partitionScheme,
+                                   currentDim))
           return false;
     } else if (auto dotOp = dyn_cast<DotOpInterface>(op)) {
-      if (!getBackwardSliceToPartition(dotOp.getA(), partitionScheme, currentDim))
+      // M-split (dim=0): partition A only; B is a shared full tile.
+      // N-split (dim=1): partition B only; A is shared.
+      unsigned opndIndx = currentDim == 0 ? 0 : 1;
+      partitionScheme.dotPartitionOperand[dotOp] = opndIndx;
+      if (!getBackwardSliceToPartition(dotOp->getOperand(opndIndx),
+                                       partitionScheme, currentDim))
         return false;
-      if (!getBackwardSliceToPartition(dotOp.getB(), partitionScheme, currentDim))
+      unsigned otherOpnd = 1 - opndIndx;
+      if (!getBackwardSliceToPartition(dotOp->getOperand(otherOpnd),
+                                       partitionScheme,
+                                       DataPartitionScheme::noOpPartitionDim))
         return false;
-      if (!getBackwardSliceToPartition(dotOp->getOperand(2), partitionScheme, currentDim))
+      if (!getBackwardSliceToPartition(dotOp->getOperand(2), partitionScheme,
+                                       currentDim))
         return false;
-      partitionScheme.dotPartitionOperand[dotOp] = currentDim == 0 ? 0 : 1;
     } else if (isa<ttng::ReinterpretTensorDescOp, MakeTensorDescOp>(op)) {
       return true;
     } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
@@ -412,6 +901,12 @@ static bool getBackwardSliceToPartition(Value v,
       if (allocOp.getSrc())
         if (!getBackwardSliceToPartition(allocOp.getSrc(), partitionScheme,
                                          currentDim))
+          return false;
+      // Empty MLS buffers: also pull matrix_load_to_local writers (non-pipelined
+      // path where MLS dest is the alloc itself, e.g. FA Q outside the KV loop).
+      if (!allocOp.getSrc() && isMlsSharedMemDesc(allocOp.getType()))
+        if (!trackMlsProducerChain(allocOp.getResult(), partitionScheme,
+                                   currentDim))
           return false;
       return true;
     } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
@@ -458,6 +953,9 @@ static bool getBackwardSliceToPartition(Value v,
         }
       }
       partitionScheme.opPartitionDims[forOp] = currentDim;
+      // Arg 0 is the induction variable — not an iter_arg.
+      if (bbArg.getArgNumber() == 0)
+        return true;
       // track initial value
       auto initArg = forOp.getInitArgs()[bbArg.getArgNumber() - 1];
       if (!getBackwardSliceToPartition(initArg, partitionScheme, currentDim))
@@ -807,10 +1305,20 @@ static void rewriteRematerializedOps(triton::FuncOp &funcOp,
             shape, memdescType.getElementType(), memdescType.getEncoding(),
             memdescType.getMemorySpace(), memdescType.getMutableMemory(),
             allocShape);
-        SmallVector<int32_t> offsets(shape.size(), 0);
-        auto viewOp = builder.createWithAsyncTaskIds<MemDescSubsliceOp>(
-            allocOp.getLoc(), slicedMemdescType, allocOp.getResult(), offsets);
-        newOp = viewOp;
+        // MLS: never memdesc_subslice — clone a dedicated alloc with the sliced
+        // shape so each rematerialized dim owns a matched MLS LDS buffer.
+        if (isMlsSharedMemDesc(memdescType)) {
+          auto clonedTy = MemDescType::get(
+              shape, memdescType.getElementType(), memdescType.getEncoding(),
+              memdescType.getMemorySpace(), memdescType.getMutableMemory());
+          newOp = builder.createWithAsyncTaskIds<LocalAllocOp>(allocOp.getLoc(),
+                                                               clonedTy);
+        } else {
+          SmallVector<int32_t> offsets(shape.size(), 0);
+          auto viewOp = builder.createWithAsyncTaskIds<MemDescSubsliceOp>(
+              allocOp.getLoc(), slicedMemdescType, allocOp.getResult(), offsets);
+          newOp = viewOp;
+        }
       } else if (isa<arith::ConstantOp>(oldOp)) {
         newOp = builder.clone(*oldOp);
       } else {
@@ -941,6 +1449,8 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
                                      type.getShape().end()};
           int sliceSize = shape[dim] / numOfPartitions;
           shape[dim] = sliceSize;
+          // Keep encoding; MFMA tilesPerWarp is repaired after partition
+          // completes (see repairMfmaTilesAfterPartition).
           auto newType = RankedTensorType::get(shape, type.getElementType(),
                                                type.getEncoding());
           newV.setType(newType);
@@ -965,7 +1475,27 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
 
   // slice operands first
   Operation *newOp;
-  if ((dim == DataPartitionScheme::noOpPartitionDim) ||
+  // Shared full-tile MLS (non-partitioned dot operand, e.g. B on M-split):
+  // keep the original alloc / stage view. The matrix_load itself must still be
+  // *cloned* (see MatrixLoadToLocal noOp path) so it survives scf.for takeBody
+  // into the sliced loop — identity-mapping the write drops it from load.
+  if (dim == DataPartitionScheme::noOpPartitionDim) {
+    if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
+      if (!allocOp.getSrc() && isMlsSharedMemDesc(allocOp.getType())) {
+        mapOpIdentity(op, mappings, reverseMappings);
+        return op;
+      }
+    }
+    if (isa<MemDescIndexOp>(op) && isMlsSharedValue(op->getResult(0))) {
+      mapOpIdentity(op, mappings, reverseMappings);
+      return op;
+    }
+  }
+  // Shared MLS writes (MatrixLoadToLocal / AsyncCommit / AsyncWait) must NOT
+  // take this generic noOp clone path: cloneAndSetResultType stamps MMA
+  // sliceTaskIds and bypasses sharedMlsClones dedup. Handle them below.
+  if (((dim == DataPartitionScheme::noOpPartitionDim) &&
+       !isa<tta::MatrixLoadToLocalOp, AsyncCommitGroupOp, AsyncWaitOp>(op)) ||
       op->hasTrait<OpTrait::Elementwise>() ||
       isa<ConvertLayoutOp, BroadcastOp, SplatOp, ExpandDimsOp, FpToFpOp,
           AtomicRMWOp>(op)) {
@@ -974,22 +1504,86 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     newOp = cloneAndSetResultType(op);
   } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
     // Empty pipelined buffers (e.g. matmul A/B: local_alloc : () -> memdesc)
-    // are shared by load (full tile) and MMA (M-sliced). Cloning them creates
-    // extra LDS (192KB instead of 128KB). Keep the original alloc; LocalLoad
-    // creates memdesc_subslice views. Only clone allocs that materialize a
-    // tensor src (e.g. FA P staging: local_alloc %tensor).
-    if (!allocOp.getSrc()) {
-      mappings.map(op, op);
-      reverseMappings.map(op, op);
-      for (Value v : op->getResults()) {
-        mappings.map(v, v);
-        reverseMappings.map(v, v);
-      }
+    // for *swizzled* shared are shared by load (full tile) and MMA (M-sliced).
+    // Keep the original alloc; LocalLoad creates memdesc_subslice views.
+    //
+    // MLS partitioned operand (A on M-split): each consumer gets a dedicated
+    // alloc + matrix_load_to_local. The non-partitioned operand is handled
+    // above via noOpPartitionDim identity map.
+    if (!allocOp.getSrc() && !isMlsSharedMemDesc(allocOp.getType())) {
+      mapOpIdentity(op, mappings, reverseMappings);
       return op;
     }
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
-    newOp = cloneAndSetResultType(op);
+    if (!allocOp.getSrc() && isMlsSharedMemDesc(allocOp.getType())) {
+      // MLS alloc is written by load-partition matrix_load_to_local — keep
+      // original partition/async attrs rather than MMA sliceTaskIds.
+      // Offset 0: retype the original in place (avoids a full-tile orphan
+      // alloc that still gets captured/dealloc'd and inflates LDS).
+      // Offset 1+: clone the already-sliced shape (do not divide again).
+      auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
+      builder.setAsynTaskIdsFromArray(origTaskIds);
+      if (dim != DataPartitionScheme::noOpPartitionDim && offset == 0) {
+        auto memTy = allocOp.getType();
+        SmallVector<int64_t> shape{memTy.getShape().begin(),
+                                   memTy.getShape().end()};
+        assert(dim < shape.size() && "MLS alloc partition dim OOB");
+        shape[dim] = shape[dim] / static_cast<int64_t>(numOfPartitions);
+        // Match MatrixLoad path: half the writer CTA warps per sliced buffer.
+        unsigned oldWarps = 0;
+        auto accumulateWriterWarps = [&](Value v) {
+          for (Operation *user : v.getUsers()) {
+            Operation *mlsUser = user;
+            if (auto idx = dyn_cast<MemDescIndexOp>(user)) {
+              for (Operation *u2 : idx.getResult().getUsers()) {
+                if (isa<tta::MatrixLoadToLocalOp>(u2)) {
+                  mlsUser = u2;
+                  break;
+                }
+              }
+            }
+            if (auto enc = mlsUser->getAttrOfType<tta::MlsEncodingAttr>(
+                    tta::MlsEncodingAttr::getMnemonic())) {
+              unsigned w = 1;
+              for (unsigned x : enc.getWarpsPerCTA())
+                w *= x;
+              oldWarps = std::max(oldWarps, w);
+            }
+          }
+        };
+        accumulateWriterWarps(allocOp.getResult());
+        if (!oldWarps)
+          oldWarps = std::max<unsigned>(1, lookupNumWarps(op));
+        unsigned warpsPerPart =
+            std::max<unsigned>(1, oldWarps / numOfPartitions);
+        auto slicedTy = retypeMlsMemDesc(memTy, shape, warpsPerPart);
+        allocOp.getResult().setType(slicedTy);
+        mapOpIdentity(op, mappings, reverseMappings);
+        builder.setAsynTaskIdsFromArray(sliceTaskIds);
+        return op;
+      }
+      if (dim != DataPartitionScheme::noOpPartitionDim && offset > 0) {
+        builder.setInsertionPoint(op);
+        newOp = builder.clone(*op);
+        hcu::setAsyncTaskIds(newOp, origTaskIds);
+        if (auto partAttr = op->getAttr("ttg.partition"))
+          newOp->setAttr("ttg.partition", partAttr);
+        mappings.map(op, newOp);
+        reverseMappings.map(newOp, op);
+        mappings.map(op->getResult(0), newOp->getResult(0));
+        reverseMappings.map(newOp->getResult(0), op->getResult(0));
+        builder.setAsynTaskIdsFromArray(sliceTaskIds);
+      } else {
+        newOp = cloneAndSetResultType(op);
+        hcu::setAsyncTaskIds(newOp, origTaskIds);
+        if (auto partAttr = op->getAttr("ttg.partition"))
+          newOp->setAttr("ttg.partition", partAttr);
+        builder.setAsynTaskIdsFromArray(sliceTaskIds);
+      }
+    } else {
+      newOp = cloneAndSetResultType(op);
+    }
   } else if (isa<triton::gpu::LocalStoreOp>(op)) {
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
@@ -1125,11 +1719,16 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       // MemDescIndex — view the shared full tile with memdesc_subslice.
       // For LocalAlloc with a tensor src (FA P), recurse so the producer
       // chain is sliced and the cloned alloc is used directly.
+      //
+      // MLS partitioned operand: never memdesc_subslice; slice the producer
+      // chain so each consumer owns a matched write+read pair. Shared MLS
+      // operand (noOp) identity-maps the producer above / via sliceOp(src).
       Value src = localLdOp.getSrc();
       Operation *srcDef = src.getDefiningOp();
       auto srcAlloc = dyn_cast_or_null<LocalAllocOp>(srcDef);
       bool sliceSrcAlloc = srcAlloc && srcAlloc.getSrc();
-      if (sliceSrcAlloc) {
+      bool isMls = isMlsSharedValue(src);
+      if (sliceSrcAlloc || isMls) {
         sliceOp(src, offset, mappings, reverseMappings, partitionScheme);
         if (Value mappedSrc = mappings.lookupOrNull(src))
           mappings.map(localLdOp.getSrc(), mappedSrc);
@@ -1216,21 +1815,232 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     }
   } else if (auto tensorDescOp = dyn_cast<MakeTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
+  } else if (auto mlsOp = dyn_cast<tta::MatrixLoadToLocalOp>(op)) {
+    // Partitioned operand: clone sliced MLS write per consumer.
+    // Shared (noOp) operand: clone full-tile MLS write once (reuse across
+    // consumer offsets) so the write survives for takeBody.
+    // Keep load-partition async_task_id either way.
+    if (dim == DataPartitionScheme::noOpPartitionDim) {
+      if (Operation *existing = partitionScheme.sharedMlsClones.lookup(op)) {
+        mappings.map(op, existing);
+        reverseMappings.map(existing, op);
+        for (auto [oldV, newV] :
+             llvm::zip(op->getResults(), existing->getResults())) {
+          mappings.map(oldV, newV);
+          reverseMappings.map(newV, oldV);
+        }
+        return existing;
+      }
+    }
+    auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
+    builder.setAsynTaskIdsFromArray(origTaskIds);
+
+    sliceOp(mlsOp.getDest(), offset, mappings, reverseMappings, partitionScheme);
+    sliceOp(mlsOp.getBase(), offset, mappings, reverseMappings, partitionScheme);
+    for (Value idx : mlsOp.getIndices())
+      sliceOp(idx, offset, mappings, reverseMappings, partitionScheme);
+    for (Value s : mlsOp.getShape())
+      sliceOp(s, offset, mappings, reverseMappings, partitionScheme);
+    for (Value s : mlsOp.getStrides())
+      sliceOp(s, offset, mappings, reverseMappings, partitionScheme);
+
+    SmallVector<int32_t> newTensorShape(mlsOp.getTensorShape().begin(),
+                                        mlsOp.getTensorShape().end());
+    // Shared (noOp) operand: keep full tensorShape. Partitioned: slice along dim.
+    int sliceSize = 0;
+    if (dim != DataPartitionScheme::noOpPartitionDim) {
+      assert(dim < newTensorShape.size() &&
+             "MLS partition dim exceeds tensorShape rank");
+      sliceSize = newTensorShape[dim] / static_cast<int>(numOfPartitions);
+      newTensorShape[dim] = sliceSize;
+    }
+
+    builder.setInsertionPoint(op);
+    SmallVector<Value> newIndices;
+    for (auto [i, idx] : llvm::enumerate(mlsOp.getIndices())) {
+      Value mapped = mappings.lookupOrNull(idx);
+      if (!mapped)
+        mapped = idx;
+      if (dim != DataPartitionScheme::noOpPartitionDim &&
+          static_cast<unsigned>(i) == dim && offset != 0) {
+        Value offVal = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+            op->getLoc(), offset * sliceSize, 32);
+        mapped = builder.createWithAsyncTaskIds<arith::AddIOp>(op->getLoc(),
+                                                               mapped, offVal);
+      }
+      newIndices.push_back(mapped);
+    }
+
+    SmallVector<Value> newShapeVals;
+    for (Value s : mlsOp.getShape()) {
+      Value mapped = mappings.lookupOrNull(s);
+      newShapeVals.push_back(mapped ? mapped : s);
+    }
+    SmallVector<Value> newStrideVals;
+    for (Value s : mlsOp.getStrides()) {
+      Value mapped = mappings.lookupOrNull(s);
+      newStrideVals.push_back(mapped ? mapped : s);
+    }
+    Value newBase = mappings.lookupOrNull(mlsOp.getBase());
+    if (!newBase)
+      newBase = mlsOp.getBase();
+    Value newDest = mappings.lookupOrNull(mlsOp.getDest());
+    assert(newDest && "MLS dest must be mapped before matrix_load_to_local");
+
+    auto newMlsOp = builder.createWithAsyncTaskIds<tta::MatrixLoadToLocalOp>(
+        op->getLoc(), newBase, newShapeVals, newStrideVals, newTensorShape,
+        newIndices, mlsOp.getBoundaryCheck(), mlsOp.getCache(),
+        mlsOp.getEvict(), mlsOp.getIsVolatile(), newDest);
+    hcu::setAsyncTaskIds(newMlsOp, origTaskIds);
+    // Preserve load-partition assignment from the original MLS write.
+    if (auto partAttr = op->getAttr("ttg.partition"))
+      newMlsOp->setAttr("ttg.partition", partAttr);
+
+    if (auto oldEnc = op->getAttrOfType<tta::MlsEncodingAttr>(
+            tta::MlsEncodingAttr::getMnemonic())) {
+      SmallVector<unsigned> mlsTile(oldEnc.getMlsTile().begin(),
+                                    oldEnc.getMlsTile().end());
+      SmallVector<unsigned> order(oldEnc.getOrder().begin(),
+                                  oldEnc.getOrder().end());
+      unsigned oldWarps = 1;
+      for (unsigned w : oldEnc.getWarpsPerCTA())
+        oldWarps *= w;
+      SmallVector<unsigned> newWarpsPerCTA;
+      if (dim == DataPartitionScheme::noOpPartitionDim) {
+        // Shared full-tile write: keep original warpsPerCTA.
+        newWarpsPerCTA.assign(oldEnc.getWarpsPerCTA().begin(),
+                              oldEnc.getWarpsPerCTA().end());
+      } else {
+        unsigned warpsPerPart =
+            std::max<unsigned>(1, oldWarps / numOfPartitions);
+        SmallVector<int64_t> tileShape(newTensorShape.begin(),
+                                       newTensorShape.end());
+        // Full-tile mlsTile (e.g. 64x64) may not fit the sliced tensor
+        // (e.g. 32x64) — especially when upstream chose a large tile for
+        // transposed-B layouts. Re-select a valid hardware tile.
+        if (!mlsTileFitsShape(mlsTile, tileShape, warpsPerPart)) {
+          bool kMajor = opIdxKMajor(oldEnc.getOpIdx(), order);
+          mlsTile = reselectMlsTileForShape(
+              oldEnc.getOpIdx(), kMajor, oldEnc.getElemBitWidth(),
+              oldEnc.getVersion(), tileShape, warpsPerPart, mlsTile);
+        }
+        newWarpsPerCTA =
+            warpsPerCTAMatrixLoad(tileShape, mlsTile, order, warpsPerPart);
+      }
+      auto newEnc = tta::MlsEncodingAttr::get(
+          op->getContext(), oldEnc.getOpIdx(), mlsTile,
+          oldEnc.getElemBitWidth(), oldEnc.getElemBitTyKind(),
+          oldEnc.getAlt2Kind(), oldEnc.getVersion(), order, newWarpsPerCTA);
+      newMlsOp->setAttr(tta::MlsEncodingAttr::getMnemonic(), newEnc);
+    }
+
+    mappings.map(op, newMlsOp.getOperation());
+    reverseMappings.map(newMlsOp.getOperation(), op);
+    mappings.map(op->getResult(0), newMlsOp.getResult());
+    reverseMappings.map(newMlsOp.getResult(), op->getResult(0));
+    newOp = newMlsOp.getOperation();
+    if (dim == DataPartitionScheme::noOpPartitionDim)
+      partitionScheme.sharedMlsClones[op] = newOp;
+    // Restore builder task ids for subsequent clones in this sliceOp call.
+    builder.setAsynTaskIdsFromArray(sliceTaskIds);
+  } else if (isa<AsyncCommitGroupOp, AsyncWaitOp>(op)) {
+    // Stay with the load-partition task ids of the original op.
+    // Shared MLS async chain: clone once (same as matrix_load).
+    if (dim == DataPartitionScheme::noOpPartitionDim) {
+      if (Operation *existing = partitionScheme.sharedMlsClones.lookup(op)) {
+        mappings.map(op, existing);
+        reverseMappings.map(existing, op);
+        for (auto [oldV, newV] :
+             llvm::zip(op->getResults(), existing->getResults())) {
+          mappings.map(oldV, newV);
+          reverseMappings.map(newV, oldV);
+        }
+        return existing;
+      }
+    }
+    auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
+    builder.setAsynTaskIdsFromArray(origTaskIds);
+    for (Value operand : op->getOperands())
+      sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
+    newOp = cloneAndSetResultType(op);
+    hcu::setAsyncTaskIds(newOp, origTaskIds);
+    if (auto partAttr = op->getAttr("ttg.partition"))
+      newOp->setAttr("ttg.partition", partAttr);
+    if (dim == DataPartitionScheme::noOpPartitionDim)
+      partitionScheme.sharedMlsClones[op] = newOp;
+    builder.setAsynTaskIdsFromArray(sliceTaskIds);
   } else if (auto memDescIndexOp = dyn_cast<MemDescIndexOp>(op)) {
-    // Keep the full stage tile (e.g. 128x128). Do not slice/clone the
-    // underlying empty LocalAlloc — MMA takes an M-subslice later via
-    // LocalLoad's memdesc_subslice, while load still stores the full tile.
+    // Swizzled shared: keep the full stage tile; MMA takes an M-subslice later
+    // via LocalLoad's memdesc_subslice.
+    // MLS partitioned operand: parent alloc is cloned/sliced — retype the stage
+    // view. Shared (noOp) MLS stage views are identity-mapped above.
+    // Keep load-partition attrs on MLS views (written by matrix_load_to_local).
+    Value parent = memDescIndexOp.getSrc();
+    if (isMlsSharedValue(op->getResult(0))) {
+      // Ensure the multi-buffer LocalAlloc is sliced even if it was not in the
+      // partition op set (otherwise each consumer keeps a full-tile LDS alloc).
+      Operation *parentOp = parent.getDefiningOp();
+      if (parentOp && partitionScheme.ops.contains(parentOp)) {
+        sliceOp(parent, offset, mappings, reverseMappings, partitionScheme);
+      } else if (auto parentAlloc =
+                     dyn_cast_or_null<LocalAllocOp>(parentOp)) {
+        if (isMlsSharedMemDesc(parentAlloc.getType()) &&
+            !mappings.contains(parentAlloc)) {
+          unsigned parentDim = dim + 1;
+          auto memTy = cast<MemDescType>(parentAlloc.getType());
+          SmallVector<int64_t> shape(memTy.getShape().begin(),
+                                     memTy.getShape().end());
+          assert(parentDim < shape.size() &&
+                 "MLS parent partition dim out of range");
+          shape[parentDim] = shape[parentDim] / numOfPartitions;
+          auto slicedTy = MemDescType::get(
+              shape, memTy.getElementType(), memTy.getEncoding(),
+              memTy.getMemorySpace(), memTy.getMutableMemory());
+          builder.setInsertionPoint(parentAlloc);
+          auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(parentAlloc);
+          builder.setAsynTaskIdsFromArray(origTaskIds);
+          auto newAlloc = builder.createWithAsyncTaskIds<LocalAllocOp>(
+              parentAlloc.getLoc(), slicedTy);
+          hcu::setAsyncTaskIds(newAlloc, origTaskIds);
+          if (auto partAttr = parentAlloc->getAttr("ttg.partition"))
+            newAlloc->setAttr("ttg.partition", partAttr);
+          mappings.map(parentAlloc.getOperation(), newAlloc.getOperation());
+          reverseMappings.map(newAlloc.getOperation(),
+                              parentAlloc.getOperation());
+          mappings.map(parentAlloc.getResult(), newAlloc.getResult());
+          reverseMappings.map(newAlloc.getResult(), parentAlloc.getResult());
+          builder.setAsynTaskIdsFromArray(sliceTaskIds);
+        }
+      }
+    }
     builder.setInsertionPoint(op);
     newOp = builder.clone(*op, mappings);
-    hcu::setAsyncTaskIds(newOp, sliceTaskIds);
+    if (isMlsSharedValue(op->getResult(0))) {
+      auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
+      hcu::setAsyncTaskIds(newOp, origTaskIds);
+      if (auto partAttr = op->getAttr("ttg.partition"))
+        newOp->setAttr("ttg.partition", partAttr);
+    } else {
+      hcu::setAsyncTaskIds(newOp, sliceTaskIds);
+    }
     mappings.map(op, newOp);
     reverseMappings.map(newOp, op);
     for (auto [oldV, newV] :
          llvm::zip(op->getResults(), newOp->getResults())) {
+      if (isMlsSharedValue(oldV)) {
+        Value mappedParent = mappings.lookupOrNull(memDescIndexOp.getSrc());
+        auto parentTy = cast<MemDescType>(
+            (mappedParent ? mappedParent : memDescIndexOp.getSrc()).getType());
+        SmallVector<int64_t> resultShape(parentTy.getShape().begin() + 1,
+                                         parentTy.getShape().end());
+        // MemDescIndex requires allocShape == shape on both src and result.
+        newV.setType(MemDescType::get(
+            resultShape, parentTy.getElementType(), parentTy.getEncoding(),
+            parentTy.getMemorySpace(), parentTy.getMutableMemory()));
+      }
       mappings.map(oldV, newV);
       reverseMappings.map(newV, oldV);
     }
-    // Intentionally do not retype: result stays full MxK / KxN.
   } else if (auto tensorDescOp = dyn_cast<ttng::ReinterpretTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
   } else if (isa<TransOp, MemDescTransOp>(op)) {
@@ -1277,6 +2087,13 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     Value accumulator = cast<DotOpInterface>(op)->getOperand(2);
     sliceOp(accumulator, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
+    // Keep result type identical to accumulator (shape may diverge if the
+    // ForOp iter-arg path and Dot result path retype differently).
+    if (newOp->getNumOperands() >= 3 && !newOp->getResults().empty()) {
+      Type accTy = newOp->getOperand(2).getType();
+      if (newOp->getResult(0).getType() != accTy)
+        newOp->getResult(0).setType(accTy);
+    }
   } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
     // Add new loop arguments
     SmallVector<Value> newLoopArgs;
@@ -1579,6 +2396,9 @@ static bool doDataPartition(triton::FuncOp &funcOp,
     LDBG("final cleanup failed");
     return false;
   }
+
+  // Shrink MFMA tilesPerWarp that still cover the pre-split tile.
+  repairMfmaTilesAfterPartition(funcOp);
 
   // Make sure original ops are not used
   LLVM_DEBUG({

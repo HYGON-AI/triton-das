@@ -2,6 +2,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
@@ -22,6 +23,7 @@ using namespace mlir;
 using namespace triton;
 using namespace triton::gpu;
 namespace ttng = triton::nvidia_gpu;
+namespace tta = triton::amdgpu;
 
 //===----------------------------------------------------------------------===//
 // getPartitionScheme
@@ -29,9 +31,7 @@ namespace ttng = triton::nvidia_gpu;
 
 namespace {
 struct PipelinedLoad {
-  PipelinedLoad(Operation *loadOp)
-      : loadOp(loadOp), type(getResult().getType()),
-        sharedEnc(getSharedEncoding(loadOp)) {}
+  PipelinedLoad(Operation *loadOp);
 
   TypedValue<RankedTensorType> getResult() const {
     return cast<TypedValue<RankedTensorType>>(loadOp->getResult(0));
@@ -44,6 +44,8 @@ struct PipelinedLoad {
                                    WarpSchedule &schedule);
 
   Operation *loadOp;
+  /// True when loadOp is amdgpu.matrix_load_to_local (global→LDS, no local_store).
+  bool isMls = false;
   RankedTensorType type;
   SharedEncodingTrait sharedEnc;
 
@@ -52,6 +54,43 @@ struct PipelinedLoad {
   SmallVector<std::pair<Operation *, bool>, 0> liveUntilOps;
   SmallVector<Operation *, 1> asyncUsers;
 };
+
+PipelinedLoad::PipelinedLoad(Operation *loadOp) : loadOp(loadOp) {
+  if (auto mls = dyn_cast<tta::MatrixLoadToLocalOp>(loadOp)) {
+    isMls = true;
+    auto memDesc = cast<MemDescType>(mls.getDest().getType());
+    sharedEnc = cast<SharedEncodingTrait>(memDesc.getEncoding());
+    if (auto alloc = mls.getDest().getDefiningOp<LocalAllocOp>())
+      allocOps.push_back(alloc);
+    // Prefer the LocalLoad result type for createAlloc shape/element info.
+    for (Operation *allocOp : allocOps) {
+      for (Operation *user : allocOp->getUsers()) {
+        if (auto localLoad = dyn_cast<LocalLoadOp>(user)) {
+          type = localLoad.getType();
+          return;
+        }
+      }
+    }
+    // No LocalLoad yet; synthesize a ranked tensor type from the memdesc.
+    // createAlloc only needs shape + element type from this.
+    auto ctx = loadOp->getContext();
+    auto order = getOrder(memDesc);
+    auto ctaLayout = getCTALayout(sharedEnc);
+    SmallVector<unsigned> sizePerThread(order.size(), 1);
+    SmallVector<unsigned> threadsPerWarp(order.size(), 1);
+    SmallVector<unsigned> warpsPerCTA(order.size(), 1);
+    if (!threadsPerWarp.empty())
+      threadsPerWarp.back() = 1;
+    type = RankedTensorType::get(
+        memDesc.getShape(), memDesc.getElementType(),
+        BlockedEncodingAttr::get(ctx, sizePerThread, threadsPerWarp,
+                                 warpsPerCTA, order, ctaLayout));
+    return;
+  }
+
+  type = cast<RankedTensorType>(loadOp->getResult(0).getType());
+  sharedEnc = getSharedEncoding(loadOp);
+}
 
 struct PipelinedMMA {
   PipelinedMMA(DotOpInterface mmaOp) : mmaOp(mmaOp) {}
@@ -66,13 +105,28 @@ getPartitionScheme(scf::ForOp loop, const WarpSchedule &schedule) {
   SmallVector<PipelinedMMA> mmas;
 
   for (Operation &op : loop.getOps()) {
-    if (!isa<LoadOp>(op))
+    if (isa<LoadOp>(op)) {
+      auto &load = loads.emplace_back(&op);
+      for (Operation *user : op.getUsers()) {
+        if (schedule.getPartition(user) == schedule.getPartition(&op) &&
+            isa<LocalAllocOp>(user))
+          load.allocOps.push_back(user);
+      }
       continue;
-    auto &load = loads.emplace_back(&op);
-    for (Operation *user : op.getUsers()) {
-      if (schedule.getPartition(user) == schedule.getPartition(&op) &&
-          isa<LocalAllocOp>(user))
-        load.allocOps.push_back(user);
+    }
+    if (auto mls = dyn_cast<tta::MatrixLoadToLocalOp>(op)) {
+      auto &load = loads.emplace_back(&op);
+      // allocOps already populated in PipelinedLoad ctor for MLS; keep only
+      // those scheduled in the load partition.
+      load.allocOps.erase(
+          llvm::remove_if(load.allocOps,
+                          [&](Operation *alloc) {
+                            return schedule.getPartition(alloc) !=
+                                   schedule.getPartition(&op);
+                          }),
+          load.allocOps.end());
+      (void)mls;
+      continue;
     }
   }
 
@@ -183,6 +237,9 @@ findSharedMemorySinkOps(Value value, SmallVectorImpl<Operation *> &sinkOps) {
     } else if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
       if (failed(findSharedMemorySinkOps(user->getResult(0), sinkOps)))
         return failure();
+    } else if (isa<tta::MatrixLoadToLocalOp>(user)) {
+      // MLS producer writing into this buffer; not a consumer sink.
+      continue;
     } else {
       return mlir::emitWarning(user->getLoc(),
                                "failed to warp specialize: cannot handle sink "
@@ -198,20 +255,32 @@ LogicalResult PipelinedLoad::determineLiveRange(Block &container,
                                                 WarpSchedule &schedule) {
   // Find the liveBefore and liveUntil operations of the load.
   llvm::MapVector<Partition *, SmallVector<Operation *>> regSinks, shmemSinks;
-  for (Operation *user : loadOp->getUsers()) {
-    auto it = llvm::find(allocOps, user);
-    if (it == allocOps.end()) {
-      // This is an in-register use of the load. The result must be live before
-      // the op. Since it will be loaded out of shared memory, it only needs to
-      // be live until the op as well.
-      regSinks[schedule.getPartition(user)].push_back(user);
-      continue;
+  if (isMls) {
+    // MLS: tensor never lands in registers from the load op; sinks are
+    // LocalLoads of the destination alloc.
+    for (Operation *allocOp : allocOps) {
+      SmallVector<Operation *> sinkOps;
+      if (failed(findSharedMemorySinkOps(allocOp->getResult(0), sinkOps)))
+        return failure();
+      for (Operation *sinkOp : sinkOps)
+        shmemSinks[schedule.getPartition(sinkOp)].push_back(sinkOp);
     }
-    SmallVector<Operation *> sinkOps;
-    if (failed(findSharedMemorySinkOps((*it)->getResult(0), sinkOps)))
-      return failure();
-    for (Operation *sinkOp : sinkOps)
-      shmemSinks[schedule.getPartition(sinkOp)].push_back(sinkOp);
+  } else {
+    for (Operation *user : loadOp->getUsers()) {
+      auto it = llvm::find(allocOps, user);
+      if (it == allocOps.end()) {
+        // This is an in-register use of the load. The result must be live before
+        // the op. Since it will be loaded out of shared memory, it only needs to
+        // be live until the op as well.
+        regSinks[schedule.getPartition(user)].push_back(user);
+        continue;
+      }
+      SmallVector<Operation *> sinkOps;
+      if (failed(findSharedMemorySinkOps((*it)->getResult(0), sinkOps)))
+        return failure();
+      for (Operation *sinkOp : sinkOps)
+        shmemSinks[schedule.getPartition(sinkOp)].push_back(sinkOp);
+    }
   }
   SetVector<Partition *> userPartitions;
   userPartitions.insert_range(llvm::make_first_range(regSinks));
@@ -383,7 +452,19 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
   Partition &loadPartition = *schedule.getPartition(firstLoad->loadOp);
   PartitionBuilder b(getLoc(), firstLoad->loadOp);
 
-  // Producer acquire.
+  // Producer acquire (empty-buffer try-wait).
+  //
+  // Insertion point must be the earlier of {load, alloc} that still keeps:
+  //   - tt.load path: tryWait AFTER the load (alloc consumes load result, so
+  //     alloc is after load). local_store is placed after tryWait and must see
+  //     the load result.
+  //   - MLS path: tryWait BEFORE matrix_load_to_local (empty alloc is the dest
+  //     and sits before the load). Index selects must be created at the same
+  //     point so they dominate tryWait.
+  Operation *tryWaitInsertPt =
+      firstAllocOp ? firstAllocOp : firstLoad->loadOp;
+  b.setInsertionPoint(tryWaitInsertPt);
+
   StageCluster stageCluster = getStageCluster(firstLoad->loadOp);
   auto intCst = [&](int value) { return b.create<arith::ConstantIntOp>(value, 32); };
   Value curEmptyBarId = intCst(emptyBarIds.back());
@@ -393,8 +474,8 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
     curEmptyBarId = b.create<arith::SelectOp>(
         isFirstStage, intCst(emptyBarIds.front()), curEmptyBarId);
   }
-  b.setInsertionPoint(firstAllocOp);
-  auto tryWaitOp = b.createInto<ROCDL::HCUAbarrierTryWaitOp>(loadPartition, stageCluster, curEmptyBarId, phase);
+  auto tryWaitOp = b.createInto<ROCDL::HCUAbarrierTryWaitOp>(
+      loadPartition, stageCluster, curEmptyBarId, phase);
 
   // Set up the consumer wait. We know the live before ops are the same for all
   // loads since that's how they were grouped.
@@ -432,12 +513,39 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
   }
 
   // 将 Load 的结果放到 loadBuffers 中
+  // - tt.load path: local_store(load_result, view)
+  // - MLS path: retarget matrix_load_to_local dest to view (no local_store)
   SmallVector<Operation *> storeOps;
   for (auto [load, buffer] : llvm::zip(loads, loadBuffers)) {
     b.setInsertionPoint(load.loadOp);
     Value view = createSingleBufferView(b, buffer, index);
+    if (load.isMls) {
+      auto mlsOp = cast<tta::MatrixLoadToLocalOp>(load.loadOp);
+      // Point matrix_load_to_local at the multi-buffered slice, then retire the
+      // per-iteration empty local_alloc.
+      mlsOp.getDestMutable().assign(view);
+      for (Operation *allocOp : load.allocOps) {
+        replaceUsesAndPropagateType(b, allocOp, view);
+        allocOp->erase();
+      }
+      // Treat the async wait (or the MLS op itself) as the end of the "store"
+      // so the ready-barrier arrive is placed after LDS write completion.
+      Operation *completionOp = mlsOp;
+      for (Operation *user : llvm::make_early_inc_range(mlsOp->getUsers())) {
+        if (auto commit = dyn_cast<AsyncCommitGroupOp>(user)) {
+          for (Operation *waitUser : commit->getUsers()) {
+            if (isa<AsyncWaitOp>(waitUser))
+              completionOp = waitUser;
+          }
+        }
+      }
+      storeOps.push_back(completionOp);
+      continue;
+    }
+
     b.setInsertionPointAfter(tryWaitOp);
-    auto storeOp = b.createInto<LocalStoreOp>(loadPartition, stageCluster, load.getResult(), view);
+    auto storeOp = b.createInto<LocalStoreOp>(loadPartition, stageCluster,
+                                              load.getResult(), view);
     storeOps.push_back(storeOp);
     for (Operation *allocOp : load.allocOps) {
       replaceUsesAndPropagateType(b, allocOp, view);
