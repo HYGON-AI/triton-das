@@ -10,21 +10,11 @@ from triton.backends.driver import GPUDriver
 from triton.runtime import _allocation
 from triton.runtime.build import compile_module_from_src
 
-# backends/hcu is a symlink to third_party/hcu/backend. Using dirname/../amd
-# without normpath/realpath walks through the symlink and lands on
-# third_party/hcu/amd (missing). Resolve to the real amd backend includes.
-_backend_dir = os.path.dirname(os.path.realpath(__file__))
-_amd_include = os.path.normpath(os.path.join(_backend_dir, "../../amd/backend/include"))
-_hcu_include = os.path.join(_backend_dir, "include")
-include_dirs = [d for d in (_hcu_include, _amd_include) if os.path.isdir(d)]
-if not include_dirs:
-    # Fallback for non-symlink install layouts (site-packages).
-    dirname = os.path.dirname(__file__)
-    include_dirs = [
-        os.path.normpath(os.path.join(dirname, "include")),
-        os.path.normpath(os.path.join(dirname, "../amd/include")),
-    ]
-dirname = _backend_dir
+dirname = os.path.dirname(__file__)
+include_dirs = [
+    os.path.join(dirname, "include"),
+    os.path.join(dirname, "../amd/include"),
+]
 PyTDMDescriptor = None
 
 

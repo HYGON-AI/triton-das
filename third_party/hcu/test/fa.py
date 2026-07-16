@@ -1389,22 +1389,14 @@ def test_op_fwd(Z, Q_H, K_H, N_CTX, D_HEAD, causal, config_list, USE_FP8=False, 
     os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
     torch.manual_seed(20)
     
-    # Fixed Q/K/V for itrace debugging (IT0): easy-to-recognize fp16 values.
-    # Q is duplicated within each BLOCK_M tile so WDRA main/tail MMA see the
-    # same Q rows; with shared K/V their partial results should match.
-    # K[n,d] = (n+1)*0.01 + d*0.001; V[n,d] = (n+1)*0.02 + d*0.002
-    # (fp16 hex is stable — match itrace load results via 3rd-column ID).
+    # Create test data. Patterned (non-constant) K/V for load checks.
+    # Duplicate Q within each BLOCK_M=64 tile so MMA main (rows 0-31) and
+    # MMA tail (rows 32-63) see identical Q; with shared K/V their results
+    # should match, which makes itrace store comparison straightforward.
     dtype = torch.float32 if USE_FP8 else torch.float16
-    block_m = int(config_list.get("BLOCK_M", 64)) if isinstance(config_list, dict) else 64
-    half = block_m // 2
-    q = torch.full((Z, Q_H, N_CTX, D_HEAD), 1.0, dtype=dtype, device="cpu")
-    # Distinct but still duplicated across main/tail halves of each M-tile.
-    for tile_start in range(0, N_CTX, block_m):
-        mid = tile_start + half
-        end = min(tile_start + block_m, N_CTX)
-        # rows [tile, mid): 1.0; mirror into [mid, end)
-        q[:, :, tile_start:mid, :] = 1.0
-        q[:, :, mid:end, :] = q[:, :, tile_start:tile_start + (end - mid), :]
+    q = torch.randn((Z, Q_H, N_CTX, D_HEAD), dtype=dtype, device="cpu")
+    for tile_start in range(0, N_CTX, 64):
+        q[:, :, tile_start + 32:tile_start + 64, :] = q[:, :, tile_start:tile_start + 32, :]
     n = torch.arange(N_CTX, dtype=torch.float32).view(1, 1, N_CTX, 1)
     d = torch.arange(D_HEAD, dtype=torch.float32).view(1, 1, 1, D_HEAD)
     k = ((n + 1) * 0.01 + d * 0.001).expand(Z, K_H, N_CTX, D_HEAD).to(dtype).contiguous()
