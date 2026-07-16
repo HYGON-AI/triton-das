@@ -825,19 +825,10 @@ class HIPBackend(BaseBackend):
         # features = '-real-true16' if 'gfx11' in options.arch else ''
         # amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
         #                                False)
-        # Staging LLVM renamed MLS matrix_load intrinsics to lowercase (32x16),
-        # but the PMD/deployed ROCm clang (1464499b74) still expects uppercase
-        # (32X16). Without this rewrite, clang treats them as external calls and
-        # hsaco linking fails with undefined symbol llvm.hcu.matrix.load.*.
-        src = re.sub(
-            r"llvm\.hcu\.matrix\.load\.(\d+)x(\d+)\.",
-            r"llvm.hcu.matrix.load.\1X\2.",
-            str(src),
-        )
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix=".ll", delete=False) as f:
                 llir_file = f.name
-                f.write(src)
+                f.write(str(src))
 
             asm_file = tempfile.mktemp(suffix=".amdgcn")
 
