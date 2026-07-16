@@ -103,7 +103,7 @@ class FastJITFunction(_JITFunction):
 
         if self.key:
             if callable(self.key):
-                key = self.key({'dns': list(self._dns_set), **bound_args})
+                key = self.key(bound_args)
             else:
                 key = []
                 for k in self.key:
@@ -139,7 +139,6 @@ class FastJITFunction(_JITFunction):
             self.saved_kernel_cache[key] = kernel_path
             with open(file_path, "w") as f:
                 json.dump({
-                    'dns': list(self._dns_set),
                     'cache': self.saved_kernel_cache,
                     }, f, indent=4)
 
@@ -323,7 +322,6 @@ class FastJITFunction(_JITFunction):
             try:
                 with open(fpath) as f:
                     data = json.load(f)
-                    self._dns_set = set(data['dns'])
                     self.saved_kernel_cache = data['cache']
                 logger.warning(f"{self.saved_cache_key}: Load the saved kernel cache from {fpath}")
             except Exception as e:

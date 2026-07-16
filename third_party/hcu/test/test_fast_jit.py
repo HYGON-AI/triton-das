@@ -331,39 +331,31 @@ def test_fast_jit_auto_do_not_specialize(monkeypatch, device):
     triton.testing.assert_close(out, x + y)
     kernels.add(fn[(4, )](x, y, out, 64, 4).hash)
     kernels.add(fn[(4, )](x, y, out, 128, 4).hash)
-
-    fpath = f"{get_saved_kernel_cache_dir()}/add_kernel_do_not_specialize-{get_saved_kernel_cache_hash(fn)}.json"
-    with open(fpath) as fp:
-        assert len(json.load(fp)['dns']) == 0
+    assert len(fn._dns_set) == 0, f"TRITON_AUTO_SPECIALIZE_THRESHOLD=0, so no auto do-not-specialize should be triggered!"
 
     monkeypatch.setenv("TRITON_AUTO_DNS_THRESHOLD", "5")
 
     fn = triton.jit(add_kernel_do_not_specialize.fn)
-
     kernels.add(fn[(4, )](x, y, out, 4, 8).hash)
+    kernels.add(fn[(4, )](x, y, out, 4, 16).hash)
+    kernels.add(fn[(4, )](x, y, out, 4, 32).hash)
+    kernels.add(fn[(4, )](x, y, out, 4, 64).hash)
+    kernels.add(fn[(4, )](x, y, out, 4, 128).hash)
+    assert len(fn._dns_set) == 0, f"constexpr BLOCK_SIZE should be triggered auto do-not-specialize!"
     triton.testing.assert_close(out, x + y)
-    kernels.add(fn[(4, )](x, y, out, 16, 16).hash)
-    kernels.add(fn[(4, )](x, y, out, 32, 32).hash)
-    kernels.add(fn[(4, )](x, y, out, 64, 64).hash)
-
-    fpath = f"{get_saved_kernel_cache_dir()}/add_kernel_do_not_specialize-{get_saved_kernel_cache_hash(fn)}.json"
-    with open(fpath) as fp:
-        assert len(json.load(fp)['dns']) == 0
 
     # TRITON_AUTO_SPECIALIZE_THRESHOLD=5, n_elements has now accumulated 5 distinct values,
     # so it do-not-specialize
-    new_kernel = fn[(4, )](x, y, out, 8, 4).hash # the new kernel
-
-    fpath = f"{get_saved_kernel_cache_dir()}/add_kernel_do_not_specialize-{get_saved_kernel_cache_hash(fn)}.json"
-    with open(fpath) as fp:
-        assert json.load(fp)['dns'] == ["n_elements"]
+    kernels.add(fn[(4, )](x, y, out, 8, 16).hash)
+    kernels.add(fn[(4, )](x, y, out, 16, 16).hash)
+    kernels.add(fn[(4, )](x, y, out, 32, 32).hash)
+    kernels.add(fn[(4, )](x, y, out, 64, 64).hash) # the new kernel
+    assert len(fn._dns_set) == 1
 
     new_kernels = set()
-    new_kernels.add(fn[(4, )](x, y, out, 7, 4).hash)
+    new_kernels.add(fn[(4, )](x, y, out, 7, 64).hash)
+    new_kernels.add(fn[(4, )](x, y, out, 111, 64).hash)
+    new_kernels.add(fn[(4, )](x, y, out, 100, 64).hash)
     triton.testing.assert_close(out, x + y)
-    new_kernels.add(fn[(4, )](x, y, out, 8, 4).hash)
-    triton.testing.assert_close(out, x + y)
-    new_kernels.add(fn[(4, )](x, y, out, 100, 4).hash)
-    triton.testing.assert_close(out, x + y)
-    assert len(new_kernels) == 1 and new_kernels.pop() == None, f"No new kernel should be generation after auto do-not-specialize!"
-    assert new_kernel not in kernels, f"The new kernel should be not in the previous kernel! {new_kernel} vs. {kernels}"
+    assert len(new_kernels) == 1, f"No new kernel should be generation after auto do-not-specialize!"
+    assert len(fn._dns_set) == 1 and fn._dns_set.pop() == 'n_elements', f"do-not-specialize arg != 'n_elements'!"
