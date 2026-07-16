@@ -27,6 +27,8 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_4("add_accelerate_matmul",
                             mlir::createTritonHCUAccelerateMatmul,
                             const std::string, int, int, int);
+  ADD_PASS_OPTION_WRAPPER_1("add_prepare_wdra_split_plan",
+                            mlir::createTritonHCUPrepareWdraSplitPlan, int);
   m.def("add_to_llvmir",
         [](mlir::PassManager &pm, const std::string &arch, bool ftz) {
           pm.addPass(mlir::triton::createConvertTritonHCUToLLVMPass(arch, ftz));

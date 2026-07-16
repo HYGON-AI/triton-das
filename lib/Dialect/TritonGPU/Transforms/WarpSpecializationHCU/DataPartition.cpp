@@ -19,6 +19,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "TritonHCU/MlsGroup.h"
+#include "TritonHCU/WdraSplitPlan.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -1198,18 +1199,35 @@ static bool computePartitionScheme(triton::FuncOp &funcOp,
       LDBG("partition not possible: shapePerCTA " << shapePerCTA.size());
       return false;
     }
-    int sliceSizeM = shapePerCTA[0] / 2;
-    int sliceSizeN = shapePerCTA[1] / 2;
+    auto wdraPlan = hcuMls::getWdraSplitPlan(op);
+    unsigned requestedFactor = wdraPlan ? wdraPlan->factor : 2;
+    if (requestedFactor != 2) {
+      LDBG("unsupported WDRA split factor " << requestedFactor);
+      return false;
+    }
+    int sliceSizeM = shapePerCTA[0] / requestedFactor;
+    int sliceSizeN = shapePerCTA[1] / requestedFactor;
     SmallVector<unsigned, 2> partitionDim, partitionSize;
 
-    if (sliceSizeM >= 16) {
-      partitionDim.push_back(0);
-      partitionSize.push_back(sliceSizeM);
-    }
+    if (wdraPlan) {
+      unsigned dim = wdraPlan->resultDim;
+      int sliceSize = dim == 0 ? sliceSizeM : sliceSizeN;
+      if (wdraPlan->partitionedOperand != dim || sliceSize < 16) {
+        LDBG("invalid precomputed WDRA split plan");
+        return false;
+      }
+      partitionDim.push_back(dim);
+      partitionSize.push_back(sliceSize);
+    } else {
+      if (sliceSizeM >= 16) {
+        partitionDim.push_back(0);
+        partitionSize.push_back(sliceSizeM);
+      }
 
-    if (sliceSizeN >= 16) {
-      partitionDim.push_back(1);
-      partitionSize.push_back(sliceSizeN);
+      if (sliceSizeN >= 16) {
+        partitionDim.push_back(1);
+        partitionSize.push_back(sliceSizeN);
+      }
     }
 
     if (partitionDim.empty()) {
@@ -1218,9 +1236,9 @@ static bool computePartitionScheme(triton::FuncOp &funcOp,
     }
 
     if (partitionScheme.numPartitions == 0) {
-      partitionScheme.numPartitions = 2;
+      partitionScheme.numPartitions = requestedFactor;
     } else {
-      if (partitionScheme.numPartitions != 2) {
+      if (partitionScheme.numPartitions != requestedFactor) {
         LDBG("partition not possible, in conflict with previous partition\n");
         return false;
       }
@@ -2397,7 +2415,8 @@ static bool doDataPartition(triton::FuncOp &funcOp,
     return false;
   }
 
-  // Shrink MFMA tilesPerWarp that still cover the pre-split tile.
+  // Keep the repair as a compatibility fallback while non-MLS and chained-dot
+  // paths migrate to the source-selected WDRA split plan.
   repairMfmaTilesAfterPartition(funcOp);
 
   // Make sure original ops are not used

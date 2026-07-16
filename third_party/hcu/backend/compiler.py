@@ -495,6 +495,12 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
+        # Record the same per-dot WDRA split intent that DataPartition will
+        # execute later. Accelerate/MLS consume it while their inputs are
+        # still full-tile IR, so selection is constrained by the eventual
+        # per-consumer shape rather than repaired after partitioning.
+        if options.wasp_enabled and options.wdra_enabled:
+            hcu.passes.ttgpuir.add_prepare_wdra_split_plan(pm, 2)
         hcu.passes.ttgpuir.add_accelerate_matmul(pm, options.arch,
                                                  options.matrix_instr_nonkdim,
                                                  options.kpack,

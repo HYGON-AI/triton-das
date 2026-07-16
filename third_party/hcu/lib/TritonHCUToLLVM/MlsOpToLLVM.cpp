@@ -1189,14 +1189,9 @@ private:
                                     dsInsnAttr.instrShape[nonKDimIdx2D] / iWarpSize) / (isB4PackedDotOperand ? 2 : 1);
     unsigned totalElemsMfma = repB * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems;
     unsigned totalElemsMls  = repB * mlsNumRepNonK * mlsNumRepK * dsLoadsPerK * numOfElemsPerDsInsn;
-    // WDRA M-split can leave MFMA tilesPerWarp sized for the full parent tile
-    // while MLS only covers the sliced shape. Emit loads for the MLS coverage
-    // and zero-pad the remaining MFMA register lanes so packLLElements matches
-    // the DotOperand layout (avoids unrealized_conversion_cast).
-    assert(totalElemsMls > 0);
-    assert(totalElemsMfma >= totalElemsMls &&
-           totalElemsMfma % totalElemsMls == 0 &&
-           "MFMA register file must be an integer multiple of MLS coverage");
+    // Every MFMA register lane must be backed by MLS data. A mismatch is an
+    // upstream layout-selection error, not something lowering may pad over.
+    assert(totalElemsMfma == totalElemsMls);
 
     SmallVector<Value> loadedValues(totalElemsMfma);
     for (int batchIdx = 0; batchIdx < repB; ++batchIdx) {
@@ -1249,26 +1244,6 @@ private:
           }
         }
       }
-    }
-
-    // Zero-fill MFMA lanes not covered by the sliced MLS footprint.
-    Value zeroPad;
-    for (unsigned i = 0; i < loadedValues.size(); ++i) {
-      if (loadedValues[i])
-        continue;
-      if (!zeroPad) {
-        Type elemLLVMTy;
-        for (Value v : loadedValues) {
-          if (v) {
-            elemLLVMTy = v.getType();
-            break;
-          }
-        }
-        assert(elemLLVMTy && "MLS LocalLoad produced no values");
-        zeroPad = rewriter.create<LLVM::ConstantOp>(
-            loc, elemLLVMTy, rewriter.getZeroAttr(elemLLVMTy));
-      }
-      loadedValues[i] = zeroPad;
     }
 
     assert(loadedValues.size() == totalElemsMfma);

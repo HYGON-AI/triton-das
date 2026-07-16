@@ -17,6 +17,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonHCU/Utility.h"
+#include "TritonHCU/WdraSplitPlan.h"
 using namespace ::mlir::triton::HCU;
 
 using namespace mlir;
@@ -71,6 +72,15 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   // elem-space dimensions used by MLS tile selection from those logic shapes.
   int64_t logicalK = blockK;
   int64_t logicalNonK = blockNonK;
+  if (auto wdraPlan = HCU::getWdraSplitPlan(dot)) {
+    // Only the operand selected by WDRA is sliced. The other dot operand
+    // remains a shared full tile (e.g. B for an M split).
+    if (wdraPlan->partitionedOperand == static_cast<unsigned>(opIdx)) {
+      auto effectiveShape =
+          HCU::getWdraEffectiveResultShape(dot, *wdraPlan);
+      logicalNonK = effectiveShape[(rank - 2) + opIdx];
+    }
+  }
 
   MlsElemBitTyKind mlsElemBitTyKind = MlsElemBitTyKind::None;
   if (auto dotScaled = dyn_cast<tt::DotScaledOp>(dot.getOperation())) {

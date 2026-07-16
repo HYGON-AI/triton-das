@@ -11,7 +11,9 @@ add_triton_library(TritonHCUTransforms
   MlsStreamPipeline.cpp
   MlsLowering.cpp
   MmacGroup.cpp
+  PrepareWdraSplitPlan.cpp
   UtilityHCU.cpp
+  WdraSplitPlan.cpp
 
   DEPENDS
   TritonHCUPassesIncGen

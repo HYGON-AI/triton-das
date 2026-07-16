@@ -21,6 +21,16 @@ def TritonHCUAccelerateMatmul : Pass<"tritonhcu-accelerate-matmul", "mlir::Modul
   ];
 }
 
+def TritonHCUPrepareWdraSplitPlan
+    : Pass<"tritonhcu-prepare-wdra-split-plan", "mlir::ModuleOp"> {
+  let summary = "Annotate warp-specialized loops with HCU WDRA split plans";
+  let options = [
+    Option<"numConsumerGroups", "num-consumer-groups", "int32_t",
+           /*default=*/"2",
+           "Number of MMA consumer groups that will receive split data.">
+  ];
+}
+
 def TritonHCUMlsStreamPipeline : Pass<"tritonhcu-mls-stream-pipeline", "mlir::ModuleOp"> {
   let summary = "Pipeline MatrixLoad to shared memory async";
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
