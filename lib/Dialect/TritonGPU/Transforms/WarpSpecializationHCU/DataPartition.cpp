@@ -548,13 +548,12 @@ static void setRankedTensorEncoding(Value v, Attribute newEnc) {
   v.setType(newTy);
 }
 
-// After WDRA shape slicing, MFMA tilesPerWarp may still cover the full parent
-// tile. Repair encodings now that the IR is finalized (original ops cleaned
-// up). All MFMA / SliceEncoding values that share the same MFMA "family"
-// (warps/instr/version/…) must adopt the Dot-repaired tilesPerWarp — the
-// N-side epilogue is not M-sliced so shape-based repair alone would leave
-// tiles[4,1] while broadcast results become tiles[2,1].
-static void repairMfmaTilesAfterPartition(triton::FuncOp funcOp) {
+// After WDRA shape slicing, MFMA tilesPerWarp is repaired at retype sites.
+// Values that were not sliced on that dim (e.g. N-side epilogue) can still
+// keep the full-tile tilesPerWarp while the Dot already has the sliced one.
+// Unify every MFMA / SliceEncoding / DotOperand in the same MFMA family to
+// the Dot result encoding.
+static void syncMfmaFamilyEncodings(triton::FuncOp funcOp) {
   SmallVector<Attribute> targetMfmas;
 
   auto sameMfmaFamily = [](AMDMfmaEncodingAttr a, AMDMfmaEncodingAttr b) {
@@ -576,7 +575,8 @@ static void repairMfmaTilesAfterPartition(triton::FuncOp funcOp) {
     return Attribute();
   };
 
-  // 1) Repair each tt.dot and record the target MFMA encodings.
+  // 1) Dot results are authoritative; record their MFMA (shape-repair if any
+  // still needed) and sync accumulator / DotOperand parents.
   funcOp.walk([&](Operation *op) {
     if (!isa<DotOpInterface>(op) || op->getNumOperands() < 3 ||
         op->getNumResults() < 1)
@@ -587,12 +587,11 @@ static void repairMfmaTilesAfterPartition(triton::FuncOp funcOp) {
     auto oldMfma = cast<AMDMfmaEncodingAttr>(resTy.getEncoding());
     Attribute repaired =
         repairMfmaEncodingForShape(oldMfma, resTy.getShape());
-    if (repaired == Attribute(oldMfma))
-      return;
     if (!findTarget(cast<AMDMfmaEncodingAttr>(repaired)))
       targetMfmas.push_back(repaired);
 
-    setRankedTensorEncoding(op->getResult(0), repaired);
+    if (repaired != Attribute(oldMfma))
+      setRankedTensorEncoding(op->getResult(0), repaired);
     Value acc = op->getOperand(2);
     setRankedTensorEncoding(acc, repaired);
     if (auto bbArg = dyn_cast<BlockArgument>(acc)) {
@@ -632,7 +631,7 @@ static void repairMfmaTilesAfterPartition(triton::FuncOp funcOp) {
     return;
 
   // 2) Rewrite every MFMA / MFMA-slice / DotOperand in the same family to the
-  // Dot-repaired tilesPerWarp (covers N-side epilogue that was not M-split).
+  // Dot tilesPerWarp (covers N-side epilogue that was not M-split).
   auto rewriteEnc = [&](Attribute enc) -> Attribute {
     if (auto mfma = dyn_cast<AMDMfmaEncodingAttr>(enc)) {
       Attribute t = findTarget(mfma);
@@ -1467,10 +1466,10 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
                                      type.getShape().end()};
           int sliceSize = shape[dim] / numOfPartitions;
           shape[dim] = sliceSize;
-          // Keep encoding; MFMA tilesPerWarp is repaired after partition
-          // completes (see repairMfmaTilesAfterPartition).
+          Attribute newEnc =
+              repairMfmaEncodingForShape(type.getEncoding(), shape);
           auto newType = RankedTensorType::get(shape, type.getElementType(),
-                                               type.getEncoding());
+                                               newEnc);
           newV.setType(newType);
         } else if (auto type = dyn_cast<TensorDescType>(v.getType())) {
           auto blockType = type.getBlockType();
@@ -1478,8 +1477,10 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
                                      blockType.getShape().end()};
           int sliceSize = shape[dim] / numOfPartitions;
           shape[dim] = sliceSize;
+          Attribute newEnc =
+              repairMfmaEncodingForShape(blockType.getEncoding(), shape);
           auto newBlockType = RankedTensorType::get(
-              shape, blockType.getElementType(), blockType.getEncoding());
+              shape, blockType.getElementType(), newEnc);
           auto newType =
               TensorDescType::get(builder.getContext(), newBlockType);
           newV.setType(newType);
@@ -1635,8 +1636,10 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     auto ld = builder.createWithAsyncTaskIds<triton::nvidia_gpu::TMEMLoadOp>(
         op->getLoc(), newAccType, mappings.lookupOrNull(tmemLdOp.getSrc()));
 
+    Attribute repairedEnc =
+        repairMfmaEncodingForShape(oldRetType.getEncoding(), shape);
     auto newType = RankedTensorType::get(shape, oldRetType.getElementType(),
-                                         oldRetType.getEncoding());
+                                         repairedEnc);
     auto cvtOp = builder.createWithAsyncTaskIds<ConvertLayoutOp>(op->getLoc(),
                                                                  newType, ld);
     auto v = tmemLdOp->getResult(0);
@@ -1705,8 +1708,16 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
                                valType.getShape().end()};
     int sliceSize = shape[dim] / numOfPartitions;
     shape[dim] = sliceSize;
-    auto newValType = valType.clone(shape);
-    auto newValAttr = valAttr.resizeSplat(newValType);
+    Type newValType;
+    if (auto ranked = dyn_cast<RankedTensorType>(valType)) {
+      Attribute newEnc =
+          repairMfmaEncodingForShape(ranked.getEncoding(), shape);
+      newValType = RankedTensorType::get(shape, ranked.getElementType(),
+                                         newEnc);
+    } else {
+      newValType = valType.clone(shape);
+    }
+    auto newValAttr = valAttr.resizeSplat(cast<ShapedType>(newValType));
     newOp = builder.createWithAsyncTaskIds<arith::ConstantOp>(op->getLoc(),
                                                               newValAttr);
     // Do not drop original task id as constant folding may lose one constant.
@@ -2075,8 +2086,10 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
           shape, descType.getElementType(), descType.getEncoding(),
           descType.getMemorySpace(), descType.getMutableMemory());
     } else if (auto tensorType = dyn_cast<RankedTensorType>(v.getType())) {
+      Attribute newEnc =
+          repairMfmaEncodingForShape(tensorType.getEncoding(), shape);
       newType = RankedTensorType::get(shape, tensorType.getElementType(),
-                                      tensorType.getEncoding());
+                                      newEnc);
     } else {
       llvm_unreachable("unsupported type");
     }
@@ -2111,6 +2124,28 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       Type accTy = newOp->getOperand(2).getType();
       if (newOp->getResult(0).getType() != accTy)
         newOp->getResult(0).setType(accTy);
+      // Sync DotOperand parents to the (already shape-repaired) accumulator
+      // MFMA so A/B layouts stay compatible with C after M/N split.
+      auto accRTy = dyn_cast<RankedTensorType>(accTy);
+      if (accRTy && isa<AMDMfmaEncodingAttr>(accRTy.getEncoding())) {
+        Attribute repairedMfma = accRTy.getEncoding();
+        for (unsigned oi : {0u, 1u}) {
+          Value opnd = newOp->getOperand(oi);
+          auto opndTy = dyn_cast<RankedTensorType>(opnd.getType());
+          if (!opndTy)
+            continue;
+          auto dotEnc = dyn_cast<DotOperandEncodingAttr>(opndTy.getEncoding());
+          if (!dotEnc)
+            continue;
+          auto newDotEnc = DotOperandEncodingAttr::get(
+              dotEnc.getContext(), dotEnc.getOpIdx(), repairedMfma,
+              dotEnc.getKWidth(), dotEnc.getMlsScaledExt());
+          if (newDotEnc == Attribute(dotEnc))
+            continue;
+          opnd.setType(RankedTensorType::get(
+              opndTy.getShape(), opndTy.getElementType(), newDotEnc));
+        }
+      }
     }
   } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
     // Add new loop arguments
@@ -2415,9 +2450,9 @@ static bool doDataPartition(triton::FuncOp &funcOp,
     return false;
   }
 
-  // Keep the repair as a compatibility fallback while non-MLS and chained-dot
-  // paths migrate to the source-selected WDRA split plan.
-  repairMfmaTilesAfterPartition(funcOp);
+  // Unify MFMA family encodings for unsliced epilogue values that still carry
+  // full-tile tilesPerWarp after shape-based repair at retype sites.
+  syncMfmaFamilyEncodings(funcOp);
 
   // Make sure original ops are not used
   LLVM_DEBUG({
