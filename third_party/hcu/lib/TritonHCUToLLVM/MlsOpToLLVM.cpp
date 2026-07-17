@@ -1150,16 +1150,7 @@ private:
            "mls tile kdim and shape kdim should be divisible!");
 
     unsigned mlsNumRepK = shapeE[kDimIdx] / mlsTile[kDimIdx2D];
-    // One MFMA "tile" may cover multiple MLS tiles along non-K when
-    // tilesPerWarp > 1 (e.g. WDRA M-split repaired to tilesPerWarp=[2,1]
-    // with mlsTile M=16 and MFMA tile M=32). Count MLS reps from the MFMA
-    // tile coverage, not from mfmaTileNumRep alone.
-    unsigned mfmaTileNonKExtent =
-        mfmaInstrsPerWarpNonK * mfmaInstrNonK; // == getMfmaTile()[nonK] typically
-    assert(mfmaTileNonKExtent % mlsTile[nonKDimIdx2D] == 0 &&
-           "MFMA tile extent must be a multiple of MLS tile along non-K");
-    unsigned mlsPerMfmaTileNonK = mfmaTileNonKExtent / mlsTile[nonKDimIdx2D];
-    unsigned mlsNumRepNonK = mfmaTileNumRepNonK * mlsPerMfmaTileNonK;
+    unsigned mlsNumRepNonK = mfmaTileNumRepNonK;
     SmallVector<unsigned> mlsNumReps{mlsNumRepNonK, mlsNumRepK};
     if (opIdx == 1) {
       std::swap(mlsNumReps[0], mlsNumReps[1]);
@@ -1189,8 +1180,6 @@ private:
                                     dsInsnAttr.instrShape[nonKDimIdx2D] / iWarpSize) / (isB4PackedDotOperand ? 2 : 1);
     unsigned totalElemsMfma = repB * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems;
     unsigned totalElemsMls  = repB * mlsNumRepNonK * mlsNumRepK * dsLoadsPerK * numOfElemsPerDsInsn;
-    // Every MFMA register lane must be backed by MLS data. A mismatch is an
-    // upstream layout-selection error, not something lowering may pad over.
     assert(totalElemsMfma == totalElemsMls);
 
     SmallVector<Value> loadedValues(totalElemsMfma);
@@ -1199,8 +1188,7 @@ private:
       Value batchOffset = b.mul(b.i32_val(operandSize),
                               b.add(warpIdInBatch, b.i32_val(batchIdx * warpsPerBatch)));
       for (int mlsNonK = 0; mlsNonK < mlsNumRepNonK; ++mlsNonK) {
-        int mfmaTileNonKIdx = mlsNonK / static_cast<int>(mlsPerMfmaTileNonK);
-        int mlsIdxInMfmaTile = mlsNonK % static_cast<int>(mlsPerMfmaTileNonK);
+        int mfmaTileNonKIdx = mlsNonK;
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
           int mfmaTileKIdx = mlsKIdx * (mlsTile[kDimIdx2D] / mfmaTileK);
 
@@ -1228,9 +1216,7 @@ private:
             unsigned elemsPerGroup = unpackedValues.size() / mfmaGroupPerDsInsn;
 
             for (int i = 0; i < mfmaGroupPerDsInsn; ++i) {
-              int mfmaInsnNonKIdxInTile =
-                  mlsIdxInMfmaTile * static_cast<int>(mlsTile[nonKDimIdx2D] / mfmaInstrNonK) +
-                  loadNonKIdx * mfmaGroupPerDsInsn + i;
+              int mfmaInsnNonKIdxInTile = loadNonKIdx * mfmaGroupPerDsInsn + i;
               int mfmaInsnKIdxInTile = loadKIdx * mfmaKStridePerDsInsn;
               unsigned groupOffset = batchIdx * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems /* batch idx */ +
                                      mfmaTileNonKIdx * mfmaInstrsPerWarpNonK * numRepK * numOfElems /* block idx*/ +
