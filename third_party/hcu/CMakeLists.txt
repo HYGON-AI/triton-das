@@ -17,9 +17,11 @@ endif()
 
 add_subdirectory(lib)
 
-# DataPartition (core TritonGPUTransforms) reselects MLS tiles for WDRA slices.
+# DataPartition only needs WdraSplitPlan + MlsInsn helpers. Linking the full
+# TritonHCUTransforms PUBLIC would pull AccelerateHCUMatmul (and its AMD-ToLLVM
+# deps) into googletest/other TritonGPUTransforms consumers and break CI.
 if(TARGET TritonGPUTransforms)
-  target_link_libraries(TritonGPUTransforms PUBLIC TritonHCUTransforms)
+  target_link_libraries(TritonGPUTransforms PUBLIC TritonHCUWdraSupport)
 endif()
 
 if(TRITON_BUILD_PYTHON_MODULE)

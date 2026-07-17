@@ -33,6 +33,18 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include <limits>
 
+namespace {
+// Avoid depending on TritonGPUToLLVM (layering / UT link). Same formula as
+// mlir::LLVM::linearize(ArrayRef<unsigned>, ...).
+size_t linearizeIdx(ArrayRef<unsigned> multiDim, ArrayRef<unsigned> shape,
+                    ArrayRef<unsigned> order) {
+  size_t linear = 0;
+  for (unsigned dim : llvm::reverse(order))
+    linear = linear * shape[dim] + multiDim[dim];
+  return linear;
+}
+} // namespace
+
 // clang-format off
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.cpp.inc"
@@ -221,7 +233,7 @@ struct CononicalizeExtractSliceAndConcat
     auto srcToDstShape = LLVM::AMD::multiDimElementwise<int64_t, int64_t>(
         dstShape, srcShape, std::divides<unsigned>());
     auto linearSrcIdx =
-        mlir::LLVM::linearize(multiDimSrcIdx, srcToDstShape, defaultOrder);
+        linearizeIdx(multiDimSrcIdx, srcToDstShape, defaultOrder);
 
     // Replace extract_slice with the concat operand
     assert(linearSrcIdx < concatOp->getNumOperands() &&
@@ -575,7 +587,7 @@ LogicalResult ConcatOp::verify() {
     auto multiDimOperandIdx = LLVM::AMD::multiDimElementwise<int32_t, int64_t>(
         elemCoordsArray, srcShape, std::divides<unsigned>());
     auto linearOperandIdx =
-        mlir::LLVM::linearize(multiDimOperandIdx, srcToDstShape, defaultOrder);
+        linearizeIdx(multiDimOperandIdx, srcToDstShape, defaultOrder);
 
     // 4.   subtract dst coordinates and start coordinates of the tile
 

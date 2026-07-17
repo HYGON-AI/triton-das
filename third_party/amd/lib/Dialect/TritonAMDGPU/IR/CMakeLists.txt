@@ -9,4 +9,6 @@ add_triton_library(TritonAMDGPUIR
   MLIRLLVMDialect
   TritonIR
   TritonGPUIR
+  # Dialect verify uses AMD::getElemCoordinatesFromRegisters / getRegFromCoordinates.
+  TritonAMDUtils
 )
