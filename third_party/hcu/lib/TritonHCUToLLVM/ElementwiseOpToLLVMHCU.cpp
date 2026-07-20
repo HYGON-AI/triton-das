@@ -873,11 +873,11 @@ static ConverterT Fp32_to_Fp8E4M3FN_RTNE(AMD::ISAFamily isaFamily, bool capFP8F3
 static SmallVector<Value>
 Fp32_to_Fp8E5M2_RTNE_SW(Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) {
-  assert(v.size() == 2);
+  assert(v.size() == 4);
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  SmallVector<Value> result(2);
-  for (size_t i = 0; i < 2; ++i) {
+  SmallVector<Value> result(4);
+  for (size_t i = 0; i < 4; ++i) {
     Value fp32 = v[i];
     Value i32 = b.bitcast(fp32, i32_ty);
 

@@ -32,6 +32,7 @@ from triton._internal_testing import (
     is_hip_cdna2,
     is_hip_cdna3,
     is_hip_cdna4,
+    is_hip_hcu,
     is_hip_gfx11,
     is_hip_gfx12,
     is_xpu,
@@ -3253,8 +3254,8 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         if is_hip():
             if in_dtype in ("float8e5", "float8e4nv") and not (is_hip_cdna4() or is_hip_gfx12()):
                 pytest.skip(f"{in_dtype} only supported on CDNA4 and gfx12")
-            if in_dtype in ("float8e5b16", "float8e4b8") and not is_hip_cdna3():
-                pytest.skip(f"{in_dtype} only supported on CDNA3")
+            if in_dtype in ("float8e5b16", "float8e4b8") and (not is_hip_cdna3() or is_hip_hcu()):
+                pytest.skip(f"{in_dtype} only supported on AMD CDNA3 (not HCU)")
             if not ((input_precision in ("bf16x3", "bf16x6")) or (input_precision == "ieee") or
                     (input_precision == "tf32" )):
                 pytest.skip(f"{input_precision} not supported on HIP")
@@ -3413,6 +3414,7 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         return
 
     if is_hip_cdna():
+        return # skip HCU arch check
         amdgcn = pgm.asm['amdgcn']
 
         if (M, N) == (4, 64) or (M, N) == (64, 4):
@@ -3498,6 +3500,8 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
                           for mma in (mma_nonk_sizes if is_hip() else [16])
                           for kpack in ([1, 2] if (is_hip() and not is_hip_cdna4()) else [1])])
 def test_scaled_dot(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, num_warps, mma, kpack, device):
+    if is_hip_hcu():
+        pytest.skip("tl.dot_scaled not supported on HCU")
     is_SM120 = False
     if is_cuda():
         cc = torch.cuda.get_device_capability()
@@ -5689,8 +5693,8 @@ def test_dot_max_num_imprecise_acc(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, in_type_s
             pytest.skip("Dot op does not support fp8e4b15 on CUDA arch >= 90")
     elif is_hip():
         num_stages = 2
-        if in_type_str in ("float8e5b16", "float8e4b8") and not is_hip_cdna3():
-            pytest.skip(f"{in_type_str} only supported on CDNA3")
+        if in_type_str in ("float8e5b16", "float8e4b8") and (not is_hip_cdna3() or is_hip_hcu()):
+            pytest.skip(f"{in_type_str} only supported on AMD CDNA3 (not HCU)")
         if in_type_str in ("float8e5", "float8e4nv") and not (is_hip_cdna4() or is_hip_gfx12()):
             pytest.skip(f"{in_type_str} only supported on CDNA4 or gfx12")
 
@@ -5780,6 +5784,9 @@ def test_override_arch(arch, env_var_override, device, fresh_knobs):
         pytest.skip(f"{arch} arch only for CUDA")
     elif arch.startswith("gfx") and not is_hip():
         pytest.skip(f"{arch} arch only for HIP")
+    # HCU toolchain only knows Hygon arches; AMD override targets are unsupported.
+    if is_hip_hcu() and arch in ("gfx942", "gfx950", "gfx1200"):
+        pytest.skip(f"{arch} override not supported on HCU")
 
     @triton.jit
     def simple(data, out):

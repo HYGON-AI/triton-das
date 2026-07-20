@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 from triton.compiler.errors import CompilationError, CompileTimeAssertionFailure
 import traceback
-from triton._internal_testing import is_cuda, is_hip, is_hip_cdna4
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna4, is_hip_cdna3, is_hip_cdna2, is_hip_hcu
 
 
 def format_exception(type, value, tb):
@@ -354,6 +354,9 @@ def test_where_warning(fresh_triton_cache):
 
 @pytest.mark.parametrize("dtype", [tl.float8e5, tl.float8e5b16, tl.float8e4nv, tl.float8e4b8, tl.float8e4b15])
 def test_fp8_support(fresh_triton_cache, dtype):
+    # FNUZ fp8 not supported on HCU
+    if is_hip() and dtype in (tl.float8e5b16, tl.float8e4b8) and (not is_hip_cdna3() or is_hip_hcu()):
+        pytest.skip("fp8e5b16/fp8e4b8 (FNUZ) not supported on this HCU architecture")
     warning_dtypes = []
     supported_dtypes = [tl.float8e5]
     if is_cuda():
@@ -364,7 +367,9 @@ def test_fp8_support(fresh_triton_cache, dtype):
         if cc >= (8, 9):
             supported_dtypes.append(tl.float8e4nv)
     elif is_hip():
-        supported_dtypes += [tl.float8e4nv, tl.float8e4b8, tl.float8e5b16]
+        supported_dtypes.append(tl.float8e4nv)
+        if is_hip_cdna3() and not is_hip_hcu():
+            supported_dtypes += [tl.float8e4b8, tl.float8e5b16]
         if is_hip_cdna4():
             warning_dtypes += [tl.float8e4b8, tl.float8e5b16]
 

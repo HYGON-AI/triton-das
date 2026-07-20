@@ -263,6 +263,11 @@ def simple_persistent_kernel(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,
 def test_simple_persistent_matmul(BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, DISALLOW_ACC_MULTI_BUFFER, device):
     M, N, K = 1024, 512, 256
     NUM_STAGES = 3
+    # fp16 A/B pipeline tiles; +16KiB margin for persistent/epilogue extras
+    shared_mem_accum = (BLOCK_K * BLOCK_M + BLOCK_K * BLOCK_N) * NUM_STAGES * 2 + 16384
+    shared_mem_avail = triton.runtime.driver.active.utils.get_device_properties(0)["max_shared_mem"]
+    if shared_mem_accum > shared_mem_avail:
+        pytest.skip("Skipped due to insufficient shared memory on this GPU.")
     a = torch.randn(M, K, dtype=torch.float16, device=device)
     b = torch.randn(K, N, dtype=torch.float16, device=device)
     output = torch.empty((M, N), dtype=torch.float16, device=device)

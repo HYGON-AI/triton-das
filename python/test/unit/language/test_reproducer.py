@@ -24,7 +24,8 @@ def test_triton_reproducer_path(monkeypatch, tmp_path):
     stages = {
         'make_ttir': "triton-combine",
         'make_ttgir': "triton.*-coalesce",
-        'make_llir': "convert-triton-.*gpu-to-llvm",
+        # NVIDIA/AMD: convert-triton-(amd)?gpu-to-llvm; HCU: convert-triton-hcu-to-llvm
+        'make_llir': r"convert-triton-.*(gpu|hcu)-to-llvm",
     }
 
     for stage_name, stage_pipeline_check in stages.items():

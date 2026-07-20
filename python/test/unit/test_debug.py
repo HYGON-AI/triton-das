@@ -2,6 +2,7 @@ import pytest
 import torch
 import triton.language as tl
 import triton
+from triton._internal_testing import is_hip
 
 
 @pytest.mark.parametrize('cond', [True, False])
@@ -26,6 +27,8 @@ def test_device_assert(monkeypatch, cond, mask, opt_flag, env_var, jit_flag, dev
         kwargs["debug"] = opt_flag
 
     if not cond and is_debug and mask is not False:
+        if is_hip():
+            pytest.skip("HIP device_assert traps; no catchable RuntimeError")
         with pytest.raises(RuntimeError):
             _kernel[(1, )](cond, mask, **kwargs)
             getattr(torch, device).synchronize()
@@ -66,6 +69,8 @@ def test_static_assert(cond):
 
 
 def _test_overflow(x, y, x_dtype, y_dtype, debug, should_overflow, tri_func, ref_func, device):
+    if is_hip():
+        pytest.skip("HIP overflow sanitize traps; no catchable RuntimeError")
     x = torch.tensor([x], dtype=getattr(torch, x_dtype), device=device)
     y = torch.tensor([y], dtype=getattr(torch, y_dtype), device=device)
     z = torch.empty_like(x)

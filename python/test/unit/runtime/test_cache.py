@@ -632,15 +632,18 @@ def test_within_4gb(device, fresh_triton_cache) -> None:
 
         pointer_range_32 = None
 
+        def _arg_index(k):
+            # attrs dict keys are ObjPath tuples like (0,); normalize to int.
+            return k[0] if isinstance(k, tuple) else k
+
         def cache_hook(*args, **kwargs):
             nonlocal pointer_range_32
             cfg0 = kwargs["compile"]["configs"][0]
             if hasattr(cfg0, "pointer_range_32"):
-                pointer_range_32 = cfg0.pointer_range_32
+                keys = cfg0.pointer_range_32
             else:
-                pointer_range_32 = [
-                    k for k, v in cfg0.items() if isinstance(v, list) and ["tt.pointer_range", 32] in v
-                ]
+                keys = [k for k, v in cfg0.items() if isinstance(v, list) and ["tt.pointer_range", 32] in v]
+            pointer_range_32 = [_arg_index(k) for k in keys]
 
         triton.knobs.runtime.jit_cache_hook = cache_hook
         kernel_add.warmup(torch.float32, grid=(1, ))
@@ -652,10 +655,8 @@ def test_within_4gb(device, fresh_triton_cache) -> None:
         kernel_add[(1, 0)](torch.empty(2**31, dtype=torch.int8, device=device))
         assert pointer_range_32 == [0]
 
-        kernel_add[(1, 0)](torch.empty(2**32 - 2, dtype=torch.int8, device=device))
-        assert pointer_range_32 == [0]
-
-        kernel_add[(1, 0)](torch.empty(2**32 - 1, dtype=torch.int8, device=device))
+        # HIP raw-buffer num_records is 2**32-8; spans at/under that get pointer_range=32.
+        kernel_add[(1, 0)](torch.empty(2**32 - 8, dtype=torch.int8, device=device))
         assert pointer_range_32 == [0]
 
         base = torch.empty(4, 4, dtype=torch.float32, device=device)
@@ -665,6 +666,10 @@ def test_within_4gb(device, fresh_triton_cache) -> None:
         large_storage = torch.empty(2**32 - 1, dtype=torch.int8, device=device)
         kernel_add[(1, 0)](large_storage[:4096])
         assert pointer_range_32 == [0]
+
+        # Over-limit cases last: cache hits for in-limit kernels may not re-run the hook.
+        kernel_add[(1, 0)](torch.empty(2**32 - 7, dtype=torch.int8, device=device))
+        assert len(pointer_range_32) == 0
 
         kernel_add[(1, 0)](torch.empty(2**32, dtype=torch.int8, device=device))
         assert len(pointer_range_32) == 0

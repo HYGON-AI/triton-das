@@ -1,6 +1,6 @@
 import pytest
 import torch
-from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4, is_hip_hcu
 
 
 @pytest.mark.parametrize("m, n, k", [(16, 16, 16), (32, 16, 16), (16, 32, 16), (16, 16, 32)])
@@ -18,8 +18,8 @@ def test_blaslt(m, n, k, dtype_str, device):
         make_handle = lambda workspace: vendor.cublas.CublasLt(workspace)
     elif is_hip():
         from triton._C.libtriton import amd as vendor
-        if dtype_str == "float8_e4m3fnuz" and not is_hip_cdna3():
-            pytest.skip("float8_e4m3fnuz is only supported on HIP CDNA3")
+        if dtype_str == "float8_e4m3fnuz" and (not is_hip_cdna3() or is_hip_hcu()):
+            pytest.skip("float8_e4m3fnuz is only supported on HIP CDNA3 (non-HCU)")
         if dtype_str == "float8_e4m3fn" and not is_hip_cdna4():
             pytest.skip("float8_e4m3fn is only supported on HIP CDNA4")
         c_dtype = torch.float16 if dtype_str in ("float8_e4m3fnuz", "float8_e4m3fn") else dtype

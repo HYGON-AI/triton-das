@@ -826,6 +826,12 @@ def test_tensor_descriptor_batched_gemm_2d_tma(device):
     NUM_SMS = 96
     num_stages = 3
 
+    # A/B pipeline tiles in fp16; skip when over device LDS (e.g. 64KiB on HCU/CDNA3)
+    shared_mem_accum = (BLOCK_K * BLOCK_M + BLOCK_K * BLOCK_N) * num_stages * 2
+    shared_mem_avail = triton.runtime.driver.active.utils.get_device_properties(0)["max_shared_mem"]
+    if shared_mem_accum > shared_mem_avail:
+        pytest.skip("Skipped due to insufficient shared memory on this GPU.")
+
     grid = (min(NUM_SMS, B * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)), )
 
     a = torch.randn((B, M, K), device=device, dtype=torch.float16)

@@ -7,7 +7,7 @@ import pytest
 import triton
 import triton.language as tl
 
-from triton._internal_testing import is_cuda, is_hip, is_hip_cdna2, is_hip_cdna3, is_hip_cdna4, is_hip_gfx12
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna2, is_hip_cdna3, is_hip_cdna4, is_hip_hcu, is_hip_gfx12
 
 
 def matching_int(dtype):
@@ -273,6 +273,10 @@ def upcast_test(src_dtype, dst_dtype, exponent_bits, mantissa_bits, exponent_bia
 ])
 def test_typeconvert_upcast(src_dtype, dst_dtype, device):
 
+    # FNUZ fp8 upcast: AMD CDNA3 only (not HCU)
+    if is_hip() and src_dtype in ('float8e4b8', 'float8e5b16') and (not is_hip_cdna3() or is_hip_hcu()):
+        pytest.skip("FNUZ fp8 upcast not supported on HCU")
+
     # On HIP, fp8e4nv upcasting to fp32 is only supported on CDNA4, and
     # fp8e4nv upcasting to bf16 and fp16 is only supported on CDNA3 and CDNA4.
     if is_cuda():
@@ -332,6 +336,10 @@ def test_typeconvert_upcast(src_dtype, dst_dtype, device):
 ])
 def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
 
+    # FNUZ fp8 downcast: AMD CDNA3 only (not HCU)
+    if is_hip() and (src_dtype in ('float8e4b8', 'float8e5b16') or dst_dtype in ('float8e4b8', 'float8e5b16')) \
+            and (not is_hip_cdna3() or is_hip_hcu()):
+        pytest.skip("FNUZ fp8 downcast not supported on HCU")
     if is_cuda():
         if src_dtype != 'float32' and torch.cuda.get_device_capability(0) < (9, 0):
             pytest.skip("non-float32 downcast tests only supported on NVGPU with compute capability 9.0+")

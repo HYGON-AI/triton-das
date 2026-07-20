@@ -24,6 +24,8 @@ tma_dtypes = sorted(set(dtypes_with_bfloat16) - {"int64", "uint64", "float64"})
 
 HIP_CDNA3_ARCHS = {"gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"}
 HIP_CDNA4_ARCHS = {"gfx946", "gfx950"}
+# Hygon HCU arches (subset also appears in CDNA3/4 lists for shared HIP tests).
+HIP_HCU_ARCHS = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
 
 
 def is_interpreter():
@@ -79,6 +81,11 @@ def is_hip_cdna3():
 def is_hip_cdna4():
     target = get_current_target()
     return target is not None and target.backend == 'hip' and target.arch in HIP_CDNA4_ARCHS
+
+
+def is_hip_hcu():
+    target = get_current_target()
+    return target is not None and target.backend == 'hip' and target.arch in HIP_HCU_ARCHS
 
 
 def is_hip_gfx11():

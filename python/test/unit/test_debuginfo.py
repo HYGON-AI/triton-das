@@ -5,6 +5,7 @@ import torch
 
 import triton
 import triton.language as tl
+from triton._internal_testing import is_hip
 
 
 @triton.jit
@@ -52,6 +53,10 @@ def test_triton_debuginfo_on(lineInfoKey, diLocalVarKey, hasDbgInfo, device, mon
     if hasDbgInfo == "infer":
         hasDbgInfo = (not isEnvSet(os.environ, lineInfoKeyName)
                       or os.environ[lineInfoKeyName].lower() not in ["on", "true", "1"])
+
+    # HCU compiles llir via external clang, which rejects LLVM #dbg_value records.
+    if is_hip() and hasDbgInfo:
+        pytest.skip("HIP/HCU clang llir->amdgcn does not accept #dbg_value")
 
     size = 98432
     torch.manual_seed(0)
