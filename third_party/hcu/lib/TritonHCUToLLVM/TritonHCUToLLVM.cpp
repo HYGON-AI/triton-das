@@ -37,7 +37,7 @@ namespace mlir::triton {
 using namespace mlir;
 
 // Forward declarations for HCU-specific lowering patterns defined in
-// ElementwiseOpToLLVMHCU.cpp and DotOpToLLVMHCU.cpp.
+// ElementwiseOpToLLVM.cpp and DotOpToLLVMHCU.cpp.
 namespace mlir::triton::HCU {
 void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns, bool ftz,

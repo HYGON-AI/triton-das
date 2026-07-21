@@ -8,7 +8,7 @@ add_triton_library(TritonHCUToLLVM
   TritonHCUToLLVM.cpp
   DotOpToLLVM/MMAC.cpp
   DotOpToLLVMHCU.cpp
-  ElementwiseOpToLLVMHCU.cpp
+  ElementwiseOpToLLVM.cpp
   DsReadM.cpp
   MlsOpToLLVM.cpp
   WaitCntHCUUtility.cpp
