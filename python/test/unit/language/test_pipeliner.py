@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from triton._internal_testing import is_cuda, is_hopper_or_newer, is_hip_cdna, is_hip_cdna2, is_hip
+from triton._internal_testing import is_cuda, is_hopper_or_newer, is_hip_cdna, is_hip_cdna2, is_hip, is_hip_hcu
 
 
 def check_capabilities():
@@ -214,6 +214,9 @@ def dot_scale_ref(x, scale, y, type_x, type_y):
 @pytest.mark.parametrize("scale", [True, False])
 def test_pipeline_matmul(scale, device):
     check_capabilities()
+    if scale and is_hip_hcu():
+        # gfx928/gfx936 lack v_cvt_pk_f32_fp8 (CVT_FP8F32); scaled mxfp4 CDNA3 path needs it
+        pytest.skip("tl.dot_scaled / mxfp4 upcast not supported on HCU")
     if scale and not (is_cuda() or is_hip_cdna()):
         pytest.skip("NYI: scale_dot just implemented in CUDA/HIP")
     M, N, K = 512, 512, 128

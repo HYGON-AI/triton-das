@@ -3256,6 +3256,8 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
                 pytest.skip(f"{in_dtype} only supported on CDNA4 and gfx12")
             if in_dtype in ("float8e5b16", "float8e4b8") and (not is_hip_cdna3() or is_hip_hcu()):
                 pytest.skip(f"{in_dtype} only supported on AMD CDNA3 (not HCU)")
+            if is_hip_hcu() and input_precision in ("bf16x3", "bf16x6"):
+                pytest.skip(f"{input_precision} not supported on HCU (no hardware MMAC path)")
             if not ((input_precision in ("bf16x3", "bf16x6")) or (input_precision == "ieee") or
                     (input_precision == "tf32" )):
                 pytest.skip(f"{input_precision} not supported on HIP")
