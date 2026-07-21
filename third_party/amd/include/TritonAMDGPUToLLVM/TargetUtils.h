@@ -53,7 +53,7 @@ enum class HCUISAFeature : uint64_t {
   MLS_FP6FP4    = MMAC_FP6FP4,
   MLS_B4        = MMAC_SCALE,
   CVT_FP8F32    = 1 << 5,
-  CVT_FP8F16    = 1 << 6,
+  CVT_SCALE_PK  = 1 << 6, // gfx946 V_CVT_SCALE_PK_* (E8M0); prefer over CVT_FP8F32
   MMAC_ACC_FP16 = 1 << 7,
   MMAC_ACC_BF16 = 1 << 8,
 };

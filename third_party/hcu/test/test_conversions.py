@@ -37,6 +37,18 @@ def is_hip_gfx938():
     return arch.split(":")[0] == "gfx938"
 
 
+def is_hip_gfx946():
+    if not is_hip():
+        return False
+    arch = triton.runtime.driver.active.utils.get_device_properties(0)["arch"]
+    return arch.split(":")[0] == "gfx946"
+
+
+def is_hip_hcu_ocp_fp8():
+    """HCU targets that expose OCP float8 (e4nv/e5) conversion in the backend."""
+    return is_hip_gfx938() or is_hip_gfx946()
+
+
 def is_float8_dtype_name(dtype_name):
     return dtype_name.startswith("float8")
 
@@ -306,12 +318,12 @@ def test_typeconvert_upcast(src_dtype, dst_dtype, device):
             return
     elif is_hip():
         # HCU test coverage is intentionally narrower than upstream HIP:
-        # compiler_hcu.py only exposes OCP float8 types for gfx938, and we skip
-        # all float8 coverage on other HIP targets to match the backend contract.
-        if (is_float8_dtype_name(src_dtype) or is_float8_dtype_name(dst_dtype)) and not is_hip_gfx938():
-            pytest.skip("float8 conversion tests are only enabled on gfx938 for the HCU backend")
-        if is_float8_dtype_name(src_dtype) and not is_ocp_float8_dtype_name(src_dtype) and is_hip_gfx938():
-            pytest.skip(f"{src_dtype} is not supported on gfx938 in the HCU backend")
+        # OCP float8 (e4nv/e5) is enabled on gfx938 (CVT_FP8F32) and gfx946
+        # (CVT_SCALE_PK); skip float8 on other HIP targets.
+        if (is_float8_dtype_name(src_dtype) or is_float8_dtype_name(dst_dtype)) and not is_hip_hcu_ocp_fp8():
+            pytest.skip("float8 conversion tests are only enabled on gfx938/gfx946 for the HCU backend")
+        if is_float8_dtype_name(src_dtype) and not is_ocp_float8_dtype_name(src_dtype) and is_hip_hcu_ocp_fp8():
+            pytest.skip(f"{src_dtype} is not supported on gfx938/gfx946 in the HCU backend")
         if  (src_dtype == 'float8e4nv' and not (is_hip_cdna3() or is_hip_cdna4())):
             pytest.skip(f"upcasting {src_dtype} to {dst_dtype} not supported in this architecture")
         if  src_dtype == 'float8e4b15':
@@ -373,12 +385,12 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
 
     if is_hip():
         # Match the HCU backend support matrix:
-        # - gfx938: only OCP float8 types are covered here
-        # - non-gfx938: skip all float8 tests
-        if (is_float8_dtype_name(src_dtype) or is_float8_dtype_name(dst_dtype)) and not is_hip_gfx938():
-            pytest.skip("float8 conversion tests are only enabled on gfx938 for the HCU backend")
-        if is_float8_dtype_name(dst_dtype) and not is_ocp_float8_dtype_name(dst_dtype) and is_hip_gfx938():
-            pytest.skip(f"{dst_dtype} is not supported on gfx938 in the HCU backend")
+        # - gfx938 / gfx946: only OCP float8 types are covered here
+        # - other HIP: skip all float8 tests
+        if (is_float8_dtype_name(src_dtype) or is_float8_dtype_name(dst_dtype)) and not is_hip_hcu_ocp_fp8():
+            pytest.skip("float8 conversion tests are only enabled on gfx938/gfx946 for the HCU backend")
+        if is_float8_dtype_name(dst_dtype) and not is_ocp_float8_dtype_name(dst_dtype) and is_hip_hcu_ocp_fp8():
+            pytest.skip(f"{dst_dtype} is not supported on gfx938/gfx946 in the HCU backend")
         if dst_dtype in ('float8e4b8', 'float8e5b16') and (is_hip_cdna2() or is_hip_gfx12()):
             pytest.skip(f"{dst_dtype} is not supported on AMDGPU CDNA2 and RDNA4")
 
@@ -411,8 +423,8 @@ def test_typeconvert_downcast_clamping(src_dtype, dst_dtype, mode, device, round
     elif is_hip():
         # Keep float8 clamping checks aligned with the HCU backend support
         # matrix instead of the broader upstream HIP matrix.
-        if (is_float8_dtype_name(src_dtype) or is_float8_dtype_name(dst_dtype)) and not is_hip_gfx938():
-            pytest.skip("float8 conversion tests are only enabled on gfx938 for the HCU backend")
+        if (is_float8_dtype_name(src_dtype) or is_float8_dtype_name(dst_dtype)) and not is_hip_hcu_ocp_fp8():
+            pytest.skip("float8 conversion tests are only enabled on gfx938/gfx946 for the HCU backend")
 
     converter = {
         tl.float8e4nv: torch.float8_e4m3fn,

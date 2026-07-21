@@ -165,7 +165,10 @@ HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch) {
     {llvm::AMDGPU::GK_GFX936, HCUISAFeature::NONE },
     {llvm::AMDGPU::GK_GFX938, commonFeatures1 },
     {llvm::AMDGPU::GK_GFX92A, (~HCUISAFeature::MMAC_LAYOUT & commonFeatures1) | commonFeatures2 },
-    {llvm::AMDGPU::GK_GFX946, commonFeatures1 | commonFeatures2 | commonFeatures3 },
+    // gfx946: packed FP8<->FP16/BF16 via V_CVT_SCALE_PK_*
+    {llvm::AMDGPU::GK_GFX946,
+     commonFeatures1 | commonFeatures2 | commonFeatures3 |
+         HCUISAFeature::CVT_SCALE_PK},
   };
   llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::parseArchAMDGCN(arch);
   auto it = hcuIsaFeatures.find(kind);
