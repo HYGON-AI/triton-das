@@ -282,9 +282,17 @@ packDsReadMFragments(const SmallVector<SmallVector<Value>> &elemsByKTile,
     return outVals;
   }
 
-  for (const SmallVector<Value> &panelElems : elemsByKTile)
-    for (Value elem : panelElems)
-      outVals.push_back(elem);
+  // B8: emitB8Reads stores (nPanel, kTile) → [nRep0, nRep1] (kTile-major).
+  // Triton/MMAC B layout is nRep-major then kTile (for n / for k). Reindex;
+  // do not flatten emit order — that mismatches when kTiles > 1.
+  for (unsigned nPanel = 0; nPanel < plan.nPanels; ++nPanel)
+    for (int nRep = 0; nRep < 2; ++nRep)
+      for (unsigned kTile = 0; kTile < plan.kTiles; ++kTile) {
+        const SmallVector<Value> &frag =
+            elemsByKTile[nPanel * plan.kTiles * 2 + kTile * 2 + nRep];
+        for (int k = 0; k < 8; ++k)
+          outVals.push_back(frag[k]);
+      }
   return outVals;
 }
 

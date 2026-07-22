@@ -150,21 +150,25 @@ DS_READ_M_CASES = [
     (torch.int8, 128, 8),
 ]
 
-# Multi-tile fp16: BK=32/64, 2/4/8 warps.
+# Multi-tile: BK=32/64, 2/4/8 warps. int8+BK=64 catches B8 nRep/kTile packing.
 DS_READ_M_BLOCK_K_CASES = [
-    (64, 64, 32, 2),
-    (64, 64, 64, 2),
-    (128, 128, 32, 4),
-    (128, 128, 64, 4),
-    (256, 128, 64, 4),
-    (128, 128, 32, 8),
-    (128, 128, 64, 8),
-    (128, 256, 32, 8),
-    (128, 256, 64, 8),
-    (256, 128, 32, 8),
-    (256, 128, 64, 8),
-    (256, 256, 32, 8),
-    (256, 256, 64, 8),
+    (torch.float16, 64, 64, 32, 2),
+    (torch.float16, 64, 64, 64, 2),
+    (torch.float16, 128, 128, 32, 4),
+    (torch.float16, 128, 128, 64, 4),
+    (torch.float16, 256, 128, 64, 4),
+    (torch.float16, 128, 128, 32, 8),
+    (torch.float16, 128, 128, 64, 8),
+    (torch.float16, 128, 256, 32, 8),
+    (torch.float16, 128, 256, 64, 8),
+    (torch.float16, 256, 128, 32, 8),
+    (torch.float16, 256, 128, 64, 8),
+    (torch.float16, 256, 256, 32, 8),
+    (torch.float16, 256, 256, 64, 8),
+    (torch.int8, 64, 64, 64, 2),
+    (torch.int8, 128, 128, 64, 4),
+    (torch.int8, 32, 128, 64, 4),
+    (torch.int8, 64, 128, 128, 4),
 ]
 
 
@@ -177,10 +181,10 @@ def test_ds_read_m_gemm(dtype, n, num_warps):
 
 
 @pytest.mark.skipif(not is_hip(), reason="ds_read_m gemm test is HIP/HCU-specific")
-@pytest.mark.parametrize("block_m,block_n,block_k,num_warps", DS_READ_M_BLOCK_K_CASES)
-def test_ds_read_m_block_k(block_m, block_n, block_k, num_warps):
+@pytest.mark.parametrize("dtype,block_m,block_n,block_k,num_warps", DS_READ_M_BLOCK_K_CASES)
+def test_ds_read_m_block_k(dtype, block_m, block_n, block_k, num_warps):
     torch.manual_seed(0)
-    run_case(torch.float16, block_m, block_n, block_k, num_warps, multi_tile=True)
+    run_case(dtype, block_m, block_n, block_k, num_warps, multi_tile=True)
 
 
 def main():
@@ -188,9 +192,9 @@ def main():
     for dtype, n, num_warps in DS_READ_M_CASES:
         run_case(dtype, block_m=16, block_n=n, block_k=32, num_warps=num_warps)
         print(f"PASS: dtype={dtype}, M=16, N={n}, K=32, num_warps={num_warps}")
-    for bm, bn, bk, nw in DS_READ_M_BLOCK_K_CASES:
-        run_case(torch.float16, bm, bn, bk, nw, multi_tile=True)
-        print(f"PASS: multi-tile BM={bm} BN={bn} BK={bk} warps={nw}")
+    for dtype, bm, bn, bk, nw in DS_READ_M_BLOCK_K_CASES:
+        run_case(dtype, bm, bn, bk, nw, multi_tile=True)
+        print(f"PASS: multi-tile dtype={dtype} BM={bm} BN={bn} BK={bk} warps={nw}")
 
 
 if __name__ == "__main__":
