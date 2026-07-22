@@ -10,11 +10,10 @@ from triton.backends.driver import GPUDriver
 from triton.runtime import _allocation
 from triton.runtime.build import compile_module_from_src
 
-dirname = os.path.dirname(__file__)
-include_dirs = [
-    os.path.join(dirname, "include"),
-    os.path.join(dirname, "../amd/include"),
-]
+# Editable: backends/hcu is a symlink; joining hcu/../amd walks into
+# third_party/hcu/amd. Build backends/amd/include via the parent instead.
+dirname = os.path.dirname(os.path.abspath(__file__))
+include_dirs = [os.path.normpath(os.path.join(os.path.dirname(dirname), "amd", "include"))]
 PyTDMDescriptor = None
 
 
