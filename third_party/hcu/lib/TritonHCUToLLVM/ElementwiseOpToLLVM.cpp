@@ -875,15 +875,21 @@ static SmallVector<Value> Fp8E4M3FN_to_Fp32_Pk(Location loc,
 
 static ConverterT Fp8E4M3FN_to_Fp32(bool capFP8F32, bool capCvtScalePk) {
   // Prefer CVT_SCALE_PK; else non-scale CVT_FP8F32 pk.
-  // Neither: caller uses an fp16 intermediate and should not hit this path.
+  // Neither: createDestOps uses an fp16 intermediate and must not call this.
+  // Assert only when the converter is invoked — getConversionFunc builds the
+  // full map eagerly (including unused entries), so a factory-time assert
+  // would abort gfx936 SW downcasts like f32->fp8e5 that never need this path.
   if (capCvtScalePk)
     return Fp8E4M3FN_to_Fp32_ScalePk;
   if (capFP8F32)
     return Fp8E4M3FN_to_Fp32_Pk;
-  assert(false &&
-         "fp8e4m3fn->f32 without CVT_SCALE_PK/CVT_FP8F32 must use fp16 "
-         "intermediate");
-  return Fp8E4M3FN_to_Fp32_Pk;
+  return [](Location, ConversionPatternRewriter &,
+            const SmallVector<Value> &) -> SmallVector<Value> {
+    assert(false &&
+           "fp8e4m3fn->f32 without CVT_SCALE_PK/CVT_FP8F32 must use fp16 "
+           "intermediate");
+    return {};
+  };
 }
 
 static SmallVector<Value>
@@ -907,10 +913,13 @@ static ConverterT Fp8E5M2_to_Fp32(bool capFP8F32, bool capCvtScalePk) {
     return Fp8E5M2_to_Fp32_ScalePk;
   if (capFP8F32)
     return Fp8E5M2_to_Fp32_Pk;
-  assert(false &&
-         "fp8e5m2->f32 without CVT_SCALE_PK/CVT_FP8F32 must use fp16 "
-         "intermediate");
-  return Fp8E5M2_to_Fp32_Pk;
+  return [](Location, ConversionPatternRewriter &,
+            const SmallVector<Value> &) -> SmallVector<Value> {
+    assert(false &&
+           "fp8e5m2->f32 without CVT_SCALE_PK/CVT_FP8F32 must use fp16 "
+           "intermediate");
+    return {};
+  };
 }
 
 // Fp32 -> OCP Fp8 (RTNZ)
@@ -2002,8 +2011,10 @@ struct FpToFpOpConversion
 
     auto undefRounding = static_cast<RoundingMode>(-1);
 
-    static DenseMap<std::tuple<TypeID, TypeID, RoundingMode>, ConverterT>
-        srcMap = {
+    // Not static: converters depend on per-instance caps (capFP8F32 /
+    // capCvtScalePk / isaFamily). A static map would freeze the first call's
+    // caps and also force-evaluate every factory up front.
+    DenseMap<std::tuple<TypeID, TypeID, RoundingMode>, ConverterT> srcMap = {
             // F8 -> F16
             // {{F8E4M3FNUZTyID, F16TyID, undefRounding},
             //  Fp8E4M3FNUZ_to_Fp16(isaFamily)},
