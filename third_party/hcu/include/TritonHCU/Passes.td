@@ -2,6 +2,24 @@
 include "mlir/Pass/PassBase.td"
 
 
+def TritonHCUApplyFuncHintsAndClean : Pass<"tritonhcu-apply-func-hints-and-clean", "mlir::ModuleOp"> {
+  let summary = "Apply known tt.hint.func.* effects and clean tt.hint.* (HCU)";
+  let description = [{
+    HCU pipeline only, before TTGIR -> LLVMIR.
+
+    For each `tt.func`:
+      - `func.args_ptr.no_alias` (explicit true) → `llvm.noalias` on ptr args
+      - `func.attr.*` (true) → FuncOp `passthrough` with the LLVM function
+        attr name (suffix after `func.attr.`, e.g. `optsize`, `noinline`)
+      - then drop remaining `tt.hint.*` on that FuncOp
+    Then drop ModuleOp `tt.hint.mod.flag.*` (these attrs live on the module,
+    not on FuncOp). This pass does not interpret mod.flag values; any
+    consumer must run earlier in the pipeline.
+  }];
+  let dependentDialects = ["mlir::triton::TritonDialect",
+                           "mlir::LLVM::LLVMDialect"];
+}
+
 def TritonHCUAccelerateMatmul : Pass<"tritonhcu-accelerate-matmul", "mlir::ModuleOp"> {
   let summary = "accelerate matmul for HCU";
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];

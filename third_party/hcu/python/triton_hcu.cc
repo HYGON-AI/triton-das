@@ -29,6 +29,9 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
                             const std::string, int, int, int);
   ADD_PASS_OPTION_WRAPPER_1("add_prepare_wdra_split_plan",
                             mlir::createTritonHCUPrepareWdraSplitPlan, int);
+  // HCU pipeline only: materialize known tt.hint.func.* then clean tt.hint.*.
+  ADD_PASS_WRAPPER_0("add_apply_func_hints_and_clean",
+                     mlir::createTritonHCUApplyFuncHintsAndClean);
   m.def("add_to_llvmir",
         [](mlir::PassManager &pm, const std::string &arch, bool ftz) {
           pm.addPass(mlir::triton::createConvertTritonHCUToLLVMPass(arch, ftz));

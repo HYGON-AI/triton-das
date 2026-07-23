@@ -827,6 +827,39 @@ void init_triton_ir(py::module &&m) {
             return self.getBuilder().getInsertionBlock();
           },
           ret::reference)
+      // HCU extend: tt.hint func.* / mod.flag.* stamp attrs on enclosing func/module.
+      .def("set_func_attr",
+           [](TritonOpBuilder &self, const std::string &name,
+              Attribute &attr) -> void {
+             Block *block = self.getBuilder().getInsertionBlock();
+             if (!block)
+               throw std::runtime_error(
+                   "set_func_attr: no insertion block (call from inside a "
+                   "kernel)");
+             Operation *parent = block->getParentOp();
+             while (parent && !isa<triton::FuncOp>(parent))
+               parent = parent->getParentOp();
+             if (!parent)
+               throw std::runtime_error(
+                   "set_func_attr: could not find enclosing tt.func");
+             parent->setAttr(name, attr);
+           })
+      .def("set_module_attr",
+           [](TritonOpBuilder &self, const std::string &name,
+              Attribute &attr) -> void {
+             Block *block = self.getBuilder().getInsertionBlock();
+             if (!block)
+               throw std::runtime_error(
+                   "set_module_attr: no insertion block (call from inside a "
+                   "kernel)");
+             Operation *parent = block->getParentOp();
+             while (parent && !isa<ModuleOp>(parent))
+               parent = parent->getParentOp();
+             if (!parent)
+               throw std::runtime_error(
+                   "set_module_attr: could not find enclosing module");
+             parent->setAttr(name, attr);
+           })
       .def("get_insertion_point",
            [](TritonOpBuilder &self) {
              return self.getBuilder().saveInsertionPoint();
