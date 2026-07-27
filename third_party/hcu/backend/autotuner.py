@@ -178,7 +178,7 @@ class Hcutuner(Autotuner):
         if (hasattr(self, 'configs_timings') and self.configs_timings) or len(self.configs) == 1:
             _, key = get_config_key(self.arg_names, self.keys, *args, **kwargs)
 
-            if hasattr(self, 'configs_timings'):
+            if hasattr(self, 'configs_timings') and self.configs_timings:
                 self._configs_timings[key] = get_config_timings(self.configs_timings, self.best_config)
             else:
                 self._configs_timings[key] = [0., 0., 0.]
