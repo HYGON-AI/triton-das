@@ -170,6 +170,19 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
     }                                                                          \
   }
 
+// f32 x8/x4 share one key; reuse v4_2case for version 4.
+#define TRITON_MMAC_v3to4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,      \
+                                symbol2, k2, kBase2)                           \
+  {                                                                            \
+    /*key=*/{3, m, n, aET.getTypeID(), bET.getTypeID(), cET.getTypeID()},      \
+    /*value=*/{                                                                \
+      {ROCDL::symbol1::getOperationName(), k1, kBase1},                        \
+      {ROCDL::symbol2::getOperationName(), k2, kBase2},                        \
+    }                                                                          \
+  },                                                                           \
+      TRITON_MMAC_v4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1, symbol2,  \
+                           k2, kBase2)
+
   Builder b(context);
   auto f64T = b.getF64Type();
   auto f32T = b.getF32Type();
@@ -189,10 +202,9 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // mmac_f32_16x16x8tf32
       TRITON_MMAC_v3to4(16, 16, tf32T, tf32T, f32T, mmac_f32_16x16x8tf32, 8, 2),
       // f32 inputs
-      // mmac_f32_16x16x8f32
-      TRITON_MMAC_v3to4(16, 16, f32T, f32T, f32T, mmac_f32_16x16x8f32, 8, 2),
-      // mmac_f32_16x16x4f32
-      TRITON_MMAC_v3to4(16, 16, f32T, f32T, f32T, mmac_f32_16x16x4f32, 4, 1),
+      // mmac_f32_16x16x8f32 & mmac_f32_16x16x4f32
+      TRITON_MMAC_v3to4_2case(16, 16, f32T, f32T, f32T, mmac_f32_16x16x8f32, 8,
+                              2, mmac_f32_16x16x4f32, 4, 1),
 
       // f16 inputs
       // mmac_f32_16x16x16xf16
@@ -375,7 +387,12 @@ MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
   if (it == mfmaMap.end())
     return failure();
 
-  const SmallVector<MfmaMapValue, 2> &values = it->second;
+  ArrayRef<MfmaMapValue> values = it->second;
+  // No MMAC_F32_K8: only expose f32 x4. NONE keeps both for layout kDim match.
+  if (features != HCUISAFeature::NONE &&
+      !(features & HCUISAFeature::MMAC_F32_K8) && values.size() > 1 &&
+      aElemType.isF32() && !useTF32)
+    values = values.take_back(1);
 
   // If We have more than one instrinsics, prefer those with a larger K.
   for (const auto [symbol, k, kBase] : llvm::drop_end(values)) {
@@ -403,7 +420,12 @@ FailureOr<MfmaIntrinsic> MfmaIntrinsic::get(Location loc, int version,
   if (it == mfmaMap.end())
     return failure();
 
-  const SmallVector<MfmaMapValue, 2> &values = it->second;
+  ArrayRef<MfmaMapValue> values = it->second;
+  if (features != HCUISAFeature::NONE &&
+      !(features & HCUISAFeature::MMAC_F32_K8) && values.size() > 1 &&
+      aElemType.isF32() && !useTF32)
+    values = values.take_back(1);
+
   auto match = llvm::find_if(values, [&](const MfmaMapValue &val) {
     return std::get<1>(val) == kDim;
   });

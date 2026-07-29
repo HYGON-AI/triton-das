@@ -56,6 +56,7 @@ enum class HCUISAFeature : uint64_t {
   CVT_SCALE_PK  = 1 << 6, // gfx946 V_CVT_SCALE_PK_* (E8M0); prefer over CVT_FP8F32
   MMAC_ACC_FP16 = 1 << 7,
   MMAC_ACC_BF16 = 1 << 8,
+  MMAC_F32_K8   = 1 << 9, // V_MMAC_16X16X8_F32 (f32 x f32); only gfx928/936/938. Other HCUs use 16x16x4_F32.
 };
 
 inline constexpr HCUISAFeature operator~(HCUISAFeature feature) {
