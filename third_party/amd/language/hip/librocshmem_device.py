@@ -24,22 +24,131 @@
 ################################################################################
 from triton.language import core
 import triton.language as tl
-from triton_dist.language.core import extern_call
+# from triton_dist.language.core import extern_call
+import sys
+import builtins
 
+from triton.language.core import builtin, tensor
+from triton.language import semantic as _semantic
+
+from typing import List
+
+# adapted from python/triton/language/core.py
+def dispatch(func, lib_name: str, lib_path: str, args: list, arg_type_symbol_dict: dict, is_pure: bool, _semantic=None):
+    '''
+        Dispatch a function to a library
+        :param func: the function to dispatch
+        :param lib_name: the name of the library
+        :param lib_path: the path of the library
+        :param args: the arguments of the function
+        :param arg_type_symbol_dict: the type of the arguments
+        :param ret_shape: the shape of the return value
+        :param _semantic: the builder
+        :return: the return value of the function
+    '''
+    if len(arg_type_symbol_dict) == 0:
+        raise ValueError("arg_type_symbol_dict is empty")
+
+    num_args = len(list(arg_type_symbol_dict.keys())[0])
+    if len(args) != num_args:
+        raise ValueError(f"length of input args does not match."
+                         f"Expect {len(args)}, got {num_args}")
+
+    arg_types = []
+    arg_list = []
+    for arg in args:
+        if isinstance(arg, tensor):
+            arg_types.append(arg.dtype)
+            arg_list.append(arg.handle)
+        else:
+            arg_types.append(type(arg))
+            arg_list.append(arg)
+    arg_types = tuple(arg_types)
+
+    if arg_types not in arg_type_symbol_dict:
+        raise ValueError(f"input arg type does not match."
+                         f"Expect one of {arg_type_symbol_dict.keys()}, got {arg_types}")
+    else:
+        symbol = arg_type_symbol_dict[arg_types][0]
+        ret_types = arg_type_symbol_dict[arg_types][1]
+        if not isinstance(ret_types, (List, tuple)):
+            ret_types = [ret_types]
+
+        if symbol == "":
+            raise ValueError("Symbol can not be empty")
+        call = func(lib_name, lib_path, symbol, arg_list, [ret_type.to_ir(_semantic.builder) for ret_type in ret_types],
+                    is_pure)
+
+        if len(ret_types) == 0:
+            return tensor(call, tl.void)
+        if len(ret_types) == 1:
+            return tensor(call.get_result(0), ret_types[0])
+        return tuple(tensor(call.get_result(i), ty) for i, ty in enumerate(ret_types))
+
+@builtin
+def extern_call(lib_name: str, lib_path: str, args: list, arg_type_symbol_dict: dict, is_pure: bool, _semantic=None):
+    '''
+        Dispatch an function to a library
+        :param lib_name: the name of the library
+        :param lib_path: the path of the library
+        :param args: the arguments of the function
+        :param arg_type_symbol_dict: the type of the arguments
+        :param is_pure: whether the function is pure
+        :param _semantic: the builder
+        :return: the return value of the function
+    '''
+    dispatch_args = args.copy()
+    all_scalar = True
+    arg_types = []
+    for i in builtins.range(len(dispatch_args)):
+        dispatch_args[i] = _semantic.to_tensor(dispatch_args[i])
+        arg_types.append(dispatch_args[i].dtype)
+        if dispatch_args[i].type.is_block():
+            all_scalar = False
+    if not all_scalar:
+        raise ValueError("extern call only support inputs with scalr type")
+
+    if len(arg_type_symbol_dict) == 0:
+        raise ValueError("arg_type_symbol_dict is empty")
+
+    num_args = len(list(arg_type_symbol_dict.keys())[0])
+    if len(args) != num_args:
+        raise ValueError(f"length of input args does not match."
+                         f"Expect {len(args)}, got {num_args}")
+
+    # func = _semantic.builder.create_extern_call
+    func = _semantic.builder.create_extern_call
+    # return dispatch(func, lib_name, lib_path, dispatch_args, arg_type_symbol_dict, is_pure, _semantic)
+    return dispatch(func, lib_name, lib_path, dispatch_args, arg_type_symbol_dict, is_pure, _semantic)
+
+
+def _pointer_type_hash(self):
+    return hash((self.name, self.element_ty, "tt_ptr"))
+
+
+def patch_hash_method_for_pointer_type():
+    elem_dtype_list = tl.core.dtype.SINT_TYPES + tl.core.dtype.UINT_TYPES + tl.core.dtype.FP_TYPES + tl.core.dtype.OTHER_TYPES
+    for elem_dtype in elem_dtype_list:
+        ptr_ty = type(tl.core.pointer_type(tl.core.dtype(elem_dtype)))
+        ptr_ty.__hash__ = _pointer_type_hash
+
+
+# apply monkey patch in runtime
+patch_hash_method_for_pointer_type()
 
 @core.extern
-def set_rocshmem_ctx(ctx, _builder=None):
+def set_rocshmem_ctx(ctx, _semantic=None):
     return extern_call(
         "librocshmem_device",
         "",
         [
-            tl.cast(ctx, tl.pointer_type(tl.void), _builder=_builder),
+            tl.cast(ctx, tl.pointer_type(tl.void), _semantic=_semantic),
         ],
         {
-            (tl.pointer_type(tl.void), ): ("rocshmem_set_rocshmem_ctx", ()),
+            (tl.pointer_type(tl.void),): ("rocshmem_set_rocshmem_ctx", ()),
         },
         is_pure=False,
-        _builder=_builder,
+        _semantic=_semantic,
     )
 
 
@@ -47,57 +156,94 @@ void_ptr = core.pointer_type(core.void)
 
 
 @core.extern
-def my_pe(_builder=None):
+def my_pe(_semantic=None):
     return extern_call(
         "librocshmem_device",
         "",
         [],
         {(): ("rocshmem_my_pe_wrapper", (tl.int32))},
         is_pure=False,
-        _builder=_builder,
+        _semantic=_semantic,
     )
 
 
 @core.extern
-def n_pes(_builder=None):
+def n_pes(_semantic=None):
     return extern_call("librocshmem_device", "", [], {(): ("rocshmem_n_pes_wrapper", (tl.int32))}, is_pure=True,
-                       _builder=_builder)
+                       _semantic=_semantic)
 
 
 @core.extern
-def int_p(dest, value, pe, _builder=None):
+def int_p(dest, value, pe, _semantic=None):
     return extern_call(
         "librocshmem_device",
         "",
         [
-            tl.cast(dest, tl.pointer_type(tl.void), _builder=_builder),
-            tl.cast(value, tl.int32, _builder=_builder),
-            tl.cast(pe, tl.int32, _builder=_builder)
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(value, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic)
         ],
         {
             (tl.pointer_type(tl.void), tl.int32, tl.int32): ("rocshmem_int_p_wrapper", ()),
         },
         is_pure=False,
-        _builder=_builder,
+        _semantic=_semantic,
     )
 
 
+# @core.extern
+# def remote_ptr(local_ptr, pe, _semantic=None):
+#     return tl.cast(
+#         extern_call(
+#             "librocshmem_device",
+#             "",
+#             [
+#                 tl.cast(local_ptr, tl.pointer_type(tl.void), _semantic=_semantic),
+#                 tl.cast(pe, tl.int32, _semantic=_semantic)
+#             ],
+#             {
+#                 (tl.pointer_type(tl.void), tl.int32): ("rocshmem_ptr_wrapper", tl.pointer_type(tl.void)),
+#             },
+#             is_pure=False,
+#             _semantic=_semantic,
+#         ),
+#         local_ptr.dtype,
+#         _semantic=_semantic,
+#     )
 @core.extern
-def remote_ptr(local_ptr, pe, _builder=None):
+def remote_ptr(local_ptr, pe, _semantic=None):
+    tl.static_assert(
+        local_ptr.dtype.is_ptr(),
+        "remote_ptr(local_ptr, pe) local_ptr should be a pointer",
+        _semantic=_semantic,
+    )
+    tl.static_assert(
+        pe.dtype.is_int(),
+        "remote_ptr(local_ptr, pe) pe should be an integer",
+        _semantic=_semantic,
+    )
     return tl.cast(
-        extern_call(
-            "librocshmem_device",
-            "",
-            [
-                tl.cast(local_ptr, tl.pointer_type(tl.void), _builder=_builder),
-                tl.cast(pe, tl.int32, _builder=_builder)
-            ],
-            {
-                (tl.pointer_type(tl.void), tl.int32): ("rocshmem_ptr_wrapper", tl.pointer_type(tl.void)),
-            },
-            is_pure=False,
-            _builder=_builder,
+        _remote_ptr_wrapper(
+            tl.cast(local_ptr, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+            _semantic=_semantic,
         ),
         local_ptr.dtype,
-        _builder=_builder,
+        _semantic=_semantic,
+    )
+
+@core.extern
+def _remote_ptr_wrapper(local_ptr, pe, _semantic=None):
+    return extern_call(
+        "",
+        "",
+        [local_ptr, pe],
+        {
+            (core.pointer_type(core.void), core.dtype("int32")): (
+                "rocshmem_ptr_wrapper",
+                core.pointer_type(core.void),  # of the same dtype
+            )
+        },
+        is_pure=False,
+        _semantic=_semantic,
     )

@@ -7,14 +7,14 @@ import numpy as np
 import os
 import datetime
 from typing import Optional
+from dataclasses import dataclass
+from contextlib import contextmanager
 
 import triton.language as tl
-import pynvshmem
+import pyrocshmem
 
 from triton.language.extra import libshmem_device
 from triton.language.extra.hip import libdevice
-
-from utils import NVSHMEM_SIGNAL_DTYPE
 
 from hip import hip
 
@@ -27,6 +27,7 @@ from utils import (
     get_torch_prof_ctx,
     perf_func,
     dist_print,
+    perftest
 )
 
 from functools import partial
@@ -46,6 +47,25 @@ THRESHOLD_MAP = {
     torch.float8_e4m3fn: 1e-2,
     torch.float8_e5m2: 1e-2,
 }
+
+
+@dataclass
+class GraphCaptureContext:
+    stream: torch.cuda.Stream
+
+
+@contextmanager
+def graph_capture(stream: Optional[torch.cuda.Stream] = None):
+    """
+    Lightweight CUDA graph capture helper that avoids pulling in parallel_state.
+    """
+    capture_stream = stream or torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    try:
+        with torch.cuda.stream(capture_stream):
+            yield GraphCaptureContext(stream=capture_stream)
+    finally:
+        torch.cuda.current_stream().wait_stream(capture_stream)
 
 def hip_check(call_result):
     err = call_result[0]
@@ -140,14 +160,28 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
     pid_n = (tile_id % num_pid_in_group) // group_size_m
     return pid_m, pid_n
 
+# configs = [
+#     triton.Config(
+#         {"BLOCK_SIZE_M": BLOCK_SIZE_M, "BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_K": BLOCK_SIZE_K,
+#          "GROUP_SIZE_M": GROUP_SIZE_M},
+#         num_warps=num_warps, num_stages=num_stages)
+#         for BLOCK_SIZE_M in [16, 32, 64, 128, 256]
+#         for BLOCK_SIZE_N in [16, 32, 64, 128, 256]
+#         for BLOCK_SIZE_K in [128]
+#         for GROUP_SIZE_M in [32, 64, 128]
+#         for num_warps in [1, 2, 4, 8, 16]
+#         for num_stages in [1, 2]
+# ]
+
+configs=[
+    triton.Config(
+        {
+            'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4,
+        }, num_warps=4, num_stages=1, num_ctas=1),
+]
+
 @triton.autotune(
-    configs=[
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'M_PER_COPY_CHUNK':
-                1024, 'waves_per_eu': 2
-            }, num_warps=8, num_stages=2),
-    ],
+    configs=configs,
     key=['M', 'N', 'K'],
     # use_cuda_graph=True,
 )
@@ -170,107 +204,136 @@ def kernel_gemm_rs_producer_persistent(
     BLOCK_SIZE_N: tl.constexpr,  #
     BLOCK_SIZE_K: tl.constexpr,  #
     GROUP_SIZE_M: tl.constexpr,  #
-    M_PER_COPY_CHUNK: tl.constexpr, #
     NUM_SMS: tl.constexpr,  #
+    RANK_SWIZZLE: tl.constexpr = True,
     ):
-    start_pid = tl.program_id(axis=0)
+    """Kernel for computing the matmul C = A x B.
+    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    """
+    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse.
+    # See above `L2 Cache Optimizations` section for details.
+
+    # for debug
+    # tid = libdevice.thread_idx(axis=0)
+
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
+
+    pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-    num_tiles = num_pid_m * num_pid_n
-
-    tid = libdevice.thread_idx(axis=0)  # noqa: F841
-
-    # NOTE: There is currently a bug in blackwell pipelining that means it can't handle a value being
-    # used in both the prologue and epilogue, so we duplicate the counters as a work-around.
-    tile_id_c = start_pid - NUM_SMS
-
-    offs_k_for_mask = tl.arange(0, BLOCK_SIZE_K)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    # _compute_pid
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     M_per_rank = M // num_ranks
-    num_pid_m_per_rank = M_per_rank // BLOCK_SIZE_M
+    num_pid_m_per_rank = num_pid_m // num_ranks
+    rank_offset = pid_m // num_pid_m_per_rank
 
-    ENABLE_SWIZZLE = True
-    for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=False):
-        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS)
-
-        if ENABLE_SWIZZLE:
-            m_rank = pid_m // num_pid_m_per_rank
-            pid_m_intra_rank = pid_m - m_rank * num_pid_m_per_rank
-            # original rank and node_id
-            m_node_id = m_rank // num_ranks
-            m_local_rank = m_rank % num_ranks
-            swizzle_m_node_id = (m_node_id + rank + 1) % 1 #nnodes
-            swizzle_m_local_rank = (m_local_rank + rank + 1) % num_ranks
-            swizzle_m_rank = swizzle_m_node_id * num_ranks + swizzle_m_local_rank
-            # perform swizzle
-            pid_m = swizzle_m_rank * num_pid_m_per_rank + pid_m_intra_rank
-            rank_offset = pid_m // num_pid_m_per_rank
-        else:
-            rank_offset = pid_m // num_pid_m_per_rank
-
-        start_m = pid_m * BLOCK_SIZE_M
-        start_n = pid_n * BLOCK_SIZE_N
-        offs_am = start_m + tl.arange(0, BLOCK_SIZE_M)
-        offs_bn = start_n + tl.arange(0, BLOCK_SIZE_N)
-        offs_am = tl.where(offs_am < M, offs_am, 0)
-        offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-        offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for ki in range(k_tiles):
-            offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-            b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-            a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
-            b = tl.load(b_ptrs, mask=offs_k_for_mask[:, None] < K - ki * BLOCK_SIZE_K, other=0.0)
-            accumulator = tl.dot(a, b, accumulator)
-
-        # tile_id_c += NUM_SMS
-        # pid_m, pid_n = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS)
-
-        offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        # target_m = ((pid_m * BLOCK_SIZE_M % M_per_rank) + M_per_rank * rank)
-        # offs_cm = target_m + tl.arange(0, BLOCK_SIZE_M)
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
-        # # Modif: get scatter buffer ptr
-        dtype = a_ptr.dtype.element_ty
+    if RANK_SWIZZLE:
+        rank_offset = (rank_offset + rank + 1) % num_ranks
+        pid_m = pid_m - first_pid_m + num_pid_m_per_rank * rank_offset
         
-        # c_ptr = tl.load(scatter_buf_ptr + rank_offset).to(tl.pointer_type(dtype))
-        # c_ptr = libshmem_device.remote_ptr(scatter_buf_ptr, rank_offset).to(tl.pointer_type(dtype))
-        
-        # store to local scatter buffer
-        c_ptr = scatter_buf_ptr
-        
-        c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        c = accumulator.to(dtype)
+    '''
+    # rank swizzle considering M_PER_COPY_CHUNK
+    M_per_rank = M // num_ranks
+    num_pid_m_per_copy_chunk = M_PER_COPY_CHUNK // BLOCK_SIZE_M
+    chunk_offset = pid_m // (num_pid_m_per_copy_chunk * num_ranks)
+    rank_offset = pid_m % (num_pid_m_per_copy_chunk * num_ranks) // num_pid_m_per_copy_chunk
+    block_offset = pid_m % num_pid_m_per_copy_chunk
 
-        tl.store(c_ptrs, c, mask=c_mask)
+    # rank_swizzle_offset = M_per_rank * nxt_rank // BLOCK_SIZE_M
+    # pid_m = (pid_m + rank_swizzle_offset) % num_pid_m
+    rank_offset = (rank_offset + rank + 1) % num_ranks
+    pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_COPY_CHUNK + block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
+    thread_idx = libdevice.thread_idx(axis=0)  # noqa: F841
+    '''
 
-        counter_start = start_m // M_per_rank
-        counter_end = (start_m + BLOCK_SIZE_M - 1) // M_per_rank
-        counter_end = min(counter_end, num_ranks - 1)
+    tl.assume(pid_m >= 0)
+    tl.assume(pid_n >= 0)
 
-        # print(f"pid_m: {pid_m} pid: {start_pid} start: {counter_start} end: {counter_end}")
-        for counter_id in range(counter_start, counter_end + 1):
-            m_start = M_per_rank * counter_id
-            m_end = M_per_rank * (counter_id + 1) - 1
-            tiled_m_start = m_start // BLOCK_SIZE_M
-            tiled_m_end = m_end // BLOCK_SIZE_M
-            tiled_m_size = tiled_m_end - tiled_m_start + 1
-            tiled_n = tl.cdiv(N, BLOCK_SIZE_N)
-            # `tiled_m_size * tiled_n` represents the total number of tiles within the rank.
-            val = tl.atomic_add(counter_ptr + counter_id, 1, sem="release", scope="gpu")
-            # If `val` is equal to `tiled_m_size * tiled_n - 1`, it means the current tile
-            # is the last one to be completed for this rank.
-            if val == tiled_m_size * tiled_n - 1:
-                tl.store(barrier_ptr + counter_id, 1)
+    # ----------------------------------------------------------
+    # Create pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction
+    # and accumulate
+    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
+    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+    # See above `Pointer Arithmetic` section for details
+    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
+    # -----------------------------------------------------------
+    # Iterate to compute a block of the C matrix.
+    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
+    # of fp32 values for higher accuracy.
+    # `accumulator` will be converted back to fp16 after the loop.
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A and B, generate a mask by checking the K dimension.
+        # If it is out of bounds, set it to 0.
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
+        # We accumulate along the K dimension.
+        accumulator = tl.dot(a, b, accumulator)
+        # Advance the ptrs to the next K block.
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    # target_m = ((pid_m * BLOCK_SIZE_M % M_per_rank) + M_per_rank * rank)
+    # offs_cm = target_m + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+
+    # # Modif: get scatter buffer ptr
+    dtype = a_ptr.dtype.element_ty
+    
+    # store to local scatter buffer
+    c_ptr = scatter_buf_ptr
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    c = accumulator.to(dtype)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+    val = tl.atomic_add(counter_ptr + rank_offset, 1, sem="release", scope="gpu")
+    if val == num_pid_m_per_rank * num_pid_n - 1:
+        tl.store(barrier_ptr + rank_offset, 1, cache_modifier=".wt")
+        # reset counter_ptr
+        tl.store(counter_ptr + rank_offset, 0, cache_modifier=".wt")
+
+    '''
+    # TODO: considering M_PER_COPY_CHUNK
+    start_m = pid_m * BLOCK_SIZE_M
+    counter_start = start_m // M_per_rank
+    counter_end = (start_m + BLOCK_SIZE_M - 1) // M_per_rank
+    counter_end = min(counter_end, num_ranks - 1)
+
+    # print(f"pid_m: {pid_m} pid: {start_pid} start: {counter_start} end: {counter_end}")
+    for counter_id in range(counter_start, counter_end + 1):
+        m_start = M_per_rank * counter_id
+        m_end = M_per_rank * (counter_id + 1) - 1
+        tiled_m_start = m_start // BLOCK_SIZE_M
+        tiled_m_end = m_end // BLOCK_SIZE_M
+        tiled_m_size = tiled_m_end - tiled_m_start + 1
+        # `tiled_m_size * num_pid_n` represents the total number of tiles within the rank.
+        val = tl.atomic_add(counter_ptr + counter_id, 1, sem="release", scope="gpu")
+        # If `val` is equal to `tiled_m_size * tiled_n - 1`, it means the current tile
+        # is the last one to be completed for this rank.
+        if val == tiled_m_size * num_pid_n - 1:
+            tl.store(barrier_ptr + counter_id, 1, cache_modifier=".wt")
+    '''
 
 @triton.jit
 def kernel_ring_reduce(
@@ -424,7 +487,11 @@ def kernel_set_signal(
     ptr,
     val
 ):
-    tl.atomic_cas(ptr, 0, 1, sem="release", scope="gpu")
+    # tl.atomic_cas(ptr, 0, 1, sem="release", scope="gpu")
+    tl.atomic_add(ptr, 1, sem="release", scope="gpu")
+    # tid = libdevice.thread_idx(axis=0)
+    # if tid == 0:
+    #     tl.store(ptr, 1, cache_modifier=".wt")
 
 @triton.jit
 def kernel_wait_eq_cuda(ptr, cmp, val):
@@ -475,15 +542,16 @@ def triton_gemm_rs(
     barrier_bufs,
     scatter_bufs,
     scatter_signal_bufs,
+    sync_bufs,
     sync_bufs_ptr,
+    counter_buf,
     rank, num_ranks, M, N, K,
     num_sms,
     current_stream,
     scatter_stream
 ):
     scatter_stream.wait_stream(current_stream)
-    counter_buf = torch.zeros((num_ranks, ), dtype=torch.int32, device=device)
-    
+    # counter_buf = torch.zeros((num_ranks, ), dtype=torch.int32, device=device)
     m_per_rank = a.shape[0] // num_ranks
     
     # final output
@@ -497,10 +565,11 @@ def triton_gemm_rs(
     # num_sms_rs = num_sms - num_sms_gemm
     num_sms_rs = 64
 
-    grid = lambda META: (min(
-                num_sms_gemm,
-                triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-            ), )
+    # grid = lambda META: (min(
+    #             num_sms_gemm,
+    #             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    #         ), )
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     with torch.cuda.stream(current_stream):
         kernel_gemm_rs_producer_persistent[grid](
                 a, b,
@@ -567,7 +636,7 @@ def triton_gemm_rs(
         # pynvshmem.nvshmem_barrier_all()
     '''
 
-    # '''
+    #'''
     # optim 2: with copyp2p kernel (require stores to remote)
     # NOTE: gemm kernel not affected (because we limit CU for copyp2p_kernel)
     with torch.cuda.stream(scatter_stream):
@@ -618,8 +687,8 @@ def triton_gemm_rs(
 
     # barrier (sync all PEs data)
     current_stream.wait_stream(scatter_stream)
-    barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
-    # '''
+    # barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
+    #'''
 
     '''
     # optim 3: direct reduce on gemm buffer (no copy but requires load remote buffer)
@@ -663,6 +732,139 @@ def triton_gemm_rs(
 
     return output
 
+def triton_gemm_rs_v2(
+    a, b,
+    gemm_bufs,
+    barrier_bufs,
+    scatter_bufs,
+    scatter_signal_bufs,
+    sync_bufs,
+    sync_bufs_ptr,
+    counter_buf,
+    rank, num_ranks, M, N, K,
+    num_sms
+):
+    current_stream = torch.cuda.current_stream()
+    scatter_stream = torch.cuda.Stream(priority=-1)
+    
+    scatter_stream.wait_stream(current_stream)
+    
+    triton_gemm(
+        a, b,
+        gemm_bufs,
+        barrier_bufs,
+        scatter_bufs,
+        scatter_signal_bufs,
+        sync_bufs,
+        sync_bufs_ptr,
+        counter_buf,
+        rank, num_ranks, M, N, K,
+        num_sms,
+        current_stream,
+    )
+    
+    out = triton_ring_reduce(
+            a, b,
+            gemm_bufs,
+            barrier_bufs,
+            scatter_bufs,
+            scatter_signal_bufs,
+            sync_bufs,
+            sync_bufs_ptr,
+            RANK, WORLD_SIZE, M, N, local_K,
+            num_sms,
+            scatter_stream)
+
+    current_stream.wait_stream(scatter_stream)
+    return out
+
+def triton_gemm(
+    a, b,
+    gemm_bufs,
+    barrier_bufs,
+    scatter_bufs,
+    scatter_signal_bufs,
+    sync_bufs,
+    sync_bufs_ptr,
+    counter_buf,
+    rank, num_ranks, M, N, K,
+    num_sms,
+    current_stream,
+):
+    # counter_buf = torch.zeros((num_ranks, ), dtype=torch.int32, device=device)
+    num_sms_gemm = 64
+    num_sms_rs = 64
+
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    with torch.cuda.stream(current_stream):
+        kernel_gemm_rs_producer_persistent[grid](
+                a, b,
+                gemm_bufs[rank],
+                counter_buf,
+                barrier_bufs[rank],
+                rank, num_ranks, M, N, K,
+                a.stride(0), a.stride(1),
+                b.stride(1), b.stride(0),
+                N, 1,
+                NUM_SMS=num_sms_gemm
+            )
+
+    return gemm_bufs[rank]
+
+
+def triton_ring_reduce(
+    a, b,
+    gemm_bufs,
+    barrier_bufs,
+    scatter_bufs,
+    scatter_signal_bufs,
+    sync_bufs,
+    sync_bufs_ptr,
+    rank, num_ranks, M, N, K,
+    num_sms,
+    scatter_stream
+):
+    num_ctas_rs = 16
+    num_warps_rs = 16
+    
+    m_per_rank = a.shape[0] // num_ranks
+    output = torch.empty((m_per_rank, N), dtype=a.dtype, device=a.device)
+    num_elems_per_rank = m_per_rank * N
+    
+    with torch.cuda.stream(scatter_stream):
+        to_rank = (rank - 1 + num_ranks) % num_ranks
+        for stage in range(num_ranks):
+            segment = (rank + stage + 1) % num_ranks
+            m_start = segment * m_per_rank
+            m_end = m_start + m_per_rank
+            src = gemm_bufs[rank][m_start:m_end]
+            dst = scatter_bufs[to_rank][m_start:m_end]
+            # wait gemm buf ready (local buf)
+            _wait_eq_cuda(barrier_bufs[rank][segment], scatter_stream)
+            cur_out = output if output is not None and stage == num_ranks - 1 else dst
+            # P2P_KERNEL_BLOCK_SIZE = 1024
+            if stage == 0:
+                # only copy (gemm -> scatter)
+                copyp2p_kernel[(num_ctas_rs, )](
+                    cur_out, src, num_elems_per_rank,
+                    num_warps=num_warps_rs,
+                    BLOCK_SIZE=num_warps_rs * 64 * 16)
+            else:
+                _wait_eq_cuda(scatter_signal_bufs[rank][segment], scatter_stream)
+                # add and write to remote ranks
+                add_continuous_kernel[(num_ctas_rs, )](
+                    src, scatter_bufs[rank][m_start:m_end],
+                    cur_out, num_elems_per_rank,
+                    num_warps=num_warps_rs,
+                    BLOCK_SIZE=num_warps_rs * 64 * 16)
+            if stage == num_ranks - 1:
+                break
+            # set signal
+            kernel_set_signal[(1, )](
+                scatter_signal_bufs[to_rank][segment],
+                1)
+    return output
+
 def parse_args():
     parser = argparse.ArgumentParser()
     # parser.add_argument("M", type=int)
@@ -677,60 +879,6 @@ def parse_args():
     # parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--check", default=False, action="store_true", help="correctness check")
     return parser.parse_args()
-
-def test_nvshmem_signal(rank):
-
-    @triton.jit
-    def _pingpong(t, iters):
-        # pingpong for rank 0-1, 2-3, ...
-        mype = libshmem_device.my_pe()
-        # thread_idx = tid(axis=0)
-        thread_idx = libdevice.thread_idx(axis=0)
-        if thread_idx == 0:
-            for n in range(iters):
-                if mype == 0:
-                    libshmem_device.signal_wait_until(t, libshmem_device.NVSHMEM_CMP_EQ, 1 + n)
-                    libshmem_device.signal_op(
-                        t,
-                        1 + n,
-                        libshmem_device.NVSHMEM_SIGNAL_SET,
-                        1,
-                    )
-                elif mype == 1:
-                    libshmem_device.signal_op(
-                        t,
-                        1 + n,
-                        libshmem_device.NVSHMEM_SIGNAL_SET,
-                        0,
-                    )
-                    libshmem_device.signal_wait_until(t, libshmem_device.NVSHMEM_CMP_EQ, 1 + n)
-        # __syncthreads()
-        libdevice.__syncthreads()
-
-    print("test nvshmemx_signal with pingpong...")
-    t = pynvshmem.nvshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE)
-    t.fill_(0)
-    # nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    pynvshmem.nvshmem_barrier_all()
-    _pingpong[(1, )](t, 100, num_warps=1)
-    # nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    pynvshmem.nvshmem_barrier_all()
-    
-    torch.cuda.synchronize()
-    # if libshmem_device.my_pe() == 0:
-    if rank == 0:
-        print('result: ', t.to(torch.int32))
-        try:
-            torch.testing.assert_close(t.to(torch.int32), torch.ones([1], dtype=torch.int32, device="cuda") * 100)
-        except Exception as e:
-            print("❌ nvshmemx_signal with pingpong failed")
-            raise e
-        else:
-            print("✅ nvshmemx_signal with pingpong pass")
-    # nvshmem_free_tensor_sync(t)
-    torch.distributed.barrier()
-    torch.cuda.synchronize()
-    del t
 
 configs = []
 configs.append(
@@ -775,19 +923,19 @@ class BenchmarkRunner:
             M_PER_CHUNK = M // WORLD_SIZE
             m_chunk_num = (M + M_PER_CHUNK - 1) // M_PER_CHUNK
 
-            gemm_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
-            # barrier_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=NVSHMEM_SIGNAL_DTYPE)
-            barrier_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
+            gemm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
+            # barrier_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=rocshmem_SIGNAL_DTYPE)
+            barrier_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
             barrier_bufs[RANK].fill_(0)
 
             # scatter bufs
-            scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
-            # scatter_signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=NVSHMEM_SIGNAL_DTYPE)
-            scatter_signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+            scatter_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
+            # scatter_signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=rocshmem_SIGNAL_DTYPE)
+            scatter_signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
             scatter_signal_bufs[RANK].fill_(0)
 
             # sync bufs
-            sync_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+            sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
             sync_bufs[RANK].fill_(0)
             sync_bufs_ptr = torch.tensor([t.data_ptr() for t in sync_bufs], device=torch.cuda.current_device(),
                                             requires_grad=False)
@@ -842,12 +990,7 @@ if __name__ == "__main__":
     
     torch.cuda.synchronize()
     # shmem init
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-
-    # test_nvshmem_signal(RANK)
-    # torch.distributed.destroy_process_group()
-    # print("exit")
-    # exit(0)
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 
     num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
     device = "cuda"
@@ -861,7 +1004,6 @@ if __name__ == "__main__":
 
     # M, N, K = 512, 512, 64
     M, N, K = 2048, 3584, 14336
-    # M, N, K = 2048, 2048, 12288
     
     local_K = K // TP_GROUP.size()
     scale = 10
@@ -876,22 +1018,25 @@ if __name__ == "__main__":
     M_PER_CHUNK = M // WORLD_SIZE
     m_chunk_num = (M + M_PER_CHUNK - 1) // M_PER_CHUNK
     
-    gemm_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
-    # barrier_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=NVSHMEM_SIGNAL_DTYPE)
-    barrier_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
+    gemm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
+    # barrier_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=rocshmem_SIGNAL_DTYPE)
+    barrier_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
     barrier_bufs[RANK].fill_(0)
     
     # scatter bufs
-    scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
-    # scatter_signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=NVSHMEM_SIGNAL_DTYPE)
-    scatter_signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+    scatter_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
+    # scatter_signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=rocshmem_SIGNAL_DTYPE)
+    scatter_signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
     scatter_signal_bufs[RANK].fill_(0)
     
     # sync bufs
-    sync_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+    sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
     sync_bufs[RANK].fill_(0)
     sync_bufs_ptr = torch.tensor([t.data_ptr() for t in sync_bufs], device=torch.cuda.current_device(),
                                     requires_grad=False)
+    
+    # counter bufs
+    counter_buf = torch.zeros((WORLD_SIZE, ), dtype=torch.int32, device=device)
 
     current_stream = torch.cuda.current_stream()
     scatter_stream = torch.cuda.Stream(priority=-1)
@@ -911,7 +1056,7 @@ if __name__ == "__main__":
             torch_out_list.append(torch_out)
 
         # barrier_all_on_stream(RANK, WORLD_SIZE, sync_bufs_ptr, current_stream)
-        pynvshmem.nvshmem_barrier_all()
+        pyrocshmem.rocshmem_barrier_all()
         torch.cuda.synchronize()
         torch.distributed.barrier()
 
@@ -919,17 +1064,29 @@ if __name__ == "__main__":
         for idx, (input, weight, bias) in enumerate(input_list):
             # if RANK == 0:
             #     print(f"iter {idx}")
-            dist_out = triton_gemm_rs(
+            # dist_out = triton_gemm_rs(
+            #             input, weight,
+            #             gemm_bufs,
+            #             barrier_bufs,
+            #             scatter_bufs,
+            #             scatter_signal_bufs,
+            #             sync_bufs,
+            #             sync_bufs_ptr,
+            #             RANK, WORLD_SIZE, M, N, local_K,
+            #             num_sms,
+            #             current_stream,
+            #             scatter_stream)
+            dist_out = triton_gemm_rs_v2(
                         input, weight,
                         gemm_bufs,
                         barrier_bufs,
                         scatter_bufs,
                         scatter_signal_bufs,
+                        sync_bufs,
                         sync_bufs_ptr,
+                        counter_buf,
                         RANK, WORLD_SIZE, M, N, local_K,
-                        num_sms,
-                        current_stream,
-                        scatter_stream)
+                        num_sms)
             torch.cuda.synchronize()
             dist_out_list.append(dist_out)
 
@@ -944,43 +1101,118 @@ if __name__ == "__main__":
         torch.distributed.destroy_process_group()
         exit(0)
     
-    ctx = get_torch_prof_ctx(False)
-    with ctx:
-        # torch.cuda.empty_cache()
-        torch_out, torch_perf = perf_func(
-            partial(
-                torch_gemm_rs, a, b, bias, TP_GROUP, transpose_weight=False, all_reduce=False),
-                iters = perf_iters,
-                warmup_iters = perf_warmups)
-
-        torch.cuda.synchronize()
-        torch.distributed.barrier()
-        triton_out, triton_perf = perf_func(
-            partial(triton_gemm_rs,
+    WithGraph = True
+    if WithGraph:
+        # gemm graph
+        gemm_graph = torch.cuda.CUDAGraph()
+        with graph_capture() as gc:
+            # Use the capture stream for all work so kernels are captured (multiple streams are not recorded by CUDAGraph here).
+            capture_stream_gemm = gc.stream
+            with torch.cuda.graph(gemm_graph, stream=gc.stream):
+                gemm_out = triton_gemm(
                         a, b,
                         gemm_bufs,
                         barrier_bufs,
                         scatter_bufs,
                         scatter_signal_bufs,
+                        sync_bufs,
                         sync_bufs_ptr,
+                        counter_buf,
                         RANK, WORLD_SIZE, M, N, local_K,
                         num_sms,
-                        current_stream,
-                        scatter_stream),
-            iters = perf_iters,
-            warmup_iters = perf_warmups)
+                        capture_stream_gemm)
+
+        # reduce graph
+        reduce_graph = torch.cuda.CUDAGraph()
+        with graph_capture() as gc:
+            # Use the capture stream for all work so kernels are captured (multiple streams are not recorded by CUDAGraph here).
+            capture_stream_reduce = gc.stream
+            with torch.cuda.graph(reduce_graph, stream=gc.stream):
+                out = triton_ring_reduce(
+                    a, b,
+                    gemm_bufs,
+                    barrier_bufs,
+                    scatter_bufs,
+                    scatter_signal_bufs,
+                    sync_bufs,
+                    sync_bufs_ptr,
+                    RANK, WORLD_SIZE, M, N, local_K,
+                    num_sms,
+                    capture_stream_reduce)
+        
+        gemm_out.fill_(0)
+        out.fill_(0)
+
+        ready = torch.cuda.Event()
+        @perftest(num_iters=25, needTrace=True)
+        def run_ca():
+            gemm_graph.replay()
+            ready.record(capture_stream_gemm)
+            capture_stream_reduce.wait_event(ready)
+            reduce_graph.replay()
+
+        _, us = run_ca()
+        triton_out, triton_perf = (out, us / 1000)
+        
+        # graph = torch.cuda.CUDAGraph()
+        # with graph_capture() as gc:
+        #     with torch.cuda.graph(graph, stream=gc.stream):
+        #         out = torch_gemm_rs(a, b, bias, TP_GROUP, transpose_weight=False, all_reduce=False)
+        
+        # _, us = run_ca()
+        # torch_out, torch_perf = (out, us)
+        
+        torch_out, torch_perf = perf_func(
+            partial(
+                torch_gemm_rs, a, b, bias, TP_GROUP, transpose_weight=False, all_reduce=False),
+                iters = perf_iters,
+                warmup_iters = perf_warmups)
+    else:
+        ctx = get_torch_prof_ctx(False)
+        with ctx:
+            # torch.cuda.empty_cache()
+            torch_out, torch_perf = perf_func(
+                partial(
+                    torch_gemm_rs, a, b, bias, TP_GROUP, transpose_weight=False, all_reduce=False),
+                    iters = perf_iters,
+                    warmup_iters = perf_warmups)
+
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
+            triton_out, triton_perf = perf_func(
+                partial(triton_gemm_rs,
+                            a, b,
+                            gemm_bufs,
+                            barrier_bufs,
+                            scatter_bufs,
+                            scatter_signal_bufs,
+                            sync_bufs,
+                            sync_bufs_ptr,
+                            counter_buf,
+                            RANK, WORLD_SIZE, M, N, local_K,
+                            num_sms,
+                            current_stream,
+                            scatter_stream),
+                iters = perf_iters,
+                warmup_iters = perf_warmups)
     
-    try:
-        torch.testing.assert_close(triton_out, torch_out, atol=atol, rtol=rtol)
-    except Exception as e:
-        # print(f"rank {RANK} torch: {torch_out}\n")
-        # print(f"rank {RANK} triton: {triton_out}\n")
-        raise e
+    # try:
+    #     torch.testing.assert_close(triton_out, torch_out, atol=atol, rtol=rtol)
+    # except Exception as e:
+    #     # print(f"rank {RANK} torch: {torch_out}\n")
+    #     # print(f"rank {RANK} triton: {triton_out}\n")
+    #     raise e
 
-    dist_print(f"triton #{RANK}", triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    tflops = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
 
+    dist_print(f"{M} {N} {K}", need_sync=True, allowed_ranks=[0])
+    # dist_print(f"triton #{RANK}", triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    # dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"triton #{RANK}", tflops(triton_perf), need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"torch #{RANK}", tflops(torch_perf), need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()
 
-    # best_config = kernel_gemm_rs_producer_persistent.best_config
-    # print("Best Config:", best_config)
+    best_config = kernel_gemm_rs_producer_persistent.best_config
+    print("Best Config:", best_config)

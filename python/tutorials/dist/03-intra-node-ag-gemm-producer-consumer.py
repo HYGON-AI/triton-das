@@ -9,15 +9,12 @@ import datetime
 from typing import Optional, List
 
 import triton.language as tl
-import pynvshmem
+import pyrocshmem
 
 from triton.language.extra import libshmem_device
 from triton.language.extra.hip import libdevice
 
-from cuda import cudart
 from utils import HIP_CHECK
-
-from utils import NVSHMEM_SIGNAL_DTYPE
 
 from hip import hip
 
@@ -547,6 +544,7 @@ def triton_ag_gemm(
     # torch.cuda.current_stream().synchronize()
     barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
     barrier_bufs[rank].fill_(0)
+    torch.cuda.current_stream().synchronize()
 
     return output
 
@@ -609,12 +607,12 @@ class BenchmarkRunner:
             M_PER_CHUNK = M // WORLD_SIZE
             m_chunk_num = (M + M_PER_CHUNK - 1) // M_PER_CHUNK
 
-            workspaces = pynvshmem.nvshmem_create_tensor_list_intra_node((M, K), dtype=dtype)
-            barrier_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
+            workspaces = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, K), dtype=dtype)
+            barrier_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
             barrier_bufs[RANK].fill_(0)
             
             # sync bufs
-            sync_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+            sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
             sync_bufs[RANK].fill_(0)
             sync_bufs_ptr = torch.tensor([t.data_ptr() for t in sync_bufs], device=torch.cuda.current_device(),
                                             requires_grad=False)
@@ -670,7 +668,7 @@ if __name__ == "__main__":
     
     torch.cuda.synchronize()
     # shmem init
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 
     num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
     device = "cuda"
@@ -684,7 +682,7 @@ if __name__ == "__main__":
 
     # M, N, K = 512, 512, 64
     # M, N, K = 1024, 4096, 12288
-    M, N, K = 2048, 3584, 20480
+    M, N, K = 2048, 3584, 14336
     
     local_M = M // WORLD_SIZE
     local_N = N // WORLD_SIZE
@@ -701,13 +699,13 @@ if __name__ == "__main__":
     M_PER_CHUNK = M // WORLD_SIZE
     m_chunk_num = (M + M_PER_CHUNK - 1) // M_PER_CHUNK
     
-    workspaces = pynvshmem.nvshmem_create_tensor_list_intra_node((M, K), dtype=dtype)
+    workspaces = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, K), dtype=dtype)
 
-    barrier_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
+    barrier_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((m_chunk_num,), dtype=torch.int)
     barrier_bufs[RANK].fill_(0)
     
     # sync bufs
-    sync_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+    sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
     sync_bufs[RANK].fill_(0)
     sync_bufs_ptr = torch.tensor([t.data_ptr() for t in sync_bufs], device=torch.cuda.current_device(),
                                     requires_grad=False)
@@ -735,7 +733,7 @@ if __name__ == "__main__":
             torch_out_list.append(torch_out)
 
         # barrier_all_on_stream(RANK, WORLD_SIZE, sync_bufs_ptr, current_stream)
-        pynvshmem.nvshmem_barrier_all()
+        pyrocshmem.rocshmem_barrier_all()
         torch.cuda.synchronize()
         torch.distributed.barrier()
 
@@ -777,7 +775,7 @@ if __name__ == "__main__":
                 iters = perf_iters,
                 warmup_iters = perf_warmups)
 
-        pynvshmem.nvshmem_barrier_all()
+        pyrocshmem.rocshmem_barrier_all()
         torch.cuda.synchronize()
         torch.distributed.barrier()
         triton_out, triton_perf = perf_func(
@@ -801,9 +799,13 @@ if __name__ == "__main__":
         # print(f"rank {RANK} triton: {triton_out}\n")
         raise e
 
-    dist_print(f"triton #{RANK}", triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    tflops = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+    # dist_print(f"triton #{RANK}", triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    # dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"triton #{RANK}", tflops(triton_perf), need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"torch #{RANK}", tflops(torch_perf), need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()
 
     # best_config = kernel_consumer_gemm_persistent.best_config

@@ -11,7 +11,7 @@ from types import ModuleType
 from typing import Any, Callable, Dict, Optional, Tuple, Type, Union, Iterable, List
 
 from .. import knobs, language
-from .._C.libtriton import ir, gluon_ir
+from .._C.libtriton import ir, gluon_ir, distributed
 from ..language import constexpr, str_to_ty, tensor, tuple as tl_tuple
 from ..language.core import _unwrap_if_constexpr, base_value, base_type
 # ideally we wouldn't need any runtime component
@@ -300,7 +300,7 @@ class CodeGenerator(ast.NodeVisitor):
             self.semantic = GluonSemantic(self.builder)
         else:
             from triton.language.semantic import TritonSemantic
-            self.builder = ir.builder(context)
+            self.builder = distributed.ir.DistributedOpBuilder(context)
             self.semantic = TritonSemantic(self.builder)
 
         self.name_loc_as_prefix = None

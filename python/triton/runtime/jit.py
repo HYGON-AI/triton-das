@@ -131,7 +131,10 @@ class DependenciesFinder(ast.NodeVisitor):
             return
 
         # Stubs that aren't real functions
-        if getattr(val, "__module__", "") == "triton.language.extra.libdevice":
+        if getattr(val, "__module__", "") in {
+            "triton.language.extra.libdevice",
+            "triton.language.extra.libshmem_device",
+        }:
             return
 
         if isinstance(val, JITCallable):

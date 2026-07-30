@@ -9,7 +9,7 @@ import datetime
 from typing import Optional
 
 import triton.language as tl
-import pynvshmem
+import pyrocshmem
 
 from triton.language.extra import libshmem_device
 from triton.language.extra.hip import libdevice
@@ -19,7 +19,7 @@ from cuda import cudart
 
 # from triton_dist.kernels.amd.gemm_reduce_scatter import get_hip_autotune_config
 
-# from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE
+# from triton_dist.utils import rocSHMEM_SIGNAL_DTYPE
 
 from hip import hip
 
@@ -249,26 +249,49 @@ def kernel_gemm_rs_producer_persistent(
 
         tl.store(c_ptrs, c, mask=c_mask)
 
+# autotune
+# configs = [
+#     triton.Config(
+#         {"BLOCK_SIZE_M": BLOCK_SIZE_M, "BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_K": BLOCK_SIZE_K,
+#          "GROUP_SIZE_M": GROUP_SIZE_M},
+#         num_warps=num_warps, num_stages=num_stages)
+#         for BLOCK_SIZE_M in [16, 32, 64, 128, 256]
+#         for BLOCK_SIZE_N in [16, 32, 64, 128, 256]
+#         for BLOCK_SIZE_K in [128]
+#         for GROUP_SIZE_M in [32, 64, 128]
+#         for num_warps in [1, 2, 4, 8, 16]
+#         for num_stages in [1, 2]
+# ]
+
+configs = [
+    # # test with SWIZZLE
+    # triton.Config(
+    #     {
+    #         'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'M_PER_COPY_CHUNK':
+    #         128, 'waves_per_eu': 2
+    #     }, num_warps=8, num_stages=2),
+    # test without SWIZZLE
+    triton.Config(
+        {
+            'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 64,
+        }, num_warps=4, num_stages=1, num_ctas=1),
+]
 
 @triton.autotune(
-    configs=[
-            triton.Config(
-                {
-                    'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'M_PER_COPY_CHUNK':
-                    128, 'waves_per_eu': 2
-                }, num_warps=8, num_stages=2),
-        ],
-        key=['M', 'N', 'K'],
-        # use_cuda_graph=True,
-    )
-# @triton.autotune(
-#     configs=get_hip_autotune_config(),
-#     key=['M', 'N', 'K'],
-# )
+    configs=configs,
+    key=['M', 'N', 'K'],
+    # perf_debug=False,
+    # use_cuda_graph=True,
+)
 @triton.jit
+# @triton.utils.jit
 def kernel_gemm_rs_producer_fuse_scatter(
     # Pointers to matrices
-    a_ptr, b_ptr, scatter_bufs_ptr, rank, num_ranks,
+    a_ptr, b_ptr,
+    scatter_buf_ptr,
+    scatter_bufs_ptr,
+    rank,
+    num_ranks,
     # Matrix dimensions
     M, N, K,
     # The stride variables represent how much to increase the ptr by when moving by 1
@@ -279,7 +302,7 @@ def kernel_gemm_rs_producer_fuse_scatter(
     stride_cm, stride_cn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
-    GROUP_SIZE_M: tl.constexpr, M_PER_COPY_CHUNK: tl.constexpr  #
+    GROUP_SIZE_M: tl.constexpr, M_PER_COPY_CHUNK: tl.constexpr = 128 #
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -306,6 +329,11 @@ def kernel_gemm_rs_producer_fuse_scatter(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
+    #'''
+    M_per_rank = M // num_ranks
+    num_pid_m_per_rank = M_per_rank // BLOCK_SIZE_M
+    rank_offset = pid_m // num_pid_m_per_rank
+    '''
     # rank swizzle
     M_per_rank = M // num_ranks
     num_pid_m_per_copy_chunk = M_PER_COPY_CHUNK // BLOCK_SIZE_M
@@ -318,6 +346,7 @@ def kernel_gemm_rs_producer_fuse_scatter(
     rank_offset = (rank_offset + rank + 1) % num_ranks
     pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_COPY_CHUNK + block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
     thread_idx = libdevice.thread_idx(axis=0)  # noqa: F841
+    '''
 
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)
@@ -361,11 +390,12 @@ def kernel_gemm_rs_producer_fuse_scatter(
     target_m = ((pid_m * BLOCK_SIZE_M % M_per_rank) + M_per_rank * rank)
     offs_cm = target_m + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # c_ptr = scatter_buf_ptr
     c_ptr = tl.load(scatter_bufs_ptr + rank_offset).to(tl.pointer_type(dtype))
     c_ptr = tl.multiple_of(c_ptr, 16)
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    tl.store(c_ptrs, c, mask=c_mask, cache_modifier=".wt")
 
 @triton.jit
 def kernel_consumer_reduce(
@@ -454,13 +484,14 @@ def triton_gemm_rs(
     current_stream,
     scatter_stream
 ):
-    barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
+    # barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
     M_per_rank = M // num_ranks
 
     with torch.cuda.stream(current_stream):
         grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
         kernel_gemm_rs_producer_fuse_scatter[grid](
             a, b,
+            scatter_bufs[rank],
             scatter_bufs_ptr,
             rank, num_ranks, M, N, K,
             a.stride(0), a.stride(1),
@@ -502,60 +533,6 @@ def parse_args():
     # parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--check", default=False, action="store_true", help="correctness check")
     return parser.parse_args()
-
-def test_nvshmem_signal(rank):
-
-    @triton.jit
-    def _pingpong(t, iters):
-        # pingpong for rank 0-1, 2-3, ...
-        mype = libshmem_device.my_pe()
-        # thread_idx = tid(axis=0)
-        thread_idx = libdevice.thread_idx(axis=0)
-        if thread_idx == 0:
-            for n in range(iters):
-                if mype == 0:
-                    libshmem_device.signal_wait_until(t, libshmem_device.NVSHMEM_CMP_EQ, 1 + n)
-                    libshmem_device.signal_op(
-                        t,
-                        1 + n,
-                        libshmem_device.NVSHMEM_SIGNAL_SET,
-                        1,
-                    )
-                elif mype == 1:
-                    libshmem_device.signal_op(
-                        t,
-                        1 + n,
-                        libshmem_device.NVSHMEM_SIGNAL_SET,
-                        0,
-                    )
-                    libshmem_device.signal_wait_until(t, libshmem_device.NVSHMEM_CMP_EQ, 1 + n)
-        # __syncthreads()
-        libdevice.__syncthreads()
-
-    print("test nvshmemx_signal with pingpong...")
-    t = pynvshmem.nvshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE)
-    t.fill_(0)
-    # nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    pynvshmem.nvshmem_barrier_all()
-    _pingpong[(1, )](t, 100, num_warps=1)
-    # nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    pynvshmem.nvshmem_barrier_all()
-    
-    torch.cuda.synchronize()
-    # if libshmem_device.my_pe() == 0:
-    if rank == 0:
-        print('result: ', t.to(torch.int32))
-        try:
-            torch.testing.assert_close(t.to(torch.int32), torch.ones([1], dtype=torch.int32, device="cuda") * 100)
-        except Exception as e:
-            print("❌ nvshmemx_signal with pingpong failed")
-            raise e
-        else:
-            print("✅ nvshmemx_signal with pingpong pass")
-    # nvshmem_free_tensor_sync(t)
-    torch.distributed.barrier()
-    torch.cuda.synchronize()
-    del t
 
 configs = []
 configs.append(
@@ -600,12 +577,12 @@ class BenchmarkRunner:
             # M_PER_CHUNK = M // WORLD_SIZE
             # m_chunk_num = (M + M_PER_CHUNK - 1) // M_PER_CHUNK
             
-            scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
+            scatter_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
             scatter_bufs_ptr = torch.tensor([t.data_ptr() for t in scatter_bufs], device=torch.cuda.current_device(),
                                             requires_grad=False)
 
             # sync buf
-            sync_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+            sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
             sync_bufs[RANK].fill_(0)
             sync_bufs_ptr = torch.tensor([t.data_ptr() for t in sync_bufs], device=torch.cuda.current_device(),
                                             requires_grad=False)
@@ -655,15 +632,11 @@ if __name__ == "__main__":
     
     torch.cuda.synchronize()
     # shmem init
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-
-    # test_nvshmem_signal(RANK)
-    # torch.distributed.destroy_process_group()
-    # print("exit")
-    # exit(0)
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 
     # M, N, K = 512, 512, 64
     M, N, K = 2048, 3584, 14336
+    # M, N, K = 1024, 7168, 2048
     # M, N, K = 2048, 2048, 12288
     
     local_K = K // TP_GROUP.size()
@@ -682,18 +655,18 @@ if __name__ == "__main__":
     M_PER_CHUNK = M // WORLD_SIZE
     m_chunk_num = (M + M_PER_CHUNK - 1) // M_PER_CHUNK
 
-    scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
+    scatter_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((M, N), dtype=dtype)
     scatter_bufs_ptr = torch.tensor([t.data_ptr() for t in scatter_bufs], device=torch.cuda.current_device(),
                                     requires_grad=False)
 
     # sync buf
-    sync_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+    sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
     sync_bufs[RANK].fill_(0)
     sync_bufs_ptr = torch.tensor([t.data_ptr() for t in sync_bufs], device=torch.cuda.current_device(),
                                     requires_grad=False)
 
     # scatter signal buf
-    # scatter_signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
+    # scatter_signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node((WORLD_SIZE,), dtype=torch.int)
     
     current_stream = torch.cuda.current_stream()
     scatter_stream = torch.cuda.Stream(priority=-1)
@@ -713,7 +686,7 @@ if __name__ == "__main__":
             torch_out_list.append(torch_out)
 
         # barrier_all_on_stream(RANK, WORLD_SIZE, sync_bufs_ptr, current_stream)
-        pynvshmem.nvshmem_barrier_all()
+        pyrocshmem.rocshmem_barrier_all()
         torch.cuda.synchronize()
         torch.distributed.barrier()
 
@@ -722,6 +695,7 @@ if __name__ == "__main__":
         for idx, (input, weight, bias) in enumerate(input_list):
             if RANK == 0:
                 print(f"iter {idx}")
+            barrier_all_on_stream(RANK, WORLD_SIZE, sync_bufs_ptr, current_stream)
             dist_out = triton_gemm_rs(
                         input, weight,
                         scatter_bufs,
@@ -789,10 +763,17 @@ if __name__ == "__main__":
     #     # print(f"rank {RANK} triton: {triton_out}\n")
     #     raise e
 
-    dist_print(f"triton #{RANK}", triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    tflops = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
 
+    dist_print(f"{M} {N} {K}", need_sync=True, allowed_ranks=[0])
+    # dist_print(f"triton #{RANK}", triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    # dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"triton #{RANK}", tflops(triton_perf), need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"torch #{RANK}", tflops(torch_perf), need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()
 
-    # best_config = kernel_gemm_rs_producer_persistent.best_config
-    # print("Best Config:", best_config)
+    # Best Config: BLOCK_SIZE_M: 64, BLOCK_SIZE_N: 64, BLOCK_SIZE_K: 128, GROUP_SIZE_M: 128, num_warps: 16, num_ctas: 1, num_stages: 2, maxnreg: None
+    best_config = kernel_gemm_rs_producer_fuse_scatter.best_config
+    print("Best Config:", best_config)

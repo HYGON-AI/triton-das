@@ -227,12 +227,13 @@ class HIPBackend(BaseBackend):
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from triton.language.extra.hip import libdevice
-        # from triton.language.extra.hip import librocshmem_device
-        from triton.language.extra.hip import libnvshmem_device
+        from triton.language.extra.hip import librocshmem_device
+        # from triton.language.extra.hip import libnvshmem_device
 
         return {
             "triton.language.extra.libdevice": libdevice,
-            "triton.language.extra.libshmem_device": libnvshmem_device
+            # "triton.language.extra.libshmem_device": libnvshmem_device
+            "triton.language.extra.libshmem_device": librocshmem_device
         }
 
     def load_dialects(self, ctx):
@@ -756,8 +757,12 @@ class HIPBackend(BaseBackend):
         # from memory.
         amd.set_all_fn_arg_inreg(fns[0])
         metadata['use_nvshmem'] = False
+        metadata['use_rocshmem'] = False
         for k in llvm_mod.get_functions():
-            if "nvshmem" in k.name and k.is_declaration():
+            if "rocshmem" in k.name and k.is_declaration():
+                metadata['use_rocshmem'] = True
+                break
+            elif "nvshmem" in k.name and k.is_declaration():
                 metadata['use_nvshmem'] = True
                 break
 
@@ -775,7 +780,10 @@ class HIPBackend(BaseBackend):
                 llvm.link_extern_libs(llvm_mod, paths)
 
         # if options.rocshmem_device_lib and metadata['use_rocshmem']:
-        if metadata['use_nvshmem']:
+        if metadata['use_rocshmem']:
+            default_libdir = Path(__file__).parent / 'lib'
+            llvm.link_extern_libs(llvm_mod, [str(default_libdir / "librocshmem_device.bc")])
+        elif metadata['use_nvshmem']:
             default_libdir = Path(__file__).parent / 'lib'
             llvm.link_extern_libs(llvm_mod, [str(default_libdir / "libnvshmem_device.bc")])
 

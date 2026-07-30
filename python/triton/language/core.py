@@ -3428,11 +3428,11 @@ def extern_elementwise(lib_name: str, lib_path: str, args: list, arg_type_symbol
         # Get the broadcast shape over all the arguments
         for item in dispatch_args:
             _, broadcast_arg = _semantic.binary_op_type_checking_impl(item, broadcast_arg,
-                                                                      arithmetic_check=arithmetic_check)
+                                                                      arithmetic_check=arithmetic_check, allow_lhs_ptr=True, allow_rhs_ptr=True)
         # Change the shape of each argument based on the broadcast shape
         for i in builtins.range(len(dispatch_args)):
             dispatch_args[i], _ = _semantic.binary_op_type_checking_impl(dispatch_args[i], broadcast_arg,
-                                                                         arithmetic_check=arithmetic_check)
+                                                                         arithmetic_check=arithmetic_check, allow_lhs_ptr=True, allow_rhs_ptr=True)
         if not all_scalar:
             ret_type = broadcast_arg.type.with_element_ty(ret_type)
     func = _semantic.builder.create_extern_elementwise
