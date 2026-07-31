@@ -25,6 +25,7 @@ pytest_cases=(
   "${hcu_file_path}/test_buffer_atomic_dtypes.py"
   "${hcu_file_path}/regression_subprocess.py"
   "${hcu_file_path}/test_hcu_gemm_wasp_wdra_mlir.py"
+  "${hcu_file_path}/test_hcu_barrier_pc_mlir.py"
 )
 
 pytest_args=()

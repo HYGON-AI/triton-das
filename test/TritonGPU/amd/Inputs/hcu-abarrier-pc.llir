@@ -1,0 +1,229 @@
+; ModuleID = 'LLVMDialectModule'
+source_filename = "LLVMDialectModule"
+
+@global_smem = external addrspace(3) global [0 x i8], align 16
+
+define ptx_kernel void @abarrier_pc_kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2, ptr addrspace(1) %3, ptr addrspace(1) %4) #0 {
+  %6 = call i32 (...) @llvm.hcu.get.wave.id()
+  switch i32 %6, label %7 [
+    i32 0, label %8
+    i32 1, label %8
+    i32 2, label %8
+    i32 3, label %8
+    i32 4, label %81
+    i32 5, label %81
+    i32 6, label %81
+    i32 7, label %81
+  ]
+
+7:                                                ; preds = %5
+  call void @llvm.hcu.s.ebarrier.sync(i32 0, i32 0)
+  call void @llvm.hcu.s.ebarrier.sync(i32 3, i32 0)
+  call void @llvm.hcu.s.ebarrier.sync(i32 5, i32 0)
+  ret void
+
+8:                                                ; preds = %5, %5, %5, %5
+  call void @llvm.hcu.s.abarrier.init(i32 8, i32 4)
+  call void @llvm.hcu.s.abarrier.init(i32 9, i32 4)
+  %9 = call i32 (i32, ...) @llvm.hcu.s.abarrier.arrive(i32 9, i32 1)
+  br label %12
+
+10:                                               ; No predecessors!
+  call void @llvm.hcu.s.ebarrier.sync(i32 3, i32 0)
+  br label %11
+
+11:                                               ; preds = %10
+  call void @llvm.hcu.s.ebarrier.sync(i32 5, i32 0)
+  ret void
+
+12:                                               ; preds = %8
+  call void @llvm.hcu.s.ebarrier.sync(i32 0, i32 0)
+  br label %13
+
+13:                                               ; preds = %18, %12
+  %14 = phi i32 [ %55, %18 ], [ 0, %12 ]
+  %15 = phi { float, float, float, float } [ %52, %18 ], [ zeroinitializer, %12 ]
+  %16 = phi i32 [ %54, %18 ], [ 0, %12 ]
+  %17 = icmp slt i32 %14, %2
+  br i1 %17, label %18, label %56
+
+18:                                               ; preds = %13
+  %19 = call i32 (i32, ...) @llvm.hcu.s.abarrier.try.wait(i32 8, i32 %16)
+  %20 = call i32 @llvm.amdgcn.workitem.id.x()
+  %21 = and i32 %20, 255
+  %22 = urem i32 %21, 64
+  %23 = udiv i32 %21, 64
+  %24 = shl i32 %22, 0
+  %25 = or i32 0, %24
+  %26 = shl i32 %23, 6
+  %27 = or i32 %25, %26
+  %28 = and i32 %27, 255
+  %29 = shl i32 %28, 4
+  %30 = or i32 %29, 0
+  %31 = xor i32 0, %30
+  %32 = xor i32 %31, 0
+  %33 = xor i32 %32, 0
+  %34 = add i32 %33, 0
+  %35 = getelementptr inbounds i8, ptr addrspace(3) @global_smem, i32 %34
+  %36 = load <4 x float>, ptr addrspace(3) %35, align 16
+  %37 = extractelement <4 x float> %36, i32 0
+  %38 = extractelement <4 x float> %36, i32 1
+  %39 = extractelement <4 x float> %36, i32 2
+  %40 = extractelement <4 x float> %36, i32 3
+  %41 = extractvalue { float, float, float, float } %15, 0
+  %42 = extractvalue { float, float, float, float } %15, 1
+  %43 = extractvalue { float, float, float, float } %15, 2
+  %44 = extractvalue { float, float, float, float } %15, 3
+  %45 = fadd float %41, %37
+  %46 = fadd float %42, %38
+  %47 = fadd float %43, %39
+  %48 = fadd float %44, %40
+  %49 = insertvalue { float, float, float, float } undef, float %45, 0
+  %50 = insertvalue { float, float, float, float } %49, float %46, 1
+  %51 = insertvalue { float, float, float, float } %50, float %47, 2
+  %52 = insertvalue { float, float, float, float } %51, float %48, 3
+  %53 = call i32 (i32, ...) @llvm.hcu.s.abarrier.arrive(i32 9, i32 1)
+  %54 = xor i32 %16, 1
+  %55 = add i32 %14, 1
+  br label %13
+
+56:                                               ; preds = %13
+  %57 = call i32 @llvm.amdgcn.workitem.id.x()
+  %58 = and i32 %57, 255
+  %59 = urem i32 %58, 64
+  %60 = udiv i32 %58, 64
+  %61 = shl i32 %59, 0
+  %62 = or i32 0, %61
+  %63 = shl i32 %60, 6
+  %64 = or i32 %62, %63
+  %65 = and i32 %64, 255
+  %66 = shl i32 %65, 2
+  %67 = or i32 %66, 0
+  %68 = xor i32 0, %67
+  %69 = xor i32 %68, 0
+  %70 = add i32 %69, 0
+  %71 = getelementptr float, ptr addrspace(1) %1, i32 %70
+  %72 = extractvalue { float, float, float, float } %15, 0
+  %73 = extractvalue { float, float, float, float } %15, 1
+  %74 = extractvalue { float, float, float, float } %15, 2
+  %75 = extractvalue { float, float, float, float } %15, 3
+  %76 = insertelement <4 x float> undef, float %72, i32 0
+  %77 = insertelement <4 x float> %76, float %73, i32 1
+  %78 = insertelement <4 x float> %77, float %74, i32 2
+  %79 = insertelement <4 x float> %78, float %75, i32 3
+  store <4 x float> %79, ptr addrspace(1) %71, align 16
+  call void @llvm.hcu.s.ebarrier.sync(i32 2, i32 0)
+  call void @llvm.hcu.s.abarrier.inv(i32 8)
+  call void @llvm.hcu.s.abarrier.inv(i32 9)
+  call void @llvm.hcu.s.ebarrier.sync(i32 5, i32 0)
+  call void asm sideeffect "; mma_epilogue_partition_0", ""()
+  ret void
+
+80:                                               ; No predecessors!
+  call void @llvm.hcu.s.set.vgpr.size(i16 32)
+  br label %81
+
+81:                                               ; preds = %80, %5, %5, %5, %5
+  call void @llvm.hcu.s.ebarrier.sync(i32 0, i32 0)
+  %82 = call i32 @llvm.amdgcn.workitem.id.x()
+  %83 = and i32 %82, 255
+  %84 = urem i32 %83, 64
+  %85 = udiv i32 %83, 64
+  %86 = shl i32 %84, 0
+  %87 = or i32 0, %86
+  %88 = shl i32 %85, 6
+  %89 = or i32 %87, %88
+  %90 = and i32 %89, 255
+  %91 = shl i32 %90, 2
+  %92 = or i32 %91, 0
+  %93 = xor i32 0, %92
+  %94 = xor i32 %93, 0
+  %95 = add i32 %94, 0
+  br label %96
+
+96:                                               ; preds = %100, %81
+  %97 = phi i32 [ %132, %100 ], [ 0, %81 ]
+  %98 = phi i32 [ %131, %100 ], [ 0, %81 ]
+  %99 = icmp slt i32 %97, %2
+  br i1 %99, label %100, label %133
+
+100:                                              ; preds = %96
+  %101 = call i32 (i32, ...) @llvm.hcu.s.abarrier.try.wait(i32 9, i32 %98)
+  %102 = mul i32 %97, 1024
+  %103 = add i32 %102, %95
+  %104 = getelementptr float, ptr addrspace(1) %0, i32 %103
+  %105 = load <4 x float>, ptr addrspace(1) %104, align 16
+  %106 = extractelement <4 x float> %105, i32 0
+  %107 = extractelement <4 x float> %105, i32 1
+  %108 = extractelement <4 x float> %105, i32 2
+  %109 = extractelement <4 x float> %105, i32 3
+  call void @llvm.amdgcn.s.waitcnt(i32 49279)
+  call void @llvm.hcu.s.ebarrier.sync(i32 7, i32 4)
+  %110 = call i32 @llvm.amdgcn.workitem.id.x()
+  %111 = and i32 %110, 255
+  %112 = urem i32 %111, 64
+  %113 = udiv i32 %111, 64
+  %114 = shl i32 %112, 0
+  %115 = or i32 0, %114
+  %116 = shl i32 %113, 6
+  %117 = or i32 %115, %116
+  %118 = and i32 %117, 255
+  %119 = shl i32 %118, 4
+  %120 = or i32 %119, 0
+  %121 = xor i32 0, %120
+  %122 = xor i32 %121, 0
+  %123 = xor i32 %122, 0
+  %124 = add i32 %123, 0
+  %125 = getelementptr inbounds i8, ptr addrspace(3) @global_smem, i32 %124
+  %126 = insertelement <4 x float> undef, float %106, i32 0
+  %127 = insertelement <4 x float> %126, float %107, i32 1
+  %128 = insertelement <4 x float> %127, float %108, i32 2
+  %129 = insertelement <4 x float> %128, float %109, i32 3
+  store <4 x float> %129, ptr addrspace(3) %125, align 16
+  %130 = call i32 (i32, ...) @llvm.hcu.s.abarrier.arrive(i32 8, i32 1)
+  %131 = xor i32 %98, 1
+  %132 = add i32 %97, 1
+  br label %96
+
+133:                                              ; preds = %96
+  call void @llvm.hcu.s.ebarrier.sync(i32 2, i32 0)
+  call void @llvm.hcu.s.ebarrier.sync(i32 5, i32 0)
+  ret void
+}
+
+; Function Attrs: nounwind memory(none)
+declare i32 @llvm.hcu.get.wave.id(...) #1
+
+; Function Attrs: convergent nocallback nofree nounwind willreturn
+declare void @llvm.hcu.s.ebarrier.sync(i32, i32) #2
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare noundef  i32 @llvm.amdgcn.workitem.id.x() #3
+
+; Function Attrs: convergent nocallback nofree nounwind willreturn
+declare i32 @llvm.hcu.s.abarrier.try.wait(i32, ...) #2
+
+; Function Attrs: nocallback nofree nounwind willreturn
+declare void @llvm.amdgcn.s.waitcnt(i32 immarg) #4
+
+; Function Attrs: convergent nocallback nofree nounwind willreturn
+declare i32 @llvm.hcu.s.abarrier.arrive(i32, ...) #2
+
+; Function Attrs: convergent nocallback nofree nounwind willreturn
+declare void @llvm.hcu.s.abarrier.init(i32, i32) #2
+
+; Function Attrs: convergent nocallback nofree nounwind willreturn
+declare void @llvm.hcu.s.abarrier.inv(i32) #2
+
+; Function Attrs: convergent nocallback nofree nounwind willreturn
+declare void @llvm.hcu.s.set.vgpr.size(i16 immarg) #2
+
+attributes #0 = { "nvvm.reqntid"="256" }
+attributes #1 = { nounwind memory(none) }
+attributes #2 = { convergent nocallback nofree nounwind willreturn }
+attributes #3 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #4 = { nocallback nofree nounwind willreturn }
+
+!llvm.module.flags = !{!0}
+
+!0 = !{i32 2, !"Debug Info Version", i32 3}
