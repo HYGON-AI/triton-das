@@ -33,6 +33,10 @@ from triton.language import semantic as _semantic
 
 from typing import List
 
+pi_u64_t = tl.core.pointer_type(tl.core.dtype("uint64"))
+pi_i64_t = tl.core.pointer_type(tl.core.dtype("int64"))
+pi_i32_t = tl.core.pointer_type(tl.core.dtype("int32"))
+
 # adapted from python/triton/language/core.py
 def dispatch(func, lib_name: str, lib_path: str, args: list, arg_type_symbol_dict: dict, is_pure: bool, _semantic=None):
     '''
@@ -136,6 +140,18 @@ def patch_hash_method_for_pointer_type():
 # apply monkey patch in runtime
 patch_hash_method_for_pointer_type()
 
+# ROCSHMEM_CMPS (enum)
+ROCSHMEM_CMP_EQ = 0
+ROCSHMEM_CMP_NE = 1
+ROCSHMEM_CMP_GT = 2
+ROCSHMEM_CMP_GE = 3
+ROCSHMEM_CMP_LT = 4
+ROCSHMEM_CMP_LE = 5
+
+# ROCSHMEM_SIGNAL_OPS (enum)
+ROCSHMEM_SIGNAL_SET = 0
+ROCSHMEM_SIGNAL_ADD = 1
+
 @core.extern
 def set_rocshmem_ctx(ctx, _semantic=None):
     return extern_call(
@@ -169,8 +185,14 @@ def my_pe(_semantic=None):
 
 @core.extern
 def n_pes(_semantic=None):
-    return extern_call("librocshmem_device", "", [], {(): ("rocshmem_n_pes_wrapper", (tl.int32))}, is_pure=True,
-                       _semantic=_semantic)
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [],
+        {(): ("rocshmem_n_pes_wrapper", (tl.int32))},
+        is_pure=True,
+        _semantic=_semantic,
+    )
 
 
 @core.extern
@@ -181,7 +203,7 @@ def int_p(dest, value, pe, _semantic=None):
         [
             tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
             tl.cast(value, tl.int32, _semantic=_semantic),
-            tl.cast(pe, tl.int32, _semantic=_semantic)
+            tl.cast(pe, tl.int32, _semantic=_semantic),
         ],
         {
             (tl.pointer_type(tl.void), tl.int32, tl.int32): ("rocshmem_int_p_wrapper", ()),
@@ -210,6 +232,24 @@ def int_p(dest, value, pe, _semantic=None):
 #         local_ptr.dtype,
 #         _semantic=_semantic,
 #     )
+
+@core.extern
+def _remote_ptr_wrapper(local_ptr, pe, _semantic=None):
+    return extern_call(
+        "",
+        "",
+        [local_ptr, pe],
+        {
+            (core.pointer_type(core.void), core.dtype("int32")): (
+                "rocshmem_ptr_wrapper",
+                core.pointer_type(core.void),  # of the same dtype
+            )
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
 @core.extern
 def remote_ptr(local_ptr, pe, _semantic=None):
     tl.static_assert(
@@ -233,16 +273,475 @@ def remote_ptr(local_ptr, pe, _semantic=None):
     )
 
 @core.extern
-def _remote_ptr_wrapper(local_ptr, pe, _semantic=None):
+def _getmem_impl(dest,
+                 source,
+                 nbytes,
+                 pe,
+                 SCOPE_SUFFIX: core.constexpr,
+                 NBI: core.constexpr = core.constexpr(""),
+                 _semantic=None):
     return extern_call(
+        "librocshmem_device",
         "",
-        "",
-        [local_ptr, pe],
+        [
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(source, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(nbytes, tl.uint64, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ],
         {
-            (core.pointer_type(core.void), core.dtype("int32")): (
-                "rocshmem_ptr_wrapper",
-                core.pointer_type(core.void),  # of the same dtype
-            )
+            (tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.int32):
+            (
+                f"rocshmem_getmem{NBI.value}{SCOPE_SUFFIX.value}_wrapper",
+                (),
+            ),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def getmem(dest, source, nbytes, pe, _semantic=None):
+    return _getmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr(""),
+                        core.constexpr(""),
+                        _semantic=_semantic)
+
+
+@core.extern
+def getmem_wave(dest, source, nbytes, pe, _semantic=None):
+    return _getmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wave"),
+                        core.constexpr(""),
+                        _semantic=_semantic)
+
+
+
+@core.extern
+def getmem_wg(dest, source, nbytes, pe, _semantic=None):
+    return _getmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wg"),
+                        core.constexpr(""),
+                        _semantic=_semantic)
+
+
+@core.extern
+def getmem_nbi(dest, source, nbytes, pe, _semantic=None):
+    return _getmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr(""),
+                        core.constexpr("_nbi"),
+                        _semantic=_semantic)
+
+
+@core.extern
+def getmem_nbi_wave(dest, source, nbytes, pe, _semantic=None):
+    return _getmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wave"),
+                        core.constexpr("_nbi"),
+                        _semantic=_semantic)
+
+
+@core.extern
+def getmem_nbi_wg(dest, source, nbytes, pe, _semantic=None):
+    return _getmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wg"),
+                        core.constexpr("_nbi"),
+                        _semantic=_semantic)
+
+
+@core.extern
+def _putmem_impl(dest,
+                 source,
+                 nbytes,
+                 pe,
+                 SCOPE_SUFFIX: core.constexpr,
+                 NBI: core.constexpr = core.constexpr(""),
+                 _semantic=None):
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(source, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(nbytes, tl.uint64, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ],
+        {
+            (tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.int32):
+            (
+                f"rocshmem_putmem{NBI.value}{SCOPE_SUFFIX.value}_wrapper",
+                (),
+            ),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def putmem(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr(""),
+                        core.constexpr(""),
+                        _semantic=_semantic)
+
+
+@core.extern
+def putmem_wave(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wave"),
+                        core.constexpr(""),
+                        _semantic=_semantic)
+
+
+@core.extern
+def putmem_wg(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wg"),
+                        core.constexpr(""),
+                        _semantic=_semantic)
+
+
+@core.extern
+def putmem_nbi(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr(""),
+                        core.constexpr("_nbi"),
+                        _semantic=_semantic)
+
+
+@core.extern
+def putmem_nbi_wave(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wave"),
+                        core.constexpr("_nbi"),
+                        _semantic=_semantic)
+
+
+@core.extern
+def putmem_nbi_wg(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest,
+                        source,
+                        nbytes,
+                        pe,
+                        core.constexpr("_wg"),
+                        core.constexpr("_nbi"),
+                        _semantic=_semantic)
+
+@core.extern
+def _putmem_signal_impl(dest, source, nbytes, sig_addr, signal, sig_op, pe, SCOPE_SUFFIX: core.constexpr, NBI: core.constexpr = core.constexpr(""), _semantic=None):
+    tl.static_assert(sig_addr.dtype == tl.pointer_type(tl.int64),
+                     "sig_addr should be a pointer of uint64_t",
+                     _semantic=_semantic)
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(source, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(nbytes, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_addr, tl.pointer_type(tl.int64), _semantic=_semantic),
+            tl.cast(signal, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_op, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ],
+        {
+            (tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.pointer_type(tl.int64), tl.uint64, tl.int32, tl.int32):
+            (
+                f"rocshmem_putmem_signal{NBI.value}{SCOPE_SUFFIX.value}_wrapper",
+                (),
+            ),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+@core.extern
+def putmem_signal(dest,
+                  source,
+                  nbytes,
+                  sig_addr,
+                  signal,
+                  sig_op,
+                  pe,
+                  _semantic=None):
+    return _putmem_signal_impl(
+        dest,
+        source,
+        nbytes,
+        sig_addr,
+        signal,
+        sig_op,
+        pe,
+        core.constexpr(""),
+        core.constexpr(""),
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def putmem_signal_wg(dest,
+                  source,
+                  nbytes,
+                  sig_addr,
+                  signal,
+                  sig_op,
+                  pe,
+                  _semantic=None):
+    return _putmem_signal_impl(
+        dest,
+        source,
+        nbytes,
+        sig_addr,
+        signal,
+        sig_op,
+        pe,
+        core.constexpr("_wg"),
+        core.constexpr(""),
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def putmem_signal_wave(dest,
+                  source,
+                  nbytes,
+                  sig_addr,
+                  signal,
+                  sig_op,
+                  pe,
+                  _semantic=None):
+    return _putmem_signal_impl(
+        dest,
+        source,
+        nbytes,
+        sig_addr,
+        signal,
+        sig_op,
+        pe,
+        core.constexpr("_wave"),
+        core.constexpr(""),
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def putmem_signal_nbi(dest,
+                  source,
+                  nbytes,
+                  sig_addr,
+                  signal,
+                  sig_op,
+                  pe,
+                  _semantic=None):
+    return _putmem_signal_impl(
+        dest,
+        source,
+        nbytes,
+        sig_addr,
+        signal,
+        sig_op,
+        pe,
+        core.constexpr(""),
+        core.constexpr("_nbi"),
+        _semantic=_semantic,
+    )
+
+@core.extern
+def putmem_signal_nbi_wg(dest,
+                  source,
+                  nbytes,
+                  sig_addr,
+                  signal,
+                  sig_op,
+                  pe,
+                  _semantic=None):
+    return _putmem_signal_impl(
+        dest,
+        source,
+        nbytes,
+        sig_addr,
+        signal,
+        sig_op,
+        pe,
+        core.constexpr("_wg"),
+        core.constexpr("_nbi"),
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def putmem_signal_nbi_wave(dest,
+                  source,
+                  nbytes,
+                  sig_addr,
+                  signal,
+                  sig_op,
+                  pe,
+                  _semantic=None):
+    return _putmem_signal_impl(
+        dest,
+        source,
+        nbytes,
+        sig_addr,
+        signal,
+        sig_op,
+        pe,
+        core.constexpr("_wave"),
+        core.constexpr("_nbi"),
+        _semantic=_semantic,
+    )
+
+@core.extern
+def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
+    tl.static_assert(sig_addr.dtype == pi_u64_t,
+                     "sig_addr should be a pointer of uint64_t",
+                     _semantic=_semantic)
+    int_ptr = tl.cast(sig_addr, pi_i32_t, _semantic=_semantic)
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [
+            int_ptr,  # dest (dummy)
+            int_ptr,  # source (dummy)
+            tl.cast(1, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_addr, pi_u64_t, _semantic=_semantic
+                    ),  # no cast: pointer type should be aligned
+            tl.cast(signal, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_op, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ],
+        {
+            (pi_i32_t, pi_i32_t, tl.uint64, pi_u64_t, tl.uint64, tl.int32, tl.int32): (
+                "rocshmem_int_put_signal_wrapper",
+                (),
+            ),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+@core.extern
+def signal_wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
+    tl.static_assert(sig_addr.dtype == pi_u64_t or sig_addr.dtype == pi_i64_t,
+                     "sig_addr should be a pointer of uint64_t/int64_t",
+                     _semantic=_semantic)
+    int_ptr = tl.cast(sig_addr, pi_i32_t, _semantic=_semantic)
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [
+            int_ptr,
+            tl.cast(cmp_, tl.int32, _semantic=_semantic),
+            tl.cast(cmp_val, tl.int32, _semantic=_semantic),
+        ],  # no cast
+        {
+            (pi_i32_t, tl.int32, tl.int32): (
+                "rocshmem_int_wait_until_wrapper",
+                (),
+            ),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+# @core.extern
+# def wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
+#     tl.static_assert(sig_addr.dtype == pi_u64_t or sig_addr.dtype == pi_i64_t,
+#                      "sig_addr should be a pointer of uint64_t/int64_t",
+#                      _semantic=_semantic)
+#     return extern_call(
+#         "librocshmem_device",
+#         "",
+#         [
+#             tl.cast(sig_addr, pi_u64_t, _semantic=_semantic),
+#             tl.cast(cmp_, tl.int32, _semantic=_semantic),
+#             tl.cast(cmp_val, tl.uint64, _semantic=_semantic),
+#         ],  # no cast
+#         {
+#             (pi_u64_t, tl.int32, tl.uint64): (
+#                 "rocshmem_wait_until_wrapper",
+#                 (),
+#             ),
+#         },
+#         is_pure=False,
+#         _semantic=_semantic,
+#     )
+
+
+@core.extern
+def _barrier_all_impl(SCOPE_SUFFIX: core.constexpr, _semantic=None):
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [],
+        {
+            ():
+            (f"rocshmem_barrier_all{SCOPE_SUFFIX.value}_wrapper",
+             ()),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def barrier_all(_semantic=None):
+    return _barrier_all_impl(core.constexpr(""), _semantic=_semantic)
+
+
+@core.extern
+def barrier_all_wave(_semantic=None):
+    return _barrier_all_impl(core.constexpr("_wave"), _semantic=_semantic)
+
+
+@core.extern
+def barrier_all_wg(_semantic=None):
+    return _barrier_all_impl(core.constexpr("_wg"), _semantic=_semantic)
+
+
+@core.extern
+def fence(_semantic=None):
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [],
+        {
+            (): ("rocshmem_fence_wave_wrapper", ()),
         },
         is_pure=False,
         _semantic=_semantic,
