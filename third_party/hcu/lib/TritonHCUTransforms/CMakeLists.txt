@@ -30,6 +30,7 @@ add_triton_library(TritonHCUTransforms
   MlsEncodingInsertion.cpp
   MlsStreamPipeline.cpp
   MlsLowering.cpp
+  UpdateAsyncWaitCount.cpp
   MmacGroup.cpp
   PrepareWdraSplitPlan.cpp
   UtilityHCU.cpp
@@ -44,6 +45,8 @@ add_triton_library(TritonHCUTransforms
   LINK_LIBS PUBLIC
   TritonHCUWdraSupport
   TritonAMDGPUIR
+  TritonAMDGPUTransforms
+  TritonAMDGPUToLLVM
   TritonGPUIR
   TritonAMDUtils
   TritonAMDAnalysis

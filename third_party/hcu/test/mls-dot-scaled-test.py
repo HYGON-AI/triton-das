@@ -908,7 +908,6 @@ def create_test_matrices_f8f6f4(M, K, N, a_layout, b_layout, lhs_data_type: F8F6
 @pytest.mark.parametrize("lhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
 @pytest.mark.parametrize("rhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
 @pytest.mark.parametrize("num_stages", [1, 2])
-@pytest.mark.parametrize("async_copy_use_single_buffer", [False, True])
 @pytest.mark.parametrize("instruction_sched_variant", ["none"])
 @pytest.mark.parametrize("optimize_epilogue", [False])
 @pytest.mark.parametrize("mix_load", [0b00])
@@ -929,8 +928,8 @@ def create_test_matrices_f8f6f4(M, K, N, a_layout, b_layout, lhs_data_type: F8F6
 @pytest.mark.parametrize("mmac_layout_force", [1])
 def test_mls_f8f6f4_comprehensive(config_list, layout_case, with_a_scale, with_b_scale,
                                   size_multiplier, mix_load, optimize_epilogue,
-                                  num_stages, async_copy_use_single_buffer,
-                                  instruction_sched_variant, mmac_layout_force,
+                                  num_stages, instruction_sched_variant,
+                                  mmac_layout_force,
                                   lhs_data_type, rhs_data_type, boundary_check):
     a_layout, b_layout = LAYOUT_CASES[layout_case]
     config = _normalize_block_config(config_list)
@@ -981,13 +980,11 @@ def test_mls_f8f6f4_comprehensive(config_list, layout_case, with_a_scale, with_b
     print(f"  B scale: {with_b_scale}")
     print(f"  epilogue: {optimize_epilogue}")
     print(f"  阶段数: {num_stages}")
-    print(f"  异步拷贝单缓冲区: {async_copy_use_single_buffer}")
     print(f"  指令调度变种: {instruction_sched_variant}")
     print(f"  mmac_layout_force: {mmac_layout_force}")
     print(f"  大小倍数: {size_multiplier}")
 
     config['num_stages'] = num_stages
-    config['async_copy_use_single_buffer'] = async_copy_use_single_buffer
     config['instruction_sched_variant'] = instruction_sched_variant
     config['mmac_layout_force'] = mmac_layout_force
     config['optimize_epilogue'] = optimize_epilogue
@@ -1093,7 +1090,6 @@ torch.manual_seed(0)
 # num_warps = 1
 # num_stages = 1
 # mix_load = 0b00
-# async_copy_use_single_buffer = False
 # instruction_sched_variant = "none"
 # mmac_layout_force = 1
 # lhs_data_type = F8F6F4DataType.FP4
@@ -1115,7 +1111,6 @@ torch.manual_seed(0)
 #                               mix_load=mix_load,
 #                               optimize_epilogue=False,
 #                               num_stages=1,
-#                               async_copy_use_single_buffer=False,
 #                               instruction_sched_variant="none",
 #                               mmac_layout_force=1,
 #                               lhs_data_type=lhs_data_type,
@@ -1135,7 +1130,6 @@ torch.manual_seed(0)
 # num_warps = 1
 # num_stages = 1
 # mix_load = 0b00
-# async_copy_use_single_buffer = False
 # instruction_sched_variant = "none"
 # mmac_layout_force = 1
 # lhs_data_type = F8F6F4DataType.FP4
@@ -1158,7 +1152,6 @@ torch.manual_seed(0)
 #                               mix_load=mix_load,
 #                               optimize_epilogue=False,
 #                               num_stages=1,
-#                               async_copy_use_single_buffer=False,
 #                               instruction_sched_variant="none",
 #                               mmac_layout_force=1,
 #                               lhs_data_type=lhs_data_type,

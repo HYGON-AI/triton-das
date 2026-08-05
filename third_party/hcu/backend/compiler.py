@@ -65,8 +65,6 @@ class HIPOptions:
     # 4: mmac interleave and transpose
     mmac_layout_force: int = -1
 
-    async_copy_use_single_buffer: bool = True
-
     # The following option provides hints to the AMDGPU backend regarding instruction scheduling
     # for all `tt.dot` operations in a kernel. The "none" variant preserves the default
     # instruction scheduling of the AMDGPU backend which aims at maximizing occupancy.
@@ -609,32 +607,24 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
 
-        global_prefetch = getattr(knobs.amd, "global_prefetch", 0)
-        local_prefetch = getattr(knobs.amd, "local_prefetch", 0)
         use_async_copy = knobs.amd.use_async_copy
 
-        # The `local-prefetch` scheduling variant requires turning on buffer ops.
-        if options.schedule_hint == "local-prefetch":
-            global_prefetch = 1
+        # Preserve the old triton stream-prefetch behavior for MLS:
+        # separate global load and LDS consumption by one pipeline stage.
+        global_prefetch = int(options.schedule_hint == "local-prefetch")
 
-        async_copy_single_buffer = options.async_copy_use_single_buffer and (options.num_stages == 2 and not global_prefetch)
         # When WASP is enabled, skip MLS software pipelining (same rationale as
         # skipping amd stream_pipeline): WASP owns multi-buffering / sync for
         # matrix_load_to_local. Running mls_stream_pipeline first injects scf.if
         # epilogue peeling that PartitionLoopsHCU cannot handle.
         if not options.wasp_enabled:
-            hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, async_copy_single_buffer)
+            hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, use_async_copy)
 
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
 
         if not options.wasp_enabled:
-            if hasattr(amd.passes.ttgpuir, "add_stream_pipeline"):
-                amd.passes.ttgpuir.add_stream_pipeline(
-                    pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy, use_block_pingpong
-                )
-            else:
-                amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, use_block_pingpong)
+            amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, use_block_pingpong)
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
@@ -685,8 +675,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
-        if 1:#use_async_copy:
-            amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
+        hcu.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod, 'make_ttgir')
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
@@ -714,7 +703,7 @@ class HIPBackend(BaseBackend):
         # TritonGPU -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
+        hcu.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         # custom_lds_size is an experimental parameter that defines amount of LDS available
         # for one thread block. Measured in bytes.
         #

@@ -175,7 +175,7 @@ using LoadToStreamOpMap = llvm::MapVector<Operation *, StreamOpVariant>;
 // }
 
 AsyncCopyChainOps createAsyncCopy(tt::MatrixLoadOp loadOp, Value alloc,
-                                  Value extractIdx) {
+                                  Value extractIdx, int numBuffers) {
   OpBuilder builder(loadOp);
   Location loc = loadOp.getLoc();
 
@@ -197,10 +197,15 @@ AsyncCopyChainOps createAsyncCopy(tt::MatrixLoadOp loadOp, Value alloc,
   ttg::AsyncWaitOp waitOp =
       builder.create<ttg::AsyncWaitOp>(loc, commitOp->getResult(0), 0);
 
-  // HCU TODO: if loadLoad with AsyncWait, membarFilter will stop insert
-  // barrier for WAR and lead to incorrect result.
-  auto maybeSharedLoad = tt::replaceUsesWithLocalLoad(
-      builder, loadOp->getResult(0), viewLoad /*, waitOp */);
+  // A LocalLoad token tells membar that AsyncWait already synchronizes this
+  // read with the async write. That is valid for multi-buffering, where the
+  // next MatrixLoadToLocal writes a different slot. With one slot, omitting
+  // the token preserves the true LocalLoad -> next MatrixLoadToLocal WAR.
+  auto maybeSharedLoad =
+      numBuffers == 1
+          ? tt::replaceUsesWithLocalLoad(builder, loadOp->getResult(0), viewLoad)
+          : tt::replaceUsesWithLocalLoad(builder, loadOp->getResult(0),
+                                         viewLoad, waitOp);
 
   return {copyOp, commitOp, waitOp, maybeSharedLoad};
 }
@@ -452,7 +457,8 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
         loadToStreamOp[loadOp] = createStreamCopy(loadOp, alloc, extractIdx);
       }
     } else if (matrixLoadOp) {
-      loadToStreamOp[matrixLoadOp] = createAsyncCopy(matrixLoadOp, alloc, extractIdx);
+      loadToStreamOp[matrixLoadOp] =
+          createAsyncCopy(matrixLoadOp, alloc, extractIdx, numBuffers);
     }
   }
 
@@ -703,7 +709,7 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
                            int &numBuffers, int globalPrefetch,
                            int localPrefetch, bool useAsyncCopy,
                            bool waitAtTail,
-                           bool asyncCopySingleBuffer,
+                           bool useSingleBuffer,
                            bool &forceSchedLocalLoad,
                            Clusters &clusters,
                            tt::CoarseSchedule &schedule) {
@@ -714,8 +720,8 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
   stages[SCHED_COMPUTE] = lastStage;
   stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
 
-  bool _asyncCopySingleBuffer = maxDist == 0 ? asyncCopySingleBuffer : false;
-  if (_asyncCopySingleBuffer) {
+  bool useSingleBufferSchedule = maxDist == 0 && useSingleBuffer;
+  if (useSingleBufferSchedule) {
     return initScheduleSingleBuf(maxDist, stages, numStages, numBuffers,
                                  globalPrefetch, localPrefetch,
                                  useAsyncCopy, waitAtTail,
@@ -1003,7 +1009,7 @@ tt::CoarseSchedule
 buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
               int globalPrefetch, int localPrefetch, bool useAsyncCopy,
               bool waitAtTail,
-              bool asyncCopySingleBuffer,
+              bool useSingleBuffer,
               triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
   tt::CoarseSchedule schedule(numStages);
   Stages stages;
@@ -1031,7 +1037,7 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
   if (failed(initSchedule(maxDist, stages, numStages, numBuffers,
                           globalPrefetch, localPrefetch, useAsyncCopy,
                           waitAtTail,
-                          asyncCopySingleBuffer,
+                          useSingleBuffer,
                           forceSchedLocalLoad,
                           clusters, schedule)))
     return {};
@@ -1067,7 +1073,7 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
 FailureOr<scf::ForOp> pipelineLoop(scf::ForOp forOp, int numStages,
                                    int globalPrefetch, int localPrefetch,
                                    bool useAsyncCopy, bool waitAtTail,
-                                   bool asyncCopySingleBuffer) {
+                                   bool useSingleBuffer) {
 
   triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
       forOp->getParentOfType<ModuleOp>());
@@ -1084,7 +1090,7 @@ FailureOr<scf::ForOp> pipelineLoop(scf::ForOp forOp, int numStages,
   schedule = SingleDotSchedule::buildSchedule(
       forOp, numStages, loadToInfo, globalPrefetch, localPrefetch,
       useAsyncCopy, waitAtTail,
-      asyncCopySingleBuffer, axisInfoAnalysis);
+      useSingleBuffer, axisInfoAnalysis);
 
   if (schedule.empty()) {
     return failure();
@@ -1164,7 +1170,7 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
     }
 
     constexpr int localPrefetch = 0;
-    constexpr bool useAsyncCopy = true;
+    constexpr bool mlsUsesDirectToLds = true;
 
     SmallVector<scf::ForOp> loops;
     getOperation()->walk([&](scf::ForOp forOp) {
@@ -1187,21 +1193,20 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
       // i.e., we can still disable `waitAtTail` by explicitly disabling
       // pingpong, which is the only use case of this scheduling variant.
       int numStagesThis = tt::getNumStagesOrDefault(forOp, numStages);
-      bool waitAtTail = false; // usePingpong && (numStagesThis == 3) && useAsyncCopy;
+      bool waitAtTail = false;
+      bool useSingleBuffer = !useAsyncCopy && numStagesThis == 2 &&
+                             globalPrefetch == 0;
       (void)pipelineLoop(forOp, numStagesThis, globalPrefetch, localPrefetch,
-                         useAsyncCopy, waitAtTail,
-                         asyncCopySingleBuffer != 0);
+                         mlsUsesDirectToLds, waitAtTail, useSingleBuffer);
     }
 
     // NOTE: Leave empty for now, until we utilize customEpiloguePeeling
     DenseSet<ttg::MaskOp> peeledMaskOps;
     tt::resolveMaskOp(moduleOp);
 
-    if (useAsyncCopy) {
-      llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
-      moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
-      tt::combineRedundantWaitOps(waitOps);
-    }
+    llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
+    moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
+    tt::combineRedundantWaitOps(waitOps);
   }
 };
 

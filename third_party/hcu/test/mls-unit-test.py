@@ -868,7 +868,6 @@ def create_test_matrices(M, K, N, a_layout, b_layout, dtype):
 @pytest.mark.parametrize("use_mask", [False, True] if regression_run else [False, True])
 @pytest.mark.parametrize("boundary_check", [False, True] if regression_run else [False, True])
 @pytest.mark.parametrize("num_stages", [1, 2] if regression_run else [1, 2])
-@pytest.mark.parametrize("async_copy_use_single_buffer", [True])
 @pytest.mark.parametrize("schedule_hint", ["none"] if regression_run else ["none", "local-prefetch"])
 @pytest.mark.parametrize("optimize_epilogue", [True] if regression_run else [False, True])
 @pytest.mark.parametrize("mix_load", [0b00, 0b01] if regression_run else [0b00, 0b01, 0b10, 0b11])
@@ -898,8 +897,7 @@ def create_test_matrices(M, K, N, a_layout, b_layout, dtype):
 @pytest.mark.parametrize("mmac_layout_force", [1, 4] if regression_run else [1, 4])
 def test_mls_comprehensive(dtype, config_list, layout_combination,
                            size_multiplier, mix_load, optimize_epilogue,
-                           num_stages, async_copy_use_single_buffer,
-                           schedule_hint, mmac_layout_force,
+                           num_stages, schedule_hint, mmac_layout_force,
                            boundary_check, use_mask):
 
     if not is_hcu_support_mls():
@@ -949,8 +947,6 @@ def test_mls_comprehensive(dtype, config_list, layout_combination,
     if M < BLOCK_SIZE_M or N < BLOCK_SIZE_N or K < BLOCK_SIZE_K:
         pytest.skip(f"skip: [{M},{N},{K}] with BLOCK[{BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K}]")
 
-    if (num_stages == 3 and async_copy_use_single_buffer):
-        pytest.skip(f"skip: [{M},{N},{K}] with num_stages={num_stages} and async_copy_use_single_buffer={async_copy_use_single_buffer}")
     if (num_stages == 1 and schedule_hint == "local-prefetch"):
         pytest.skip(f"skip: [{M},{N},{K}] with num_stages={num_stages} and schedule_hint={schedule_hint}")
     if boundary_check or use_mask:
@@ -974,14 +970,12 @@ def test_mls_comprehensive(dtype, config_list, layout_combination,
     print(f"  使用掩码: {use_mask}")
     print(f"  epilogue: {optimize_epilogue}")
     print(f"  阶段数: {num_stages}")
-    print(f"  异步拷贝单缓冲区: {async_copy_use_single_buffer}")
     print(f"  指令调度变种: {schedule_hint}")
     print(f"  mmac_layout_force: {mmac_layout_force}")
 
     config_list['optimize_epilogue'] = optimize_epilogue
     config_list['mmac_layout_force'] = mmac_layout_force
     config_list['num_stages'] = num_stages
-    config_list['async_copy_use_single_buffer'] = async_copy_use_single_buffer
     config_list['schedule_hint'] = schedule_hint
 
     result2 = run_layout_combination_test(a2, b2, layout_combination[0], layout_combination[1],
@@ -1122,7 +1116,6 @@ torch.manual_seed(0)
 # config2 = {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 64, 'num_warps': 1, "GROUP_SIZE_M": 1}
 # config2['optimize_epilogue'] = 1
 # config2['num_stages'] = 2
-# config2['async_copy_use_single_buffer'] = True
 # # config2['schedule_hint'] = "local-prefetch"
 
 # print(f"\n{'='*60}")

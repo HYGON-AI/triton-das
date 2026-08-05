@@ -39,11 +39,15 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
           pm.addPass(mlir::triton::createConvertTritonHCUToLLVMPass(arch, ftz));
         });
   ADD_PASS_OPTION_WRAPPER_3("add_mls_stream_pipeline",
-                            mlir::createTritonHCUMlsStreamPipeline, int, int, int);
+                            mlir::createTritonHCUMlsStreamPipeline, int, int,
+                            bool);
   ADD_PASS_WRAPPER_0("add_mls_encoding_insertion",
                      mlir::createTritonHCUMlsEncodingInsertion);
   ADD_PASS_WRAPPER_0("add_mls_lowering_pass",
                      mlir::createTritonHCUMlsLowering);
+  ADD_PASS_OPTION_WRAPPER_1("add_update_async_wait_count",
+                            mlir::createTritonHCUUpdateAsyncWaitCount,
+                            std::string);
   // HCU wrapper around AMD ConvertToBufferOps — passes extra HCU-specific options.
   ADD_PASS_OPTION_WRAPPER_6("add_convert_to_buffer_ops",
                             mlir::createTritonAMDGPUConvertToBufferOps,

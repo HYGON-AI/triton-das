@@ -76,7 +76,7 @@ def TritonHCUMlsStreamPipeline : Pass<"tritonhcu-mls-stream-pipeline", "mlir::Mo
   let options = [
     Option<"numStages", "num_stages", "int32_t", /*default*/"2", "Number of Pipeline stages">,
     Option<"globalPrefetch", "global_prefetch", "int32_t", /*default*/"0", "Set global prefetch stage count">,
-    Option<"asyncCopySingleBuffer", "async_copy_single_buffer", "int32_t", /*default*/"1", "Use AsyncCopyGlobalToLocal">,
+    Option<"useAsyncCopy", "use_async_copy", "bool", /*default*/"false", "Use multi-buffer MLS async copy">,
   ];
 }
 
@@ -88,6 +88,16 @@ def TritonHCUMlsEncodingInsertion: Pass<"tritonhcu-mls-encoding-insertion", "mli
 def TritonHCUMlsLowering: Pass<"tritonhcu-mls-lowering", "mlir::ModuleOp"> {
   let summary = "Lower matrix_load to the matrix_load_to_local instruction";
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
+
+def TritonHCUUpdateAsyncWaitCount : Pass<"tritonhcu-update-async-wait-count", "mlir::ModuleOp"> {
+  let summary = "Compute async wait count for HCU async copy and MLS";
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+  let options = [
+    Option<"archGenerationName", "arch-generation-name",
+           "std::string", /*default=*/"std::string{}",
+           "GFX generation name of target device.">
+  ];
 }
 
 def HCUConvertWarpSpecializeToLLVM : Pass<"triton-hcu-convert-warp-specialize-to-llvm", "mlir::ModuleOp"> {
