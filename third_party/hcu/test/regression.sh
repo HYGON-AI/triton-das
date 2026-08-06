@@ -24,8 +24,9 @@ pytest_cases=(
   "${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"
   "${hcu_file_path}/test_buffer_atomic_dtypes.py"
   "${hcu_file_path}/regression_subprocess.py"
-  "${hcu_file_path}/test_hcu_gemm_wasp_wdra_mlir.py"
   "${hcu_file_path}/test_hcu_barrier_pc_mlir.py"
+  # WASP/WDRA IR shape: lit test/TritonGPU/hcu/hcu-gemm-wasp-wdra.mlir
+  # Runtime matrix: test_wasp_mls_regression.py (run separately / via launch.sh)
 )
 
 pytest_args=()

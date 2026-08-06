@@ -28,6 +28,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "TritonHCU/MlsGroup.h"
+#include "TritonHCU/WdraSplitPlan.h"
 
 using namespace mlir;
 using namespace mlir::triton::HCU;
@@ -354,6 +355,10 @@ struct DotOpMFMAConversionHelper {
     SmallVector<int64_t> fcStrides =
         computeStrides({numRepB, numRepM, numRepN, elemsPerVec});
 
+    // Optional fence: keep preceding local_load (ds_read*) before any mmac.
+    if (getSchedBarrierBeforeMmacAttr(op))
+      ROCDL::SchedBarrier::create(rewriter, loc, /*mask=*/0);
+
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
@@ -385,6 +390,11 @@ struct DotOpMFMAConversionHelper {
         }
       }
     }
+
+    // Optional fence: keep empty abarrier.arrive after the mmac cluster when
+    // empty_arrive_after_mmac places arrive after tt.dot.
+    if (getEmptyArriveAfterMmacAttr(op))
+      ROCDL::SchedBarrier::create(rewriter, loc, /*mask=*/0);
 
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
@@ -856,6 +866,9 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     } else
       innerKBound = numVecInKBase;
 
+    if (getSchedBarrierBeforeMmacAttr(op))
+      ROCDL::SchedBarrier::create(rewriter, loc, /*mask=*/0);
+
     for (outerK = 0; outerK < outerKBound; outerK++) {
       for (int b = 0; b < numRepB; ++b) {
         for (int m = 0; m < numRepM; ++m) {
@@ -925,6 +938,9 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         }
       }
     }
+
+    if (getEmptyArriveAfterMmacAttr(op))
+      ROCDL::SchedBarrier::create(rewriter, loc, /*mask=*/0);
 
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next

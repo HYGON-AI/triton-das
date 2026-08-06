@@ -2,17 +2,25 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "TritonHCU/WdraSplitPlan.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "llvm/ADT/ScopeExit.h"
+#include <climits>
+#include <memory>
 
 using namespace mlir;
 using namespace triton;
 using namespace triton::gpu;
 namespace ttng = triton::nvidia_gpu;
+namespace hcu = triton::HCU;
+namespace tta = mlir::triton::amdgpu;
 
 //===----------------------------------------------------------------------===//
 // relayoutWarps
@@ -136,6 +144,84 @@ static LogicalResult relayoutWarps(ModuleAxisInfoAnalysis &axisInfo,
 }
 
 //===----------------------------------------------------------------------===//
+// reorderPartitionsLoadFirst
+//===----------------------------------------------------------------------===//
+
+// True if this partition is a Load/producer group (vs MMA/consumer).
+static bool regionIsLoadPartition(Region *region) {
+  bool hasProducer = false;
+  bool hasDot = false;
+  region->walk([&](Operation *op) {
+    if (isa<LoadOp, LocalStoreOp, tta::MatrixLoadToLocalOp>(op))
+      hasProducer = true;
+    if (isa<triton::DotOpInterface>(op))
+      hasDot = true;
+  });
+  if (hasProducer && !hasDot)
+    return true;
+  if (hasDot)
+    return false;
+  return hasProducer;
+}
+
+static int regionMinTaskId(Region *region) {
+  int minId = INT_MAX;
+  region->walk([&](Operation *op) {
+    if (auto attr = op->getAttrOfType<DenseI32ArrayAttr>("async_task_id")) {
+      for (int32_t id : attr.asArrayRef())
+        minId = std::min(minId, static_cast<int>(id));
+    }
+  });
+  return minId == INT_MAX ? 0 : minId;
+}
+
+// WASP + WDRA: put all Load partitions before MMA; within each role, main
+// (task 0) before tail (task 1). Swaps region bodies in place and permutes
+// partitionNumWarps the same way.
+static void reorderPartitionsLoadFirst(WarpSpecializeOp wsOp) {
+  auto regions = llvm::to_vector(wsOp.getPartitionRegions());
+  unsigned n = regions.size();
+  if (n < 2)
+    return;
+
+  SmallVector<unsigned> order;
+  for (unsigned i = 0; i < n; ++i)
+    order.push_back(i);
+  llvm::stable_sort(order, [&](unsigned a, unsigned b) {
+    bool aLoad = regionIsLoadPartition(regions[a]);
+    bool bLoad = regionIsLoadPartition(regions[b]);
+    if (aLoad != bLoad)
+      return aLoad && !bLoad;
+    return regionMinTaskId(regions[a]) < regionMinTaskId(regions[b]);
+  });
+
+  bool identity = true;
+  for (unsigned i = 0; i < n; ++i) {
+    if (order[i] != i) {
+      identity = false;
+      break;
+    }
+  }
+  if (identity)
+    return;
+
+  SmallVector<std::unique_ptr<Region>> temps;
+  temps.reserve(n);
+  for (unsigned i = 0; i < n; ++i) {
+    temps.push_back(std::make_unique<Region>());
+    temps.back()->takeBody(*regions[i]);
+  }
+  for (unsigned i = 0; i < n; ++i)
+    regions[i]->takeBody(*temps[order[i]]);
+
+  SmallVector<int32_t> oldWarps = llvm::to_vector(wsOp.getPartitionNumWarps());
+  SmallVector<int32_t> newWarps(n);
+  for (unsigned i = 0; i < n; ++i)
+    newWarps[i] = oldWarps[order[i]];
+  wsOp.setPartitionNumWarps(newWarps);
+}
+
+//===----------------------------------------------------------------------===//
 // optimizePartitionWarps
 //===----------------------------------------------------------------------===//
 
@@ -155,6 +241,10 @@ static LogicalResult optimizePartitionNumWarps(ModuleAxisInfoAnalysis &axisInfo,
                                                bool wdraEnabled,
                                                int waspNumLoadWarps,
                                                int waspNumMmaWarps) {
+  // Unify WASP/WDRA wave layout before estimating regs / assigning warps:
+  // Load* then MMA*, main (task 0) before tail (task 1).
+  reorderPartitionsLoadFirst(wsOp);
+
   // Extremely rough estimate of the number of registers needed per partition.
   // For each partition, get the number of i32 registers used by the largest
   // tensor value.
@@ -195,16 +285,24 @@ static LogicalResult optimizePartitionNumWarps(ModuleAxisInfoAnalysis &axisInfo,
   SmallVector<int32_t> partitionNumWarps =
       llvm::to_vector(wsOp.getPartitionNumWarps());
 
-  if (wdraEnabled && waspNumMmaWarps > 4) {
-      partitionNumWarps[0] = 4; // mma main
-      partitionNumWarps[1] = 4; // load
-      partitionNumWarps[2] = 4; // mma tail
+  hcu::WdraTopology topo =
+      hcu::deriveWdraTopology(wdraEnabled, waspNumLoadWarps, waspNumMmaWarps);
+  if (topo.kind == hcu::WdraTopoKind::TwoPTwoC) {
+    // [Load0, Load1, MMA0, MMA1] — 4 warps each.
+    for (unsigned i = 0; i < partitionNumWarps.size(); ++i)
+      partitionNumWarps[i] = topo.warpsPerPartition;
+  } else if (topo.kind == hcu::WdraTopoKind::OnePTwoC) {
+    // [Load, MMA_main, MMA_tail]
+    for (unsigned i = 0; i < partitionNumWarps.size(); ++i)
+      partitionNumWarps[i] = topo.warpsPerPartition;
   } else if (wdraEnabled) {
-      partitionNumWarps[0] = 4; // mma
-      partitionNumWarps[1] = 4; // load
+    // Unsplit WDRA after reorder: [Load, MMA]
+    partitionNumWarps[0] = 4; // load
+    partitionNumWarps[1] = 4; // mma
   } else {
-      partitionNumWarps[0] = waspNumMmaWarps;   // mma
-      partitionNumWarps[1] = waspNumLoadWarps;  // load
+    // WASP-only after reorder: [Load, MMA]
+    partitionNumWarps[0] = waspNumLoadWarps;
+    partitionNumWarps[1] = waspNumMmaWarps;
   }
   /*
   // Determine if a partition has a lower limit on the number of warps.

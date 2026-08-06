@@ -1,10 +1,107 @@
 #include "TritonHCU/WdraSplitPlan.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 namespace mlir::triton::HCU {
+
+WdraTopology deriveWdraTopology(bool wdraEnabled, int waspNumLoadWarps,
+                                int waspNumMmaWarps) {
+  WdraTopology topo;
+  if (!wdraEnabled)
+    return topo;
+  topo.warpsPerPartition = 4;
+  if (waspNumLoadWarps == 8 && waspNumMmaWarps == 8) {
+    topo.kind = WdraTopoKind::TwoPTwoC;
+    topo.numConsumerGroups = 2;
+    topo.numLoadGroups = 2;
+    return topo;
+  }
+  if (waspNumLoadWarps == 4 && waspNumMmaWarps == 8) {
+    topo.kind = WdraTopoKind::OnePTwoC;
+    topo.numConsumerGroups = 2;
+    topo.numLoadGroups = 1;
+    return topo;
+  }
+  // wdra + 4+4: single MMA partition, no DataPartition split.
+  return topo;
+}
+
+void setWdraTopologyAttr(ModuleOp mod, WdraTopology topo) {
+  mod->setAttr(kWdraTopoAttrName,
+               IntegerAttr::get(IntegerType::get(mod.getContext(), 32),
+                                static_cast<int32_t>(topo.kind)));
+}
+
+static void setModuleBoolAttr(ModuleOp mod, StringRef name, bool enabled) {
+  mod->setAttr(name, BoolAttr::get(mod.getContext(), enabled));
+}
+
+static bool getModuleBoolAttr(Operation *op, StringRef name, bool defaultVal) {
+  ModuleOp mod = dyn_cast<ModuleOp>(op);
+  if (!mod)
+    mod = op->getParentOfType<ModuleOp>();
+  if (!mod)
+    return defaultVal;
+  if (auto attr = mod->getAttrOfType<BoolAttr>(name))
+    return attr.getValue();
+  if (auto attr = mod->getAttrOfType<IntegerAttr>(name))
+    return attr.getInt() != 0;
+  return defaultVal;
+}
+
+void setSchedBarrierBeforeMmacAttr(ModuleOp mod, bool enabled) {
+  setModuleBoolAttr(mod, kSchedBarrierBeforeMmacAttrName, enabled);
+}
+
+void setEmptyArriveAfterMmacAttr(ModuleOp mod, bool enabled) {
+  setModuleBoolAttr(mod, kEmptyArriveAfterMmacAttrName, enabled);
+}
+
+void setSchedBarrierBetweenABLoadsAttr(ModuleOp mod, bool enabled) {
+  setModuleBoolAttr(mod, kSchedBarrierBetweenABLoadsAttrName, enabled);
+}
+
+bool getSchedBarrierBeforeMmacAttr(Operation *op, bool defaultVal) {
+  return getModuleBoolAttr(op, kSchedBarrierBeforeMmacAttrName, defaultVal);
+}
+
+bool getEmptyArriveAfterMmacAttr(Operation *op, bool defaultVal) {
+  return getModuleBoolAttr(op, kEmptyArriveAfterMmacAttrName, defaultVal);
+}
+
+bool getSchedBarrierBetweenABLoadsAttr(Operation *op, bool defaultVal) {
+  return getModuleBoolAttr(op, kSchedBarrierBetweenABLoadsAttrName, defaultVal);
+}
+
+WdraTopology getWdraTopologyAttr(Operation *op) {
+  ModuleOp mod = dyn_cast<ModuleOp>(op);
+  if (!mod)
+    mod = op->getParentOfType<ModuleOp>();
+  if (!mod)
+    return {};
+  auto attr = mod->getAttrOfType<IntegerAttr>(kWdraTopoAttrName);
+  if (!attr)
+    return {};
+  WdraTopology topo;
+  topo.kind = static_cast<WdraTopoKind>(attr.getInt());
+  topo.warpsPerPartition = 4;
+  switch (topo.kind) {
+  case WdraTopoKind::TwoPTwoC:
+    topo.numConsumerGroups = 2;
+    topo.numLoadGroups = 2;
+    break;
+  case WdraTopoKind::OnePTwoC:
+    topo.numConsumerGroups = 2;
+    topo.numLoadGroups = 1;
+    break;
+  default:
+    break;
+  }
+  return topo;
+}
 
 std::optional<WdraSplitPlan>
 inferWdraSplitPlan(DotOpInterface dot, unsigned factor) {

@@ -80,12 +80,44 @@ void collectAssumptionsForFuncArgPtr(ModuleOp mod, DenseMap<Value, SetVector<Ope
   });
 }
 
+/// If `value` is a `ttg.warp_specialize` partition block argument, return the
+/// matching explicit capture; otherwise return `value` unchanged. Walk through
+/// nested captures until a non-partition value is reached.
+static Value resolveThroughWarpSpecializeCaptures(Value value) {
+  while (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    Region *region = blockArg.getParentRegion();
+    auto wsOp = region->getParentOfType<ttg::WarpSpecializeOp>();
+    if (!wsOp)
+      break;
+
+    bool isPartitionEntry = false;
+    for (Region *part : wsOp.getPartitionRegions()) {
+      if (blockArg.getOwner() == &part->front()) {
+        isPartitionEntry = true;
+        break;
+      }
+    }
+    if (!isPartitionEntry)
+      break;
+
+    unsigned idx = blockArg.getArgNumber();
+    ValueRange captures = wsOp.getExplicitCaptures();
+    if (idx >= captures.size())
+      break;
+    LDBG("WS capture unwrap: partition arg #" << idx << " -> " << captures[idx]);
+    value = captures[idx];
+  }
+  return value;
+}
+
 bool isFuncArgPtrWithNonNegativeAssumption(mlir::Value value,
   const DenseMap<Value, SetVector<Operation *>> &assumptions) {
 
   while (value.getDefiningOp() && isa<triton::AddPtrOp>(value.getDefiningOp())) {
     value = value.getDefiningOp<triton::AddPtrOp>().getPtr();
   }
+
+  value = resolveThroughWarpSpecializeCaptures(value);
 
   if (value.getDefiningOp() || !isa<mlir::BlockArgument>(value))
     return false;
@@ -202,6 +234,11 @@ bool isByteOffsetWithin4GB(triton::AddPtrOp addPtrOp,
 }
 
 bool isFuncArgWith32bitPtrRange(mlir::Value value) {
+  // WASP/WDRA capture kernel pointer args into ttg.warp_specialize partitions.
+  // Those partition block args do not carry tt.pointer_range; look through the
+  // capture list back to the original func arg.
+  value = resolveThroughWarpSpecializeCaptures(value);
+
   if (value.getDefiningOp())
     return false;
 

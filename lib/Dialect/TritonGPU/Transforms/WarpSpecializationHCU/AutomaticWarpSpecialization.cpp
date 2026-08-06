@@ -5,6 +5,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "third_party/nvidia/include/Dialect/NVWS/Transforms/Passes.h"
+#include "TritonHCU/WdraSplitPlan.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
@@ -16,6 +17,7 @@ using namespace mlir;
 using namespace triton;
 using namespace triton::gpu;
 namespace ttng = triton::nvidia_gpu;
+namespace hcu = triton::HCU;
 
 namespace {
 // Annotate unannotated ops inside warp-specialized loops with the root
@@ -83,6 +85,11 @@ void AutomaticWarpSpecialization::runOnOperation() {
   // abarrier allocations do not leak across different invocations.
   triton::resetAbarrierIds();
 
+  ModuleOp mod = getOperation();
+  hcu::WdraTopology topo =
+      hcu::deriveWdraTopology(wdraEnabled, waspNumLoadWarps, waspNumMmaWarps);
+  hcu::setWdraTopologyAttr(mod, topo);
+
   OpPassManager pm;
   pm.addPass(createTritonGPUConvertLayoutThroughShared());
   pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
@@ -99,7 +106,9 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.addPass(createCSEPass());
   pm.addPass(createNVWSAssignStagePhase());
   pm.addPass(createNVWSLowerAref());
-  if (wdraEnabled && waspNumMmaWarps > 4) {
+  // OnePTwoC / TwoPTwoC both need consumer (and for TwoPTwoC, producer) split.
+  if (topo.kind == hcu::WdraTopoKind::OnePTwoC ||
+      topo.kind == hcu::WdraTopoKind::TwoPTwoC) {
     pm.addPass(createTritonGPUDataPartition());
     pm.addPass(createTritonGPUSplitMmaPartitions());
   }

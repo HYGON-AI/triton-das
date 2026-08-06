@@ -7,6 +7,7 @@
 //     --tritongpu-automatic-warp-specialization-hcu="num-stages=2 wdra-enabled=true wasp-num-load-warps=4 wasp-num-mma-warps=4"
 //   triton-opt %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir \
 //     --tritongpu-automatic-warp-specialization-hcu="num-stages=2 wdra-enabled=true wasp-num-load-warps=4 wasp-num-mma-warps=8"
+//   (wdra88 / TwoPTwoC golden dumped from Python HCU pipeline with load=8,mma=8)
 //
 // Note: triton-opt currently cannot emit ROCDL HCU abarrier ops without loading
 // the HCU dialect via the Python backend; goldens are produced with the HCU
@@ -16,6 +17,7 @@
 // RUN: FileCheck %s --check-prefix=WASP48 --input-file=%S/Inputs/hcu-gemm-wasp-only-post-48.ttgir
 // RUN: FileCheck %s --check-prefix=WDRA44 --input-file=%S/Inputs/hcu-gemm-wasp-wdra-post-44.ttgir
 // RUN: FileCheck %s --check-prefix=WDRA48 --input-file=%S/Inputs/hcu-gemm-wasp-wdra-post-48.ttgir
+// RUN: FileCheck %s --check-prefix=WDRA88 --input-file=%S/Inputs/hcu-gemm-wasp-wdra-post-88.ttgir
 
 // WASP-only 4 load + 4 MMA: 2 partitions, no MMA split.
 // WASP44: module attributes
@@ -34,7 +36,7 @@
 // WASP44-SAME: num_warps(4)
 // WASP44-NOT: partition2
 
-// WASP-only 4 load + 8 MMA: still 2 partitions (MMA stays one group of 8).
+// WASP-only 4 load + 8 MMA: still 2 partitions (Load first, then MMA group of 8).
 // WASP48: module attributes
 // WASP48-SAME: ttg.total-num-warps" = 12 : i32
 // WASP48-LABEL: @matmul_kernel
@@ -42,11 +44,11 @@
 // WASP48: rocdl.hcu.s.abarrier.init
 // WASP48: ttg.warp_specialize
 // WASP48-SAME: requestedRegisters = array<i32: 88, 88>
-// WASP48-SAME: warpGroupStartIds = array<i32: 0, 8>
+// WASP48-SAME: warpGroupStartIds = array<i32: 0, 4>
 // WASP48: partition0
-// WASP48-SAME: num_warps(8)
-// WASP48: partition1
 // WASP48-SAME: num_warps(4)
+// WASP48: partition1
+// WASP48-SAME: num_warps(8)
 // WASP48-NOT: partition2
 
 // WASP+WDRA 4+4: 2 partitions with WDRA register requests.
@@ -77,3 +79,21 @@
 // WDRA48-SAME: num_warps(4)
 // WDRA48: partition1
 // WDRA48: partition2
+
+// WASP+WDRA 8+8 TwoPTwoC: 4 partitions (Load0, Load1, MMA0, MMA1).
+// WDRA88: module attributes
+// WDRA88-SAME: hcu.wdra_topo = 2
+// WDRA88-SAME: ttg.total-num-warps" = 16 : i32
+// WDRA88-LABEL: @gemm_load_kernel
+// WDRA88: rocdl.hcu.s.abarrier.init
+// WDRA88: ttg.warp_specialize
+// WDRA88-SAME: requestedRegisters = array<i32: 88, 88, 88, 88>
+// WDRA88-SAME: warpGroupStartIds = array<i32: 0, 4, 8, 12>
+// WDRA88: partition0
+// WDRA88-SAME: num_warps(4)
+// WDRA88: partition1
+// WDRA88-SAME: num_warps(4)
+// WDRA88: partition2
+// WDRA88-SAME: num_warps(4)
+// WDRA88: partition3
+// WDRA88-SAME: num_warps(4)

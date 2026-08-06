@@ -4,11 +4,11 @@ import os
 import re
 
 TRITON_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), "../../.."))
-AMD_INPUTS = os.path.join(TRITON_ROOT,"test/TritonGPU/amd/Inputs")
+HCU_INPUTS = os.path.join(TRITON_ROOT, "test/TritonGPU/hcu/Inputs")
 
 
 def _read(name: str) -> str:
-    with open(os.path.join(AMD_INPUTS, name)) as f:
+    with open(os.path.join(HCU_INPUTS, name)) as f:
         return f.read()
 
 

@@ -68,31 +68,23 @@ Value getLinearWarpId(Location loc, RewriterBase &rewriter,
   unsigned warpSize = targetInfo.getWarpSize();
   assert(warpSize == 64);
 
-  // Prefer computing warp id at the current insertion point. Hoisting to the
-  // function entry is invalid when the consumer lives in an IsolatedFromAbove
-  // region (e.g. ttg.warp_specialize partition), which is the MLS+WASP path.
   auto insertPt = rewriter.saveInsertionPoint();
-  Block *curBlock = insertPt.getBlock();
-  bool inIsolatedRegion = false;
-  if (curBlock) {
-    Operation *parentOp = curBlock->getParentOp();
-    while (parentOp && !isa<LLVM::LLVMFuncOp, triton::FuncOp>(parentOp)) {
-      if (parentOp->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
-        inIsolatedRegion = true;
-        break;
-      }
-      parentOp = parentOp->getParentOp();
-    }
-  }
 
-  if (!inIsolatedRegion) {
-    Operation *parentOp = curBlock->getParentOp();
-    while (parentOp && !isa<LLVM::LLVMFuncOp>(parentOp))
-      parentOp = parentOp->getParentOp();
-    if (auto funcOp = dyn_cast_or_null<LLVM::LLVMFuncOp>(parentOp)) {
-      rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+  // Hoist warp-id to the LLVM func entry when possible. Do not hoist across
+  // IsolatedFromAbove (ttg.warp_specialize partitions): entry SSA is invisible
+  // inside those regions, which breaks MLS+WASP lowering.
+  LLVM::LLVMFuncOp funcOp = nullptr;
+  for (Operation *op = insertPt.getBlock()->getParentOp(); op;
+       op = op->getParentOp()) {
+    if (op->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+      funcOp = nullptr;
+      break;
     }
+    if ((funcOp = dyn_cast<LLVM::LLVMFuncOp>(op)))
+      break;
   }
+  if (funcOp)
+    rewriter.setInsertionPointToStart(&funcOp.getBody().front());
 
   auto entryBuilder = TritonLLVMOpBuilder(loc, rewriter);
   Value threadId = getThreadId(rewriter, loc);

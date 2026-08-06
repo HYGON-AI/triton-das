@@ -3,6 +3,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "TritonHCU/WdraSplitPlan.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
@@ -24,6 +25,7 @@ using namespace triton;
 using namespace triton::gpu;
 namespace ttng = triton::nvidia_gpu;
 namespace tta = triton::amdgpu;
+namespace hcu = triton::HCU;
 
 //===----------------------------------------------------------------------===//
 // getPartitionScheme
@@ -297,10 +299,35 @@ LogicalResult PipelinedLoad::determineLiveRange(Block &container,
     liveBeforeOps.push_back(liveBeforeOp);
 
     SmallVector<Operation *> shmemTerminals;
+    // Prefer a live op in this partition when reading module attrs.
+    Operation *attrAnchor =
+        !shmemSink.empty()
+            ? shmemSink.front()
+            : (!container.empty() ? &container.front() : nullptr);
+    const bool delayEmptyArrive =
+        attrAnchor ? hcu::getEmptyArriveAfterMmacAttr(attrAnchor,
+                                                      /*defaultVal=*/true)
+                   : true;
     for (Operation *sinkOp : shmemSink) {
       sinkOp = container.findAncestorOpInBlock(*sinkOp);
-      // The sink operation is synchronous and the memory is released after the
-      // operation.
+      // When empty_arrive_after_mmac is set, release the LDS buffer after
+      // consumers of the LocalLoad (typically tt.dot), not immediately after
+      // local_load. A matching SchedBarrier after mmac is inserted in MMAC.cpp.
+      if (delayEmptyArrive) {
+        SmallVector<Operation *> consumers;
+        if (auto localLoad = dyn_cast<LocalLoadOp>(sinkOp)) {
+          for (Operation *user : localLoad.getResult().getUsers()) {
+            if (Operation *ancestor = container.findAncestorOpInBlock(*user))
+              consumers.push_back(ancestor);
+          }
+        }
+        if (!consumers.empty()) {
+          Operation *lastConsumer =
+              findNearestCommonPostDominator(consumers, postDomInfo);
+          shmemTerminals.push_back(lastConsumer ? lastConsumer : sinkOp);
+          continue;
+        }
+      }
       shmemTerminals.push_back(sinkOp);
     }
 
@@ -349,19 +376,35 @@ namespace {
 struct PipelinedLoadGroup {
   Location getLoc();
   void allocateAref(scf::ForOp &loop, int numStages,
-                    SmallVector<int> &availableAbarrierIds, bool wdraEnabled,
-                    int waspNumLoadWarps, int waspNumMmaWarps);
+                    SmallVector<int> &availableAbarrierIds,
+                    const hcu::WdraTopology &topo, int waspNumLoadWarps,
+                    int waspNumMmaWarps);
   LogicalResult lowerLoads(WarpSchedule &schedule, DominanceInfo &domInfo,
                            PostDominanceInfo &postDomInfo);
 
   SmallVector<PipelinedLoad> loads;
 
   SmallVector<Value> loadBuffers;
+  // Barrier IDs laid out as [pair0_stage0, pair0_stage1, ..., pair1_stage0, ...]
+  // For OnePTwoC / WASP, numBarrierPairs==1 (shared fan-out to all consumers).
   SmallVector<int, 8> emptyBarIds;
   SmallVector<int, 8> readyBarIds;
+  unsigned numBarrierPairs = 1;
+  unsigned numStagesStored = 0;
   BlockArgument index;
   BlockArgument phase;
 };
+} // namespace
+
+namespace {
+static void maybeSetAsyncTaskId(Operation *op, unsigned pair,
+                                unsigned numPairs) {
+  if (numPairs <= 1)
+    return;
+  op->setAttr("async_task_id",
+              DenseI32ArrayAttr::get(op->getContext(),
+                                     {static_cast<int32_t>(pair)}));
+}
 } // namespace
 
 Location PipelinedLoadGroup::getLoc() {
@@ -372,7 +415,8 @@ Location PipelinedLoadGroup::getLoc() {
 
 void PipelinedLoadGroup::allocateAref(scf::ForOp &loop, int numStages,
                                       SmallVector<int> &availableAbarrierIds,
-                                      bool wdraEnabled, int waspNumLoadWarps,
+                                      const hcu::WdraTopology &topo,
+                                      int waspNumLoadWarps,
                                       int waspNumMmaWarps) {
   assert(loadBuffers.empty() && "already allocated");
 
@@ -382,34 +426,37 @@ void PipelinedLoadGroup::allocateAref(scf::ForOp &loop, int numStages,
                                       load.sharedEnc, numStages));
   }
 
-  // Determine how many distinct consumers of the result there are.
-  int maxLiveUntil = 0;
-  DenseSet<Operation *> distinctAsyncUsers;
-  for (PipelinedLoad &load : loads) {
-    distinctAsyncUsers.insert(load.asyncUsers.begin(), load.asyncUsers.end());
-    int numLiveUntil =
-        llvm::count_if(load.liveUntilOps, [](auto &p) { return !!p.first; });
-    maxLiveUntil = std::max(maxLiveUntil, numLiveUntil);
-  }
-  //int arriveCount = distinctAsyncUsers.size() + maxLiveUntil;
+  numBarrierPairs = std::max(1u, topo.numBarrierPairs());
+  numStagesStored = numStages;
 
-  // Share the same set of barriers all loads in the group.
+  // Empty-bar participants / ready-bar participants.
+  // OnePTwoC keeps the historical init counts (all MMA / load warps on one
+  // shared barrier). TwoPTwoC uses per-pair barriers sized to one partition.
+  int emptyInitCount =
+      topo.kind == hcu::WdraTopoKind::TwoPTwoC
+          ? static_cast<int>(topo.warpsPerPartition)
+          : waspNumMmaWarps;
+  int readyInitCount =
+      topo.kind == hcu::WdraTopoKind::TwoPTwoC
+          ? static_cast<int>(topo.warpsPerPartition)
+          : waspNumLoadWarps;
+  int preArrive = topo.enabled() ? static_cast<int>(topo.emptyPreArriveCount())
+                                 : 1;
+
   PartitionBuilder b(getLoc(), loop);
-  for (auto i : llvm::seq(numStages)) {
-    int barId = availableAbarrierIds[i * 2];
-    createAbarrier(loop, barId, waspNumMmaWarps);
-    emptyBarIds.push_back(barId);
-    // All buffers are initially in the empty state.
-    if (wdraEnabled && waspNumMmaWarps > 4)
-      b.create<ROCDL::HCUAbarrierArriveOp>(barId, 2);
-    else
-      b.create<ROCDL::HCUAbarrierArriveOp>(barId, 1);
+  for (unsigned pair = 0; pair < numBarrierPairs; ++pair) {
+    for (auto i : llvm::seq(numStages)) {
+      int barId = availableAbarrierIds[pair * numStages * 2 + i * 2];
+      createAbarrier(loop, barId, emptyInitCount);
+      emptyBarIds.push_back(barId);
+      b.create<ROCDL::HCUAbarrierArriveOp>(barId, preArrive);
 
-    barId = availableAbarrierIds[i * 2 + 1];
-    createAbarrier(loop, barId, waspNumLoadWarps);
-    readyBarIds.push_back(barId);
+      barId = availableAbarrierIds[pair * numStages * 2 + i * 2 + 1];
+      createAbarrier(loop, barId, readyInitCount);
+      readyBarIds.push_back(barId);
+    }
   }
-  
+
   std::tie(index, phase) = addIndexAndPhase(b, loop, numStages);
 }
 
@@ -467,48 +514,76 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
 
   StageCluster stageCluster = getStageCluster(firstLoad->loadOp);
   auto intCst = [&](int value) { return b.create<arith::ConstantIntOp>(value, 32); };
-  Value curEmptyBarId = intCst(emptyBarIds.back());
-  {
+
+  // Helper: pick stage bar id from a per-pair contiguous [s0, s1, ...] slice.
+  auto selectStageBarId = [&](ArrayRef<int> pairBarIds) -> Value {
+    Value cur = intCst(pairBarIds.back());
     Value isFirstStage =
         b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index, intCst(0));
-    curEmptyBarId = b.create<arith::SelectOp>(
-        isFirstStage, intCst(emptyBarIds.front()), curEmptyBarId);
+    cur = b.create<arith::SelectOp>(isFirstStage, intCst(pairBarIds.front()),
+                                    cur);
+    return cur;
+  };
+
+  // Per-pair empty try-waits (TwoPTwoC tags async_task_id so SplitMma can
+  // move each pair into its Load/MMA partitions).
+  SmallVector<ROCDL::HCUAbarrierTryWaitOp> tryWaitOps;
+  for (unsigned pair = 0; pair < numBarrierPairs; ++pair) {
+    ArrayRef<int> pairEmpty(emptyBarIds.data() + pair * numStagesStored,
+                            numStagesStored);
+    if (pair == 0)
+      b.setInsertionPoint(tryWaitInsertPt);
+    else
+      b.setInsertionPointAfter(tryWaitOps.back());
+    Value curEmptyBarId = selectStageBarId(pairEmpty);
+    auto tryWaitOp = b.createInto<ROCDL::HCUAbarrierTryWaitOp>(
+        loadPartition, stageCluster, curEmptyBarId, phase);
+    maybeSetAsyncTaskId(tryWaitOp, pair, numBarrierPairs);
+    tryWaitOps.push_back(tryWaitOp);
   }
-  auto tryWaitOp = b.createInto<ROCDL::HCUAbarrierTryWaitOp>(
-      loadPartition, stageCluster, curEmptyBarId, phase);
+  // All local stores must be placed after every producer acquire.  In
+  // TwoPTwoC, anchoring them after only the first wait leaves the task-1
+  // stores before their own empty-buffer wait after partition splitting.
+  Operation *lastProducerAcquire = tryWaitOps.back();
 
   // Set up the consumer wait. We know the live before ops are the same for all
   // loads since that's how they were grouped.
   DenseMap<Partition *, ROCDL::HCUAbarrierArriveOp> arriveOps;
   for (auto [i, liveBeforeOp] : llvm::enumerate(firstLoad->liveBeforeOps)) {
     // 每一个 userPartition 贡献一个 liveBeforeOp，所以遍历 liveBeforeOp 也就是遍历 userPartition
-    b.setInsertionPoint(liveBeforeOp);
     Partition &userPartition = *schedule.getPartition(liveBeforeOp);
     StageCluster userStageCluster = getStageCluster(liveBeforeOp);
-    auto intCst = [&](int value) { return b.create<arith::ConstantIntOp>(value, 32); };
-    Value curReadyBarId = intCst(readyBarIds.back());
-    {
-      Value isFirstStage =
-          b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index, intCst(0));
-      curReadyBarId = b.create<arith::SelectOp>(
-          isFirstStage, intCst(readyBarIds.front()), curReadyBarId);
-    }
-    b.createInto<ROCDL::HCUAbarrierTryWaitOp>(userPartition, userStageCluster, curReadyBarId, phase);
 
-    // 所有的 load 在当前这个 userPartition 中的 liveUntilOp 的集合
-    SmallVector<Operation *> liveUntilOps;
-    for (PipelinedLoad &load : loads) {
-      auto [liveUntilOp, after] = load.liveUntilOps[i];
-      if (liveUntilOp)
-        liveUntilOps.push_back(after ? liveUntilOp->getNextNode() : liveUntilOp);
-    }
-    if (!liveUntilOps.empty()) {
-      Operation *liveUntilOp =
-          findNearestCommonPostDominator(liveUntilOps, postDomInfo);
-      b.setInsertionPoint(liveUntilOp);
-      auto arriveOp = b.createInto<ROCDL::HCUAbarrierArriveOp>(
-          userPartition, userStageCluster, curEmptyBarId, 1);
-      arriveOps[schedule.getPartition(liveUntilOp)] = arriveOp;
+    for (unsigned pair = 0; pair < numBarrierPairs; ++pair) {
+      ArrayRef<int> pairReady(readyBarIds.data() + pair * numStagesStored,
+                              numStagesStored);
+      ArrayRef<int> pairEmpty(emptyBarIds.data() + pair * numStagesStored,
+                              numStagesStored);
+      b.setInsertionPoint(liveBeforeOp);
+      Value curReadyBarId = selectStageBarId(pairReady);
+      auto consumerWait = b.createInto<ROCDL::HCUAbarrierTryWaitOp>(
+          userPartition, userStageCluster, curReadyBarId, phase);
+      maybeSetAsyncTaskId(consumerWait, pair, numBarrierPairs);
+
+      // 所有的 load 在当前这个 userPartition 中的 liveUntilOp 的集合
+      SmallVector<Operation *> liveUntilOps;
+      for (PipelinedLoad &load : loads) {
+        auto [liveUntilOp, after] = load.liveUntilOps[i];
+        if (liveUntilOp)
+          liveUntilOps.push_back(after ? liveUntilOp->getNextNode()
+                                       : liveUntilOp);
+      }
+      if (!liveUntilOps.empty()) {
+        Operation *liveUntilOp =
+            findNearestCommonPostDominator(liveUntilOps, postDomInfo);
+        b.setInsertionPoint(liveUntilOp);
+        Value curEmptyBarId = selectStageBarId(pairEmpty);
+        auto arriveOp = b.createInto<ROCDL::HCUAbarrierArriveOp>(
+            userPartition, userStageCluster, curEmptyBarId, 1);
+        maybeSetAsyncTaskId(arriveOp, pair, numBarrierPairs);
+        // Keep the last arrive for reg-use placement (same as before for 1 pair).
+        arriveOps[schedule.getPartition(liveUntilOp)] = arriveOp;
+      }
     }
   }
 
@@ -543,7 +618,7 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
       continue;
     }
 
-    b.setInsertionPointAfter(tryWaitOp);
+    b.setInsertionPointAfter(lastProducerAcquire);
     auto storeOp = b.createInto<LocalStoreOp>(loadPartition, stageCluster,
                                               load.getResult(), view);
     storeOps.push_back(storeOp);
@@ -576,18 +651,26 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
     }
   }
 
-  // 标记 loadGroup 的结束
+  // 标记 loadGroup 的结束 — per-pair ready arrives for TwoPTwoC.
   auto loadAndStoreOps = llvm::to_vector(llvm::concat<Operation *>(storeOps, 
                                          map_range(loads, [](PipelinedLoad &load) { return load.loadOp; })));
   Operation *lastLoadAndStore = findNearestCommonPostDominator(loadAndStoreOps, postDomInfo);
-  b.setInsertionPoint(lastLoadAndStore);
-  Value curReadyBarId = intCst(readyBarIds.back());
-  for (int i = readyBarIds.size() - 2; i >= 0; --i) {
-    Value cond = b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index, intCst(i));
-    curReadyBarId = b.create<arith::SelectOp>(cond, intCst(readyBarIds[i]), curReadyBarId);
+  for (unsigned pair = 0; pair < numBarrierPairs; ++pair) {
+    ArrayRef<int> pairReady(readyBarIds.data() + pair * numStagesStored,
+                            numStagesStored);
+    b.setInsertionPoint(lastLoadAndStore);
+    Value curReadyBarId = intCst(pairReady.back());
+    for (int i = static_cast<int>(pairReady.size()) - 2; i >= 0; --i) {
+      Value cond = b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index,
+                                           intCst(i));
+      curReadyBarId =
+          b.create<arith::SelectOp>(cond, intCst(pairReady[i]), curReadyBarId);
+    }
+    b.setInsertionPointAfter(lastLoadAndStore);
+    auto readyArrive = b.createInto<ROCDL::HCUAbarrierArriveOp>(
+        loadPartition, stageCluster, curReadyBarId, 1);
+    maybeSetAsyncTaskId(readyArrive, pair, numBarrierPairs);
   }
-  b.setInsertionPointAfter(lastLoadAndStore);
-  b.createInto<ROCDL::HCUAbarrierArriveOp>(loadPartition, stageCluster, curReadyBarId, 1);
 
   return success();
 }
@@ -605,6 +688,9 @@ LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
   DominanceInfo domInfo(loop);
   PostDominanceInfo postDomInfo(loop);
 
+  hcu::WdraTopology topo =
+      hcu::deriveWdraTopology(wdraEnabled, waspNumLoadWarps, waspNumMmaWarps);
+
   // Group loads by common first user operations. This ensures, for example,
   // that multiple loads feeding into the same MMA op are placed together.
   llvm::MapVector<ArrayRef<Operation *>, SmallVector<PipelinedLoad>>
@@ -619,29 +705,19 @@ LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
   for (auto &loads : llvm::make_second_range(liveBeforeGroups))
     loadGroups.push_back({std::move(loads)});
 
-  /*
-  // Put all loads into a single PipelinedLoadGroup.
-  SmallVector<PipelinedLoadGroup, 0> loadGroups;
-  PipelinedLoadGroup group;
-  for (auto &it : liveBeforeGroups) {
-    auto &bucket = it.second;
-    group.loads.append(std::make_move_iterator(bucket.begin()),
-                       std::make_move_iterator(bucket.end()));
-  }
-  loadGroups.push_back(std::move(group));
-  */
-
   // Multi-buffer and lower the loads.
   auto numLoadGroups = loadGroups.size();
-  auto neededAbarrierNum = 2 * numLoadGroups * numLoadStages;
+  unsigned numPairs = std::max(1u, topo.numBarrierPairs());
+  auto neededAbarrierNum =
+      static_cast<int>(2 * numLoadGroups * numLoadStages * numPairs);
   llvm::SmallVector<int> availableAbarrierIds =
       getAvailableAbarrierIds(loop, neededAbarrierNum);
   for (PipelinedLoadGroup &group : loadGroups) {
-    group.allocateAref(loop, numLoadStages, availableAbarrierIds, wdraEnabled,
+    group.allocateAref(loop, numLoadStages, availableAbarrierIds, topo,
                        waspNumLoadWarps, waspNumMmaWarps);
     availableAbarrierIds.erase(availableAbarrierIds.begin(),
                                availableAbarrierIds.begin() +
-                                   2 * numLoadStages);
+                                   2 * numLoadStages * numPairs);
   }
 
   for (PipelinedLoadGroup &group : loadGroups) {

@@ -1,5 +1,6 @@
 #include "TritonHCU/Passes.h"
 #include "TritonHCU/WaitCntHCUUtility.h"
+#include "TritonHCU/WdraSplitPlan.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
 
 #include "AsyncUtility.h"
@@ -18,6 +19,7 @@
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseSet.h"
 #include "third_party/amd/include/Analysis/AxisInfoExt.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Analysis/Allocation.h"
@@ -53,6 +55,48 @@ void populateDsReadMToLLVMPatterns(LLVMTypeConverter &typeConverter,
 } // namespace mlir::triton::HCU
 
 namespace {
+
+// Peel convert_layout to find the LocalLoad that feeds a Dot operand.
+static triton::gpu::LocalLoadOp peelLocalLoad(Value v) {
+  while (Operation *def = v.getDefiningOp()) {
+    if (auto load = dyn_cast<triton::gpu::LocalLoadOp>(def))
+      return load;
+    if (auto cvt = dyn_cast<triton::gpu::ConvertLayoutOp>(def)) {
+      v = cvt.getSrc();
+      continue;
+    }
+    break;
+  }
+  return {};
+}
+
+// When enabled, insert SchedBarrier after A's local_load (ds_read) and before
+// B's, so LLVM cannot reorder the two LDS load clusters across the barrier.
+static void insertSchedBarrierBetweenABLoads(ModuleOp mod) {
+  if (!triton::HCU::getSchedBarrierBetweenABLoadsAttr(mod))
+    return;
+
+  DenseSet<Operation *> insertedBefore;
+  mod.walk([&](Operation *op) {
+    auto dot = dyn_cast<triton::DotOpInterface>(op);
+    if (!dot)
+      return;
+    auto aLoad = peelLocalLoad(dot.getA());
+    auto bLoad = peelLocalLoad(dot.getB());
+    if (!aLoad || !bLoad)
+      return;
+    if (aLoad->getBlock() != bLoad->getBlock())
+      return;
+    if (!aLoad->isBeforeInBlock(bLoad))
+      return;
+    if (!insertedBefore.insert(bLoad).second)
+      return;
+    if (isa_and_nonnull<ROCDL::SchedBarrier>(bLoad->getPrevNode()))
+      return;
+    OpBuilder builder(bLoad);
+    ROCDL::SchedBarrier::create(builder, bLoad.getLoc(), /*mask=*/0);
+  });
+}
 
 class TritonLLVMFunctionConversionTarget : public ConversionTarget {
 public:
@@ -147,6 +191,9 @@ struct ConvertTritonHCUToLLVM
       return signalPassFailure();
     }
 
+    // Split A/B LDS-load clusters before they are lowered to ds_read*.
+    insertSchedBarrierBetweenABLoads(mod);
+
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
 
@@ -163,9 +210,28 @@ struct ConvertTritonHCUToLLVM
       AMD::annotateLocalLoadsSyncedViaAsyncWait(mod);
 
     AMD::addLocalBarrierAfterAmdGpuAsyncWait(mod);
+
+    // HCU abarrier.try_wait already orders producer/consumer LDS access for the
+    // guarded ping-pong buffers. Stock membar only clears pending shared R/W on
+    // ttg.local_barrier / gpu.barrier, so briefly plant markers after each
+    // try_wait to suppress loop-carried local_store WAW barriers, then erase
+    // them so they are not lowered to s_ebarrier_sync among load warps.
+    SmallVector<triton::gpu::LocalBarrierOp> abarrierMembarMarkers;
+    SmallVector<ROCDL::HCUAbarrierTryWaitOp> tryWaits;
+    mod->walk([&](ROCDL::HCUAbarrierTryWaitOp op) { tryWaits.push_back(op); });
+    for (auto tryWait : tryWaits) {
+      OpBuilder b(tryWait);
+      b.setInsertionPointAfter(tryWait);
+      abarrierMembarMarkers.push_back(
+          triton::gpu::LocalBarrierOp::create(b, tryWait.getLoc()));
+    }
+
     ModuleMembarAnalysis membarPass(&allocation,
                                     mlir::triton::AMD::membarFilter);
     membarPass.run();
+
+    for (auto marker : abarrierMembarMarkers)
+      marker->erase();
 
     HCU::addWaitCntHCU(mod);
 

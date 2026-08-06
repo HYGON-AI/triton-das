@@ -110,6 +110,14 @@ class HIPOptions:
     wdra_num_load_regs: int = None
     wdra_num_mma_regs_main: int = None
     wdra_num_mma_regs_tail: int = None
+    # Delay empty abarrier arrive until after mmac (+ SchedBarrier fence).
+    # Autotune-friendly; hashed into the kernel cache via HIPOptions.hash().
+    empty_arrive_after_mmac: bool = False
+    # LLVM HCUMMACCluster mode:
+    #   0 — off
+    #   1 — enable cluster (+ SchedBarrier before mmac and between A/B loads)
+    #   2 — enable cluster + cross-region A/B load analysis (implies 1)
+    enable_v_mmac_cluster: int = 0
 
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
@@ -189,6 +197,12 @@ class HIPBackend(BaseBackend):
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
 
+        cluster = int(args.get("enable_v_mmac_cluster", 0))
+        if cluster not in (0, 1, 2):
+            raise ValueError(
+                f"enable_v_mmac_cluster must be 0, 1, or 2; got {cluster}")
+        args["enable_v_mmac_cluster"] = cluster
+
         # Consume the legacy `instruction_sched_variant` option and map it to
         # `schedule_hint`. If both are present, keep the explicit schedule_hint.
         if args.get("schedule_hint", "none") == "none" and legacy_sched_variant is not None:
@@ -199,8 +213,15 @@ class HIPBackend(BaseBackend):
 
         if args.get("wasp_enabled"):
             if args.get("wdra_enabled"):
-                assert args["wasp_num_load_warps"] == 4
+                # WDRA topologies (Load-first after OptimizePartitionWarps):
+                #   load=4, mma=8 → 1P+2C (12-wave): [Load, MMA_main, MMA_tail]
+                #   load=8, mma=8 → 2P+2C (16-wave): [Load0, Load1, MMA0, MMA1]
+                #   load=4, mma=4 → [Load, MMA] (no DataPartition)
+                assert args["wasp_num_load_warps"] in [4, 8]
                 assert args["wasp_num_mma_warps"] in [4, 8]
+                if args["wasp_num_load_warps"] == 8:
+                    assert args["wasp_num_mma_warps"] == 8, (
+                        "wdra 2P+2C requires wasp_num_mma_warps == 8")
             else:
                 args.pop("wdra_num_load_regs", None)
                 args.pop("wdra_num_mma_regs_main", None)
@@ -455,7 +476,8 @@ class HIPBackend(BaseBackend):
             # On the model (PMD/gem5), s_trap is not implemented; this tells the
             # HCUInsertWDRAInit pass to skip emitting the s_trap-based wdra init
             # prologue while keeping the rest of the WDRA setup.
-            "-mllvm=-run-on-model=true" if (options.wdra_enabled and os.environ.get("PMD_PATH")) else "",
+            "-mllvm=-turn-off-wdra-trap-handler=true"
+            if (options.wdra_enabled and os.environ.get("PMD_PATH")) else "",
             *options_args,
             "-O3",
         ]
@@ -489,6 +511,16 @@ class HIPBackend(BaseBackend):
         # distributed.passes.ttir.add_convert_to_ttgpuir_ext(pm, f"hip:{options.arch}", options.num_warps,
         #                                                    options.warp_size, options.num_ctas)
         pm.run(mod, 'make_ttgir_early')
+        # Attach sched/empty-arrive knobs as module attrs for WASP + MMAC lowering.
+        # Sched barriers are implied by enable_v_mmac_cluster != 0.
+        b = ir.builder(mod.context)
+        mmac_cluster_on = int(options.enable_v_mmac_cluster) >= 1
+        mod.set_attr("hcu.sched_barrier_before_mmac",
+                     b.get_bool_attr(mmac_cluster_on))
+        mod.set_attr("hcu.empty_arrive_after_mmac",
+                     b.get_bool_attr(bool(options.empty_arrive_after_mmac)))
+        mod.set_attr("hcu.sched_barrier_between_a_b_loads",
+                     b.get_bool_attr(mmac_cluster_on))
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         emuTF32 = False
@@ -728,6 +760,12 @@ class HIPBackend(BaseBackend):
         # If wdra is enabled, this attribute is required by the LLVM backend.
         if options.wdra_enabled:
             fns[0].add_fn_attr("hcu-wdra-waves-per-tg", str(total_num_warps))
+        mmac_cluster = int(options.enable_v_mmac_cluster)
+        if mmac_cluster >= 1:
+            fns[0].add_fn_attr("hcu-enable-v-mmac-cluster", "true")
+        if mmac_cluster >= 2:
+            fns[0].add_fn_attr(
+                "hcu-enable-v-mmac-cluster-cross-region-analysis", "true")
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
         fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{total_num_warps*options.warp_size}")

@@ -215,6 +215,8 @@ static void fixTaskId(triton::FuncOp &funcOp) {
 // rematerialization is not possible.
 struct DataPartitionScheme {
   unsigned numPartitions = 0;
+  // TwoPTwoC: slice producer buffers and tag load chains with slice task ids.
+  bool producerSliced = false;
   // All operations that participate in this partitioning scheme.
   SetVector<Operation *> ops;
   // Which dimension to partition. For dot, dim 0 means along M dimension, 1
@@ -234,6 +236,7 @@ struct DataPartitionScheme {
   static const unsigned noOpPartitionDim = ~0U - 2;
 
   void append(DataPartitionScheme &other) {
+    producerSliced = producerSliced || other.producerSliced;
     for (auto op : other.ops)
       ops.insert(op);
     for (auto op : other.opPartitionDims)
@@ -750,6 +753,29 @@ static bool trackMlsProducerChain(Value dest, DataPartitionScheme &partitionSche
   return true;
 }
 
+// TwoPTwoC: pull LocalStore (+ tt.load src chain) that writes `dest` into the
+// partition scheme so each producer pair can memdesc_subslice its half.
+static bool trackLocalStoreProducerChain(Value dest,
+                                         DataPartitionScheme &partitionScheme,
+                                         unsigned currentDim) {
+  for (Operation *user : dest.getUsers()) {
+    auto storeOp = dyn_cast<triton::gpu::LocalStoreOp>(user);
+    if (!storeOp)
+      continue;
+    if (!partitionScheme.ops.insert(storeOp)) {
+      if (partitionScheme.opPartitionDims[storeOp] != currentDim)
+        return false;
+    } else {
+      partitionScheme.opPartitionDims[storeOp] = currentDim;
+    }
+    // Slice the global load / value that feeds this store.
+    if (!getBackwardSliceToPartition(storeOp.getSrc(), partitionScheme,
+                                     currentDim))
+      return false;
+  }
+  return true;
+}
+
 static bool needToSlice(Value v, unsigned dim, int size) {
   auto shape = getShape(v);
   // Scalars / non-tensors: nothing to partition. Critical for noOpPartitionDim
@@ -869,12 +895,20 @@ static bool getBackwardSliceToPartition(Value v,
       for (Value operand : op->getOperands())
         if (!getBackwardSliceToPartition(operand, partitionScheme, parentDim))
           return false;
-      // MLS writers target the stage view; pull them at the tile partition dim
-      // (or noOp for the shared non-partitioned operand).
-      if (isMlsSharedValue(op->getResult(0)))
+      // MLS / TwoPTwoC swizzled writers target the stage view; pull them at
+      // the tile partition dim (or noOp for the shared non-partitioned operand).
+      if (isMlsSharedValue(op->getResult(0))) {
         if (!trackMlsProducerChain(op->getResult(0), partitionScheme,
                                    currentDim))
           return false;
+      } else if (partitionScheme.producerSliced &&
+                 currentDim != DataPartitionScheme::noOpPartitionDim) {
+        // tt.load path: pull LocalStore + global load so each pair owns a
+        // half-tile write (mirrors MLS producer slicing).
+        if (!trackLocalStoreProducerChain(op->getResult(0), partitionScheme,
+                                          currentDim))
+          return false;
+      }
     } else if (auto dotOp = dyn_cast<DotOpInterface>(op)) {
       // M-split (dim=0): partition A only; B is a shared full tile.
       // N-split (dim=1): partition B only; A is shared.
@@ -1523,13 +1557,64 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     newOp = cloneAndSetResultType(op);
   } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
     // Empty pipelined buffers (e.g. matmul A/B: local_alloc : () -> memdesc)
-    // for *swizzled* shared are shared by load (full tile) and MMA (M-sliced).
-    // Keep the original alloc; LocalLoad creates memdesc_subslice views.
+    // for *swizzled* shared:
+    //   OnePTwoC: shared by load (full tile) and MMA (M-sliced via subslice).
+    //   TwoPTwoC: slice the producer alloc so each Load/MMA pair owns a half.
     //
     // MLS partitioned operand (A on M-split): each consumer gets a dedicated
     // alloc + matrix_load_to_local. The non-partitioned operand is handled
     // above via noOpPartitionDim identity map.
     if (!allocOp.getSrc() && !isMlsSharedMemDesc(allocOp.getType())) {
+      // OnePTwoC: keep full-tile buffer; MMA uses memdesc_subslice on LocalLoad.
+      // TwoPTwoC: slice the alloc itself (MLS-style) so Load and MMA share a
+      // matched half-tile buffer — no cross-partition subslice SSA.
+      if (!partitionScheme.producerSliced) {
+        mapOpIdentity(op, mappings, reverseMappings);
+        return op;
+      }
+      auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
+      auto partAttr = op->getAttr("ttg.partition");
+      if (dim != DataPartitionScheme::noOpPartitionDim && offset == 0) {
+        auto memTy = allocOp.getType();
+        SmallVector<int64_t> shape{memTy.getShape().begin(),
+                                   memTy.getShape().end()};
+        assert(dim < shape.size() && "swizzled alloc partition dim OOB");
+        shape[dim] = shape[dim] / static_cast<int64_t>(numOfPartitions);
+        SmallVector<int64_t> allocShape(memTy.getAllocShape().begin(),
+                                        memTy.getAllocShape().end());
+        if (!allocShape.empty() && dim < allocShape.size())
+          allocShape[dim] =
+              allocShape[dim] / static_cast<int64_t>(numOfPartitions);
+        auto slicedTy =
+            allocShape.empty()
+                ? MemDescType::get(shape, memTy.getElementType(),
+                                   memTy.getEncoding(), memTy.getMemorySpace(),
+                                   memTy.getMutableMemory())
+                : MemDescType::get(shape, memTy.getElementType(),
+                                   memTy.getEncoding(), memTy.getMemorySpace(),
+                                   memTy.getMutableMemory(), allocShape);
+        allocOp.getResult().setType(slicedTy);
+        // Tag with consumer task id so SplitMma can move the matching
+        // LocalStore into Load0/Load1; keep load-partition attr.
+        hcu::setAsyncTaskIds(op, sliceTaskIds);
+        if (partAttr)
+          op->setAttr("ttg.partition", partAttr);
+        mapOpIdentity(op, mappings, reverseMappings);
+        return op;
+      }
+      if (dim != DataPartitionScheme::noOpPartitionDim && offset > 0) {
+        builder.setInsertionPoint(op);
+        newOp = builder.clone(*op);
+        // Original was already retyped to the half shape at offset 0.
+        hcu::setAsyncTaskIds(newOp, sliceTaskIds);
+        if (partAttr)
+          newOp->setAttr("ttg.partition", partAttr);
+        mappings.map(op, newOp);
+        reverseMappings.map(newOp, op);
+        mappings.map(op->getResult(0), newOp->getResult(0));
+        reverseMappings.map(newOp->getResult(0), op->getResult(0));
+        return newOp;
+      }
       mapOpIdentity(op, mappings, reverseMappings);
       return op;
     }
@@ -1603,10 +1688,20 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     } else {
       newOp = cloneAndSetResultType(op);
     }
-  } else if (isa<triton::gpu::LocalStoreOp>(op)) {
+  } else if (auto storeOp = dyn_cast<triton::gpu::LocalStoreOp>(op)) {
+    // TwoPTwoC: dst is already a sliced MemDescIndex/alloc (see empty-alloc
+    // path above). Slice operands normally — do NOT invent a memdesc_subslice
+    // under MMA sliceTaskIds (that created MMA0→Load0 SSA). Keep load
+    // partition attrs so SplitMma moves the store with its Load pair.
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
+    if (partitionScheme.producerSliced &&
+        dim != DataPartitionScheme::noOpPartitionDim) {
+      hcu::setAsyncTaskIds(newOp, sliceTaskIds);
+      if (auto partAttr = op->getAttr("ttg.partition"))
+        newOp->setAttr("ttg.partition", partAttr);
+    }
   } else if (auto tmemLdOp = dyn_cast<nvidia_gpu::TMEMLoadOp>(op)) {
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
@@ -1757,7 +1852,12 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       auto srcAlloc = dyn_cast_or_null<LocalAllocOp>(srcDef);
       bool sliceSrcAlloc = srcAlloc && srcAlloc.getSrc();
       bool isMls = isMlsSharedValue(src);
-      if (sliceSrcAlloc || isMls) {
+      // TwoPTwoC swizzled: producer alloc is already half-tile — follow it
+      // like MLS instead of layering memdesc_subslice on a full tile.
+      bool followSlicedProducer =
+          partitionScheme.producerSliced &&
+          dim != DataPartitionScheme::noOpPartitionDim;
+      if (sliceSrcAlloc || isMls || followSlicedProducer) {
         sliceOp(src, offset, mappings, reverseMappings, partitionScheme);
         if (Value mappedSrc = mappings.lookupOrNull(src))
           mappings.map(localLdOp.getSrc(), mappedSrc);
@@ -1920,7 +2020,13 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
         op->getLoc(), newBase, newShapeVals, newStrideVals, newTensorShape,
         newIndices, mlsOp.getBoundaryCheck(), mlsOp.getCache(),
         mlsOp.getEvict(), mlsOp.getIsVolatile(), newDest);
-    hcu::setAsyncTaskIds(newMlsOp, origTaskIds);
+    // TwoPTwoC: tag each half with its consumer task id so SplitMma can move
+    // the write into the matching Load partition. OnePTwoC keeps load attrs.
+    if (partitionScheme.producerSliced &&
+        dim != DataPartitionScheme::noOpPartitionDim)
+      hcu::setAsyncTaskIds(newMlsOp, sliceTaskIds);
+    else
+      hcu::setAsyncTaskIds(newMlsOp, origTaskIds);
     // Preserve load-partition assignment from the original MLS write.
     if (auto partAttr = op->getAttr("ttg.partition"))
       newMlsOp->setAttr("ttg.partition", partAttr);
@@ -1992,7 +2098,11 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
-    hcu::setAsyncTaskIds(newOp, origTaskIds);
+    if (partitionScheme.producerSliced &&
+        dim != DataPartitionScheme::noOpPartitionDim)
+      hcu::setAsyncTaskIds(newOp, sliceTaskIds);
+    else
+      hcu::setAsyncTaskIds(newOp, origTaskIds);
     if (auto partAttr = op->getAttr("ttg.partition"))
       newOp->setAttr("ttg.partition", partAttr);
     if (dim == DataPartitionScheme::noOpPartitionDim)
@@ -2041,12 +2151,20 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
           builder.setAsynTaskIdsFromArray(sliceTaskIds);
         }
       }
+    } else if (partitionScheme.producerSliced &&
+               dim != DataPartitionScheme::noOpPartitionDim) {
+      // TwoPTwoC swizzled: slice parent multi-buffer alloc first.
+      sliceOp(parent, offset, mappings, reverseMappings, partitionScheme);
     }
     builder.setInsertionPoint(op);
     newOp = builder.clone(*op, mappings);
     if (isMlsSharedValue(op->getResult(0))) {
       auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
       hcu::setAsyncTaskIds(newOp, origTaskIds);
+      if (auto partAttr = op->getAttr("ttg.partition"))
+        newOp->setAttr("ttg.partition", partAttr);
+    } else if (partitionScheme.producerSliced) {
+      hcu::setAsyncTaskIds(newOp, sliceTaskIds);
       if (auto partAttr = op->getAttr("ttg.partition"))
         newOp->setAttr("ttg.partition", partAttr);
     } else {
@@ -2056,13 +2174,13 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     reverseMappings.map(newOp, op);
     for (auto [oldV, newV] :
          llvm::zip(op->getResults(), newOp->getResults())) {
-      if (isMlsSharedValue(oldV)) {
+      // Retype stage views when the parent alloc was sliced (MLS or TwoPTwoC).
+      if (isMlsSharedValue(oldV) || partitionScheme.producerSliced) {
         Value mappedParent = mappings.lookupOrNull(memDescIndexOp.getSrc());
         auto parentTy = cast<MemDescType>(
             (mappedParent ? mappedParent : memDescIndexOp.getSrc()).getType());
         SmallVector<int64_t> resultShape(parentTy.getShape().begin() + 1,
                                          parentTy.getShape().end());
-        // MemDescIndex requires allocShape == shape on both src and result.
         newV.setType(MemDescType::get(
             resultShape, parentTy.getElementType(), parentTy.getEncoding(),
             parentTy.getMemorySpace(), parentTy.getMutableMemory()));
@@ -2382,6 +2500,8 @@ static bool doDeepCleanup(triton::FuncOp &funcOp,
 static bool doDataPartition(triton::FuncOp &funcOp,
                             unsigned numConsumerGroups) {
   DataPartitionScheme partitionScheme;
+  partitionScheme.producerSliced =
+      hcuMls::getWdraTopologyAttr(funcOp).producerSliced();
   if (!computePartitionScheme(funcOp, partitionScheme)) {
     if (numConsumerGroups > 1) {
       LDBG("computePartitionScheme failed when requested");
@@ -2397,7 +2517,10 @@ static bool doDataPartition(triton::FuncOp &funcOp,
       break;
     }
   }
-  if (hasLocalStoreOp) {
+  // OnePTwoC keeps a full-tile producer; LocalStore in the scheme means the
+  // closure is unsafe to slice — skip. TwoPTwoC slices swizzled allocs like
+  // MLS so LocalStore/LocalLoad share matched half-tile buffers.
+  if (hasLocalStoreOp && !partitionScheme.producerSliced) {
     LDBG("local store op found, skipping data partition");
     return true;
   }
@@ -2483,11 +2606,10 @@ struct TritonGPUDataPartition
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
-    // For the HCU pipeline we currently have 1 load partition (4 warps) and
-    // 1 MMA partition (8 warps). We split the MMA work into two consumer
-    // groups so that each group only handles 4 warps, which matches the
-    // hardware restriction when using set_vgpr.
-    constexpr unsigned numConsumerGroups = 2;
+    // Consumer groups follow WDRA topology (OnePTwoC / TwoPTwoC both use 2).
+    auto topo = hcuMls::getWdraTopologyAttr(mod);
+    unsigned numConsumerGroups =
+        topo.enabled() ? topo.numConsumerGroups : 2;
 
     WalkResult result = mod.walk([&](triton::FuncOp funcOp) {
       if (!doDataPartition(funcOp, numConsumerGroups))
