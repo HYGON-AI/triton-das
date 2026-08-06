@@ -1,0 +1,317 @@
+	.text
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx936:xnack-"
+	.globl	same_base_cluster_kernel        ; -- Begin function same_base_cluster_kernel
+	.p2align	8
+	.type	same_base_cluster_kernel,@function
+same_base_cluster_kernel:               ; @same_base_cluster_kernel
+; %bb.0:
+	s_load_dwordx4 s[0:3], s[4:5], 0x0
+	s_load_dword s4, s[4:5], 0x10
+	s_lshl_b32 s5, s6, 12
+	v_lshl_or_b32 v1, v0, 2, s5
+	v_or_b32_e32 v2, 0x100, v1
+	v_lshlrev_b32_e32 v62, 2, v1
+	s_waitcnt lgkmcnt(0)
+	v_cmp_gt_i32_e32 vcc, s4, v1
+	v_or_b32_e32 v9, 0x200, v1
+	v_or_b32_e32 v13, 0x300, v1
+	v_or_b32_e32 v17, 0x400, v1
+	v_or_b32_e32 v21, 0x500, v1
+	v_or_b32_e32 v25, 0x600, v1
+	v_or_b32_e32 v29, 0x700, v1
+	v_or_b32_e32 v33, 0x800, v1
+	v_or_b32_e32 v37, 0x900, v1
+	v_or_b32_e32 v41, 0xa00, v1
+	v_or_b32_e32 v45, 0xb00, v1
+	v_or_b32_e32 v49, 0xc00, v1
+	v_or_b32_e32 v53, 0xd00, v1
+	v_or_b32_e32 v57, 0xe00, v1
+	v_or_b32_e32 v61, 0xf00, v1
+	v_cndmask_b32_e32 v1, -8, v62, vcc
+	v_or_b32_e32 v3, 0x400, v62
+	v_cmp_gt_i32_e32 vcc, s4, v2
+	s_and_b32 s9, s1, 0xffff
+	s_mov_b32 s11, 0x27000
+	s_mov_b32 s10, -8
+	s_mov_b32 s8, s0
+	v_cndmask_b32_e32 v5, -8, v3, vcc
+	v_or_b32_e32 v10, 0x800, v62
+	v_cmp_gt_i32_e32 vcc, s4, v9
+	buffer_load_dwordx4 v[1:4], v1, s[8:11], 0 offen
+	buffer_load_dwordx4 v[5:8], v5, s[8:11], 0 offen
+	v_cndmask_b32_e32 v9, -8, v10, vcc
+	v_or_b32_e32 v14, 0xc00, v62
+	v_cmp_gt_i32_e32 vcc, s4, v13
+	buffer_load_dwordx4 v[9:12], v9, s[8:11], 0 offen
+	v_cndmask_b32_e32 v13, -8, v14, vcc
+	buffer_load_dwordx4 v[13:16], v13, s[8:11], 0 offen
+	v_or_b32_e32 v18, 0x1000, v62
+	v_cmp_gt_i32_e32 vcc, s4, v17
+	v_cndmask_b32_e32 v17, -8, v18, vcc
+	v_or_b32_e32 v22, 0x1400, v62
+	v_cmp_gt_i32_e32 vcc, s4, v21
+	buffer_load_dwordx4 v[17:20], v17, s[8:11], 0 offen
+	v_cndmask_b32_e32 v21, -8, v22, vcc
+	buffer_load_dwordx4 v[21:24], v21, s[8:11], 0 offen
+	v_or_b32_e32 v26, 0x1800, v62
+	v_cmp_gt_i32_e32 vcc, s4, v25
+	v_cndmask_b32_e32 v25, -8, v26, vcc
+	v_or_b32_e32 v30, 0x1c00, v62
+	v_cmp_gt_i32_e32 vcc, s4, v29
+	buffer_load_dwordx4 v[25:28], v25, s[8:11], 0 offen
+	v_cndmask_b32_e32 v29, -8, v30, vcc
+	buffer_load_dwordx4 v[29:32], v29, s[8:11], 0 offen
+	v_or_b32_e32 v34, 0x2000, v62
+	v_cmp_gt_i32_e32 vcc, s4, v33
+	v_cndmask_b32_e32 v33, -8, v34, vcc
+	v_or_b32_e32 v38, 0x2400, v62
+	v_cmp_gt_i32_e32 vcc, s4, v37
+	buffer_load_dwordx4 v[33:36], v33, s[8:11], 0 offen
+	v_cndmask_b32_e32 v37, -8, v38, vcc
+	buffer_load_dwordx4 v[37:40], v37, s[8:11], 0 offen
+	v_or_b32_e32 v42, 0x2800, v62
+	v_cmp_gt_i32_e32 vcc, s4, v41
+	v_cndmask_b32_e32 v41, -8, v42, vcc
+	v_or_b32_e32 v46, 0x2c00, v62
+	v_cmp_gt_i32_e32 vcc, s4, v45
+	buffer_load_dwordx4 v[41:44], v41, s[8:11], 0 offen
+	v_cndmask_b32_e32 v45, -8, v46, vcc
+	buffer_load_dwordx4 v[45:48], v45, s[8:11], 0 offen
+	v_or_b32_e32 v50, 0x3000, v62
+	v_cmp_gt_i32_e32 vcc, s4, v49
+	v_cndmask_b32_e32 v49, -8, v50, vcc
+	v_or_b32_e32 v54, 0x3400, v62
+	v_cmp_gt_i32_e32 vcc, s4, v53
+	buffer_load_dwordx4 v[49:52], v49, s[8:11], 0 offen
+	v_cndmask_b32_e32 v53, -8, v54, vcc
+	buffer_load_dwordx4 v[53:56], v53, s[8:11], 0 offen
+	v_or_b32_e32 v58, 0x3800, v62
+	v_cmp_gt_i32_e32 vcc, s4, v57
+	v_cndmask_b32_e32 v57, -8, v58, vcc
+	v_or_b32_e32 v62, 0x3c00, v62
+	v_cmp_gt_i32_e32 vcc, s4, v61
+	buffer_load_dwordx4 v[57:60], v57, s[8:11], 0 offen
+	v_cndmask_b32_e32 v61, -8, v62, vcc
+	buffer_load_dwordx4 v[61:64], v61, s[8:11], 0 offen
+	s_lshl_b32 s0, s6, 10
+	s_and_b32 s9, s3, 0xffff
+	s_mov_b32 s8, s2
+	v_lshl_or_b32 v0, v0, 4, s0
+	s_waitcnt vmcnt(14)
+	v_add_f32_e32 v1, v1, v5
+	v_add_f32_e32 v2, v2, v6
+	v_add_f32_e32 v3, v3, v7
+	v_add_f32_e32 v4, v4, v8
+	s_waitcnt vmcnt(13)
+	v_add_f32_e32 v1, v1, v9
+	v_add_f32_e32 v2, v2, v10
+	v_add_f32_e32 v3, v3, v11
+	v_add_f32_e32 v4, v4, v12
+	s_waitcnt vmcnt(12)
+	v_add_f32_e32 v1, v1, v13
+	v_add_f32_e32 v2, v2, v14
+	v_add_f32_e32 v3, v3, v15
+	v_add_f32_e32 v4, v4, v16
+	s_waitcnt vmcnt(11)
+	v_add_f32_e32 v1, v1, v17
+	v_add_f32_e32 v2, v2, v18
+	v_add_f32_e32 v3, v3, v19
+	v_add_f32_e32 v4, v4, v20
+	s_waitcnt vmcnt(10)
+	v_add_f32_e32 v1, v1, v21
+	v_add_f32_e32 v2, v2, v22
+	v_add_f32_e32 v3, v3, v23
+	v_add_f32_e32 v4, v4, v24
+	s_waitcnt vmcnt(9)
+	v_add_f32_e32 v1, v1, v25
+	v_add_f32_e32 v2, v2, v26
+	v_add_f32_e32 v3, v3, v27
+	v_add_f32_e32 v4, v4, v28
+	s_waitcnt vmcnt(8)
+	v_add_f32_e32 v1, v1, v29
+	v_add_f32_e32 v2, v2, v30
+	v_add_f32_e32 v3, v3, v31
+	v_add_f32_e32 v4, v4, v32
+	s_waitcnt vmcnt(7)
+	v_add_f32_e32 v1, v1, v33
+	v_add_f32_e32 v2, v2, v34
+	v_add_f32_e32 v3, v3, v35
+	v_add_f32_e32 v4, v4, v36
+	s_waitcnt vmcnt(6)
+	v_add_f32_e32 v1, v1, v37
+	v_add_f32_e32 v2, v2, v38
+	v_add_f32_e32 v3, v3, v39
+	v_add_f32_e32 v4, v4, v40
+	s_waitcnt vmcnt(5)
+	v_add_f32_e32 v1, v1, v41
+	v_add_f32_e32 v2, v2, v42
+	v_add_f32_e32 v3, v3, v43
+	v_add_f32_e32 v4, v4, v44
+	s_waitcnt vmcnt(4)
+	v_add_f32_e32 v1, v1, v45
+	v_add_f32_e32 v2, v2, v46
+	v_add_f32_e32 v3, v3, v47
+	v_add_f32_e32 v4, v4, v48
+	s_waitcnt vmcnt(3)
+	v_add_f32_e32 v1, v1, v49
+	v_add_f32_e32 v2, v2, v50
+	v_add_f32_e32 v3, v3, v51
+	v_add_f32_e32 v4, v4, v52
+	s_waitcnt vmcnt(2)
+	v_add_f32_e32 v1, v1, v53
+	v_add_f32_e32 v2, v2, v54
+	v_add_f32_e32 v3, v3, v55
+	v_add_f32_e32 v4, v4, v56
+	s_waitcnt vmcnt(1)
+	v_add_f32_e32 v1, v1, v57
+	v_add_f32_e32 v2, v2, v58
+	v_add_f32_e32 v3, v3, v59
+	v_add_f32_e32 v4, v4, v60
+	s_waitcnt vmcnt(0)
+	v_add_f32_e32 v1, v1, v61
+	v_add_f32_e32 v2, v2, v62
+	v_add_f32_e32 v3, v3, v63
+	v_add_f32_e32 v4, v4, v64
+	buffer_store_dwordx4 v[1:4], v0, s[8:11], 0 offen
+	s_endpgm
+	.section	.rodata,"a",@progbits
+	.p2align	6, 0x0
+	.amdhsa_kernel same_base_cluster_kernel
+		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_private_segment_fixed_size 0
+		.amdhsa_kernarg_size 40
+		.amdhsa_user_sgpr_count 6
+		.amdhsa_user_sgpr_private_segment_buffer 1
+		.amdhsa_user_sgpr_dispatch_ptr 0
+		.amdhsa_user_sgpr_queue_ptr 0
+		.amdhsa_user_sgpr_kernarg_segment_ptr 1
+		.amdhsa_user_sgpr_dispatch_id 0
+		.amdhsa_user_sgpr_flat_scratch_init 0
+		.amdhsa_user_sgpr_private_segment_size 0
+		.amdhsa_uses_dynamic_stack 0
+		.amdhsa_system_sgpr_private_segment_wavefront_offset 0
+		.amdhsa_system_sgpr_workgroup_id_x 1
+		.amdhsa_system_sgpr_workgroup_id_y 0
+		.amdhsa_system_sgpr_workgroup_id_z 0
+		.amdhsa_system_sgpr_workgroup_info 0
+		.amdhsa_system_vgpr_workitem_id 0
+		.amdhsa_next_free_vgpr 65
+		.amdhsa_next_free_sgpr 12
+		.amdhsa_reserve_flat_scratch 0
+		.amdhsa_reserve_xnack_mask 0
+		.amdhsa_float_round_mode_32 0
+		.amdhsa_float_round_mode_16_64 0
+		.amdhsa_float_denorm_mode_32 3
+		.amdhsa_float_denorm_mode_16_64 3
+		.amdhsa_dx10_clamp 1
+		.amdhsa_ieee_mode 1
+		.amdhsa_fp16_overflow 0
+		.amdhsa_load_store_out_of_order 0
+		.amdhsa_matrix_excp 0
+		.amdhsa_cancellation_excp 0
+		.amdhsa_exception_fp_ieee_invalid_op 0
+		.amdhsa_exception_fp_denorm_src 0
+		.amdhsa_exception_fp_ieee_div_zero 0
+		.amdhsa_exception_fp_ieee_overflow 0
+		.amdhsa_exception_fp_ieee_underflow 0
+		.amdhsa_exception_fp_ieee_inexact 0
+		.amdhsa_exception_int_div_zero 0
+	.end_amdhsa_kernel
+	.text
+.Lfunc_end0:
+	.size	same_base_cluster_kernel, .Lfunc_end0-same_base_cluster_kernel
+                                        ; -- End function
+	.section	.AMDGPU.csdata,"",@progbits
+; Kernel info:
+; codeLenInByte = 892
+; NumSgprs: 14
+; NumVgprs: 65
+; ScratchSize: 0
+; MemoryBound: 0
+; FloatMode: 240
+; IeeeMode: 1
+; LDSByteSize: 0 bytes/workgroup (compile time only)
+; SGPRBlocks: 1
+; VGPRBlocks: 16
+; NumSGPRsForWavesPerEU: 14
+; NumVGPRsForWavesPerEU: 65
+; Occupancy: 10
+; WaveLimiterHint : 0
+; COMPUTE_PGM_RSRC2:SCRATCH_EN: 0
+; COMPUTE_PGM_RSRC2:USER_SGPR: 6
+; COMPUTE_PGM_RSRC2:TRAP_HANDLER: 0
+; COMPUTE_PGM_RSRC2:TGID_X_EN: 1
+; COMPUTE_PGM_RSRC2:TGID_Y_EN: 0
+; COMPUTE_PGM_RSRC2:TGID_Z_EN: 0
+; COMPUTE_PGM_RSRC2:TIDIG_COMP_CNT: 0
+	.ident	"clang version 17.0.0 (http://10.4.0.1/dcutoolkit/driverruntime/llvm-project.git ff5bf917a679c83afe927af051a20b86fef7b07d)"
+	.section	".note.GNU-stack","",@progbits
+	.addrsig
+	.amdgpu_metadata
+---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         16
+        .size:           4
+        .value_kind:     by_value
+      - .address_space:  global
+        .offset:         24
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         32
+        .size:           8
+        .value_kind:     global_buffer
+    .group_segment_fixed_size: 0
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 40
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 64
+    .name:           same_base_cluster_kernel
+    .private_segment_fixed_size: 0
+    .sgpr_count:     14
+    .sgpr_spill_count: 0
+    .symbol:         same_base_cluster_kernel.kd
+    .unfolded_args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         16
+        .size:           4
+        .value_kind:     by_value
+      - .address_space:  global
+        .offset:         24
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         32
+        .size:           8
+        .value_kind:     global_buffer
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     65
+    .vgpr_spill_count: 0
+    .wavefront_size: 64
+amdhsa.target:   'amdgcn-amd-amdhsa--gfx936:xnack-'
+amdhsa.version:
+  - 1
+  - 2
+...
+
+	.end_amdgpu_metadata

@@ -1,0 +1,2495 @@
+	.text
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx936:xnack-"
+	.globl	triton_red_fused__to_copy_cat_native_layer_norm_67 ; -- Begin function triton_red_fused__to_copy_cat_native_layer_norm_67
+	.p2align	8
+	.type	triton_red_fused__to_copy_cat_native_layer_norm_67,@function
+triton_red_fused__to_copy_cat_native_layer_norm_67: ; @triton_red_fused__to_copy_cat_native_layer_norm_67
+.Lfunc_begin0:
+	.cfi_sections .debug_frame
+	.cfi_startproc
+; %bb.0:
+	.cfi_escape 0x0f, 0x04, 0x30, 0x36, 0xe9, 0x02 ; 
+	.cfi_undefined 16
+	.file	1 "/home/xukang/CACHE_DENSE/rp" "crpz_orig_waves2.py"
+	.loc	1 34 28 prologue_end            ; crpz_orig_waves2.py:34:28
+	s_load_dwordx16 s[36:51], s[4:5], 0x0
+	s_load_dwordx16 s[16:31], s[4:5], 0x40
+	s_load_dwordx16 s[80:95], s[4:5], 0x80
+	s_load_dwordx16 s[64:79], s[4:5], 0xc0
+	s_load_dword s0, s[4:5], 0x148
+	.loc	1 37 37                         ; crpz_orig_waves2.py:37:37
+	v_lshlrev_b32_e32 v2, 3, v0
+	.loc	1 57 64                         ; crpz_orig_waves2.py:57:64
+	v_lshlrev_b32_e32 v91, 4, v0
+	s_mov_b32 s55, 0x27000
+	s_mov_b32 s54, -2
+	.loc	1 36 21                         ; crpz_orig_waves2.py:36:21
+	s_waitcnt lgkmcnt(0)
+	s_cmp_lt_i32 s6, s0
+	.loc	1 40 19                         ; crpz_orig_waves2.py:40:19
+	s_mul_hi_i32 s0, s6, 0x4d4873ed
+	.loc	1 36 21                         ; crpz_orig_waves2.py:36:21
+	s_cselect_b64 s[56:57], -1, 0
+	.loc	1 40 19                         ; crpz_orig_waves2.py:40:19
+	s_lshr_b32 s1, s0, 31
+	s_ashr_i32 s0, s0, 4
+	s_add_i32 s12, s0, s1
+	.loc	1 39 19                         ; crpz_orig_waves2.py:39:19
+	s_mul_i32 s7, s12, 0xffffffcb
+	s_add_i32 s7, s7, s6
+	.loc	1 55 22                         ; crpz_orig_waves2.py:55:22
+	s_cmp_lt_i32 s7, 32
+	.loc	1 57 47                         ; crpz_orig_waves2.py:57:47
+	s_mul_i32 s2, s7, 0x4f8
+	.loc	1 57 59 is_stmt 0               ; crpz_orig_waves2.py:57:59
+	s_mul_i32 s3, s12, 0x9f00
+	.loc	1 55 22 is_stmt 1               ; crpz_orig_waves2.py:55:22
+	s_cselect_b64 vcc, -1, 0
+	.loc	1 57 34                         ; crpz_orig_waves2.py:57:34
+	s_add_i32 s2, s2, s3
+	s_ashr_i32 s3, s2, 31
+	s_movk_i32 s0, 0x4f8
+	s_lshl_b64 s[2:3], s[2:3], 1
+	.loc	1 47 29                         ; crpz_orig_waves2.py:47:29
+	v_cmp_gt_u32_e64 s[0:1], s0, v2
+	.loc	1 57 34                         ; crpz_orig_waves2.py:57:34
+	s_add_u32 s52, s36, s2
+	s_addc_u32 s2, s37, s3
+	.loc	1 57 72 is_stmt 0               ; crpz_orig_waves2.py:57:72
+	s_and_b64 s[0:1], s[0:1], s[56:57]
+	.loc	1 57 64                         ; crpz_orig_waves2.py:57:64
+	v_cndmask_b32_e64 v2, -1, v91, s[0:1]
+	s_and_b32 s53, s2, 0xffff
+	v_cndmask_b32_e32 v7, -1, v2, vcc
+	buffer_load_dwordx4 v[3:6], v7, s[52:55], 0 offen
+	.loc	1 58 78 is_stmt 1               ; crpz_orig_waves2.py:58:78
+	s_and_b32 s53, s39, 0xffff
+	s_mov_b32 s52, s38
+	.loc	1 65 24                         ; crpz_orig_waves2.py:65:24
+	s_and_b32 s2, s7, -2
+	s_cmp_eq_u32 s2, 32
+	s_cselect_b64 s[2:3], -1, 0
+	.loc	1 71 24                         ; crpz_orig_waves2.py:71:24
+	s_cmp_lt_i32 s7, 33
+	.loc	1 74 47                         ; crpz_orig_waves2.py:74:47
+	s_mulk_i32 s12, 0x4f8
+	.loc	1 71 24                         ; crpz_orig_waves2.py:71:24
+	s_cselect_b64 s[8:9], -1, 0
+	.loc	1 74 35                         ; crpz_orig_waves2.py:74:35
+	s_ashr_i32 s13, s12, 31
+	.loc	1 73 24                         ; crpz_orig_waves2.py:73:24
+	s_and_b64 s[10:11], s[8:9], s[2:3]
+	.loc	1 74 35                         ; crpz_orig_waves2.py:74:35
+	s_lshl_b64 s[58:59], s[12:13], 1
+	.loc	1 223 81                        ; crpz_orig_waves2.py:223:81
+	v_lshlrev_b32_e32 v168, 5, v0
+	v_or_b32_e32 v169, 16, v168
+	.loc	1 37 37                         ; crpz_orig_waves2.py:37:37
+	v_and_b32_e32 v1, 63, v0
+	.loc	1 57 133                        ; crpz_orig_waves2.py:57:133
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v8, v3
+	v_cvt_f32_f16_sdwa v9, v3 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v10, v4
+	v_cvt_f32_f16_sdwa v11, v4 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v12, v5
+	v_cvt_f32_f16_sdwa v13, v5 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v14, v6
+	v_cvt_f32_f16_sdwa v15, v6 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 58 78                         ; crpz_orig_waves2.py:58:78
+	buffer_load_dwordx4 v[3:6], v7, s[52:55], 0 offen
+	.loc	1 74 35                         ; crpz_orig_waves2.py:74:35
+	s_add_u32 s52, s40, s58
+	s_addc_u32 s12, s41, s59
+	.loc	1 74 52 is_stmt 0               ; crpz_orig_waves2.py:74:52
+	s_and_b32 s53, s12, 0xffff
+	.loc	1 75 25 is_stmt 1               ; crpz_orig_waves2.py:75:25
+	s_cmp_gt_i32 s7, 32
+	.loc	1 58 146                        ; crpz_orig_waves2.py:58:146
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_sdwa v18, v4 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v16, v3 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v17, v4
+	v_cvt_f32_f16_e32 v21, v6
+	v_cvt_f32_f16_sdwa v22, v6 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 59 22                         ; crpz_orig_waves2.py:59:22
+	v_add_f32_e32 v6, v11, v18
+	.loc	1 74 52                         ; crpz_orig_waves2.py:74:52
+	v_cndmask_b32_e64 v11, -1, v2, s[10:11]
+	.loc	1 75 25                         ; crpz_orig_waves2.py:75:25
+	s_cselect_b64 s[10:11], -1, 0
+	.loc	1 58 146                        ; crpz_orig_waves2.py:58:146
+	v_cvt_f32_f16_e32 v7, v3
+	v_cvt_f32_f16_e32 v19, v5
+	v_cvt_f32_f16_sdwa v20, v5 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 79 24                         ; crpz_orig_waves2.py:79:24
+	s_and_b64 s[10:11], s[10:11], s[2:3]
+	.loc	1 59 22                         ; crpz_orig_waves2.py:59:22
+	v_add_f32_e32 v4, v9, v16
+	v_add_f32_e32 v5, v10, v17
+	v_add_f32_e32 v9, v14, v21
+	v_add_f32_e32 v10, v15, v22
+	.loc	1 74 52                         ; crpz_orig_waves2.py:74:52
+	buffer_load_dwordx4 v[14:17], v11, s[52:55], 0 offen
+	.loc	1 80 35                         ; crpz_orig_waves2.py:80:35
+	s_add_u32 s52, s42, s58
+	s_addc_u32 s12, s43, s59
+	.loc	1 80 52 is_stmt 0               ; crpz_orig_waves2.py:80:52
+	s_and_b32 s53, s12, 0xffff
+	v_cndmask_b32_e64 v11, -1, v2, s[10:11]
+	.loc	1 59 22 is_stmt 1               ; crpz_orig_waves2.py:59:22
+	v_add_f32_e32 v3, v8, v7
+	v_add_f32_e32 v7, v12, v19
+	v_add_f32_e32 v8, v13, v20
+	.loc	1 80 52                         ; crpz_orig_waves2.py:80:52
+	buffer_load_dwordx4 v[18:21], v11, s[52:55], 0 offen
+	.loc	1 87 24                         ; crpz_orig_waves2.py:87:24
+	s_cmp_eq_u32 s7, 34
+	.loc	1 74 52                         ; crpz_orig_waves2.py:74:52
+	s_waitcnt vmcnt(1)
+	v_lshrrev_b32_e32 v12, 16, v14
+	v_lshrrev_b32_e32 v22, 16, v15
+	v_lshrrev_b32_e32 v23, 16, v16
+	v_lshrrev_b32_e32 v24, 16, v17
+	.loc	1 80 52                         ; crpz_orig_waves2.py:80:52
+	s_waitcnt vmcnt(0)
+	v_lshrrev_b32_e32 v13, 16, v18
+	v_lshrrev_b32_e32 v25, 16, v19
+	v_lshrrev_b32_e32 v26, 16, v20
+	v_lshrrev_b32_e32 v27, 16, v21
+	.loc	1 81 39                         ; crpz_orig_waves2.py:81:39
+	v_cndmask_b32_e64 v11, v18, v14, s[8:9]
+	v_cndmask_b32_e64 v12, v13, v12, s[8:9]
+	v_cndmask_b32_e64 v13, v19, v15, s[8:9]
+	v_cndmask_b32_e64 v14, v25, v22, s[8:9]
+	v_cndmask_b32_e64 v15, v20, v16, s[8:9]
+	v_cndmask_b32_e64 v16, v26, v23, s[8:9]
+	v_cndmask_b32_e64 v17, v21, v17, s[8:9]
+	v_cndmask_b32_e64 v18, v27, v24, s[8:9]
+	.loc	1 87 24                         ; crpz_orig_waves2.py:87:24
+	s_cselect_b64 s[8:9], -1, 0
+	.loc	1 89 35                         ; crpz_orig_waves2.py:89:35
+	s_add_u32 s52, s44, s58
+	s_addc_u32 s10, s45, s59
+	.loc	1 89 52 is_stmt 0               ; crpz_orig_waves2.py:89:52
+	s_and_b32 s53, s10, 0xffff
+	v_cndmask_b32_e64 v23, -1, v2, s[8:9]
+	buffer_load_dwordx4 v[19:22], v23, s[52:55], 0 offen
+	.loc	1 90 79 is_stmt 1               ; crpz_orig_waves2.py:90:79
+	s_and_b32 s53, s47, 0xffff
+	s_mov_b32 s52, s46
+	.loc	1 97 24                         ; crpz_orig_waves2.py:97:24
+	s_cmp_eq_u32 s7, 35
+	s_cselect_b64 s[10:11], -1, 0
+	.loc	1 81 39                         ; crpz_orig_waves2.py:81:39
+	v_cvt_f32_f16_e32 v11, v11
+	v_cvt_f32_f16_e32 v12, v12
+	v_cvt_f32_f16_e32 v13, v13
+	v_cvt_f32_f16_e32 v14, v14
+	v_cvt_f32_f16_e32 v15, v15
+	v_cvt_f32_f16_e32 v16, v16
+	v_cvt_f32_f16_e32 v17, v17
+	v_cvt_f32_f16_e32 v18, v18
+	.loc	1 89 121                        ; crpz_orig_waves2.py:89:121
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v24, v19
+	v_cvt_f32_f16_sdwa v25, v19 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v26, v20
+	v_cvt_f32_f16_sdwa v27, v20 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v28, v21
+	v_cvt_f32_f16_sdwa v29, v21 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v30, v22
+	v_cvt_f32_f16_sdwa v31, v22 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 90 79                         ; crpz_orig_waves2.py:90:79
+	buffer_load_dwordx4 v[19:22], v23, s[52:55], 0 offen
+	.loc	1 99 35                         ; crpz_orig_waves2.py:99:35
+	s_add_u32 s52, s48, s58
+	s_addc_u32 s12, s49, s59
+	.loc	1 99 52 is_stmt 0               ; crpz_orig_waves2.py:99:52
+	s_and_b32 s53, s12, 0xffff
+	.loc	1 90 148 is_stmt 1              ; crpz_orig_waves2.py:90:148
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v33, v20
+	v_cvt_f32_f16_sdwa v38, v22 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v23, v19
+	v_cvt_f32_f16_sdwa v32, v19 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v34, v20 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v35, v21
+	v_cvt_f32_f16_sdwa v36, v21 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v37, v22
+	.loc	1 91 24                         ; crpz_orig_waves2.py:91:24
+	v_add_f32_e32 v21, v26, v33
+	v_add_f32_e32 v26, v31, v38
+	.loc	1 99 52                         ; crpz_orig_waves2.py:99:52
+	v_cndmask_b32_e64 v31, -1, v2, s[10:11]
+	.loc	1 91 24                         ; crpz_orig_waves2.py:91:24
+	v_add_f32_e32 v19, v24, v23
+	v_add_f32_e32 v20, v25, v32
+	v_add_f32_e32 v22, v27, v34
+	v_add_f32_e32 v23, v28, v35
+	v_add_f32_e32 v24, v29, v36
+	v_add_f32_e32 v25, v30, v37
+	.loc	1 99 52                         ; crpz_orig_waves2.py:99:52
+	buffer_load_dwordx4 v[27:30], v31, s[52:55], 0 offen
+	.loc	1 100 79                        ; crpz_orig_waves2.py:100:79
+	s_and_b32 s53, s51, 0xffff
+	s_mov_b32 s52, s50
+	.loc	1 107 24                        ; crpz_orig_waves2.py:107:24
+	s_cmp_eq_u32 s7, 36
+	s_cselect_b64 s[12:13], -1, 0
+	.loc	1 99 121                        ; crpz_orig_waves2.py:99:121
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v32, v27
+	v_cvt_f32_f16_sdwa v33, v27 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v34, v28
+	v_cvt_f32_f16_sdwa v35, v28 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v36, v29
+	v_cvt_f32_f16_sdwa v37, v29 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v38, v30
+	v_cvt_f32_f16_sdwa v39, v30 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 100 79                        ; crpz_orig_waves2.py:100:79
+	buffer_load_dwordx4 v[27:30], v31, s[52:55], 0 offen
+	.loc	1 109 35                        ; crpz_orig_waves2.py:109:35
+	s_add_u32 s52, s16, s58
+	s_addc_u32 s14, s17, s59
+	.loc	1 109 52 is_stmt 0              ; crpz_orig_waves2.py:109:52
+	s_and_b32 s53, s14, 0xffff
+	.loc	1 100 148 is_stmt 1             ; crpz_orig_waves2.py:100:148
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v31, v27
+	v_cvt_f32_f16_e32 v40, v28
+	v_cvt_f32_f16_sdwa v28, v28 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v44, v30 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v27, v27 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v41, v29
+	v_cvt_f32_f16_sdwa v42, v29 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v43, v30
+	.loc	1 101 24                        ; crpz_orig_waves2.py:101:24
+	v_add_f32_e32 v29, v32, v31
+	v_add_f32_e32 v32, v35, v28
+	v_add_f32_e32 v28, v39, v44
+	.loc	1 109 52                        ; crpz_orig_waves2.py:109:52
+	v_cndmask_b32_e64 v39, -1, v2, s[12:13]
+	.loc	1 101 24                        ; crpz_orig_waves2.py:101:24
+	v_add_f32_e32 v30, v33, v27
+	v_add_f32_e32 v31, v34, v40
+	v_add_f32_e32 v33, v36, v41
+	v_add_f32_e32 v34, v37, v42
+	v_add_f32_e32 v27, v38, v43
+	.loc	1 109 52                        ; crpz_orig_waves2.py:109:52
+	buffer_load_dwordx4 v[35:38], v39, s[52:55], 0 offen
+	.loc	1 110 79                        ; crpz_orig_waves2.py:110:79
+	s_and_b32 s53, s19, 0xffff
+	s_mov_b32 s52, s18
+	.loc	1 117 24                        ; crpz_orig_waves2.py:117:24
+	s_cmp_eq_u32 s7, 37
+	s_cselect_b64 s[14:15], -1, 0
+	.loc	1 109 121                       ; crpz_orig_waves2.py:109:121
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v40, v35
+	v_cvt_f32_f16_sdwa v41, v35 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v42, v36
+	v_cvt_f32_f16_sdwa v43, v36 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v44, v37
+	v_cvt_f32_f16_sdwa v45, v37 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v46, v38
+	v_cvt_f32_f16_sdwa v47, v38 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 110 79                        ; crpz_orig_waves2.py:110:79
+	buffer_load_dwordx4 v[35:38], v39, s[52:55], 0 offen
+	.loc	1 119 36                        ; crpz_orig_waves2.py:119:36
+	s_add_u32 s52, s20, s58
+	s_addc_u32 s16, s21, s59
+	.loc	1 119 53 is_stmt 0              ; crpz_orig_waves2.py:119:53
+	s_and_b32 s53, s16, 0xffff
+	.loc	1 110 148 is_stmt 1             ; crpz_orig_waves2.py:110:148
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v49, v36
+	v_cvt_f32_f16_sdwa v54, v38 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v39, v35
+	v_cvt_f32_f16_sdwa v48, v35 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v50, v36 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v51, v37
+	v_cvt_f32_f16_sdwa v52, v37 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v53, v38
+	.loc	1 111 24                        ; crpz_orig_waves2.py:111:24
+	v_add_f32_e32 v37, v42, v49
+	v_add_f32_e32 v42, v47, v54
+	.loc	1 119 53                        ; crpz_orig_waves2.py:119:53
+	v_cndmask_b32_e64 v47, -1, v2, s[14:15]
+	.loc	1 111 24                        ; crpz_orig_waves2.py:111:24
+	v_add_f32_e32 v35, v40, v39
+	v_add_f32_e32 v36, v41, v48
+	v_add_f32_e32 v38, v43, v50
+	v_add_f32_e32 v39, v44, v51
+	v_add_f32_e32 v40, v45, v52
+	v_add_f32_e32 v41, v46, v53
+	.loc	1 119 53                        ; crpz_orig_waves2.py:119:53
+	buffer_load_dwordx4 v[43:46], v47, s[52:55], 0 offen
+	.loc	1 120 80                        ; crpz_orig_waves2.py:120:80
+	s_and_b32 s53, s23, 0xffff
+	s_mov_b32 s52, s22
+	.loc	1 127 24                        ; crpz_orig_waves2.py:127:24
+	s_cmp_eq_u32 s7, 38
+	s_cselect_b64 s[16:17], -1, 0
+	.loc	1 119 122                       ; crpz_orig_waves2.py:119:122
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v48, v43
+	v_cvt_f32_f16_sdwa v49, v43 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v50, v44
+	v_cvt_f32_f16_sdwa v51, v44 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v52, v45
+	v_cvt_f32_f16_sdwa v53, v45 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v54, v46
+	v_cvt_f32_f16_sdwa v55, v46 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 120 80                        ; crpz_orig_waves2.py:120:80
+	buffer_load_dwordx4 v[43:46], v47, s[52:55], 0 offen
+	.loc	1 129 36                        ; crpz_orig_waves2.py:129:36
+	s_add_u32 s52, s24, s58
+	s_addc_u32 s18, s25, s59
+	.loc	1 129 53 is_stmt 0              ; crpz_orig_waves2.py:129:53
+	s_and_b32 s53, s18, 0xffff
+	.loc	1 120 149 is_stmt 1             ; crpz_orig_waves2.py:120:149
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v57, v44
+	v_cvt_f32_f16_sdwa v62, v46 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v47, v43
+	v_cvt_f32_f16_sdwa v56, v43 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v58, v44 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v59, v45
+	v_cvt_f32_f16_sdwa v60, v45 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v61, v46
+	.loc	1 121 24                        ; crpz_orig_waves2.py:121:24
+	v_add_f32_e32 v45, v50, v57
+	v_add_f32_e32 v50, v55, v62
+	.loc	1 129 53                        ; crpz_orig_waves2.py:129:53
+	v_cndmask_b32_e64 v55, -1, v2, s[16:17]
+	.loc	1 121 24                        ; crpz_orig_waves2.py:121:24
+	v_add_f32_e32 v43, v48, v47
+	v_add_f32_e32 v44, v49, v56
+	v_add_f32_e32 v46, v51, v58
+	v_add_f32_e32 v47, v52, v59
+	v_add_f32_e32 v48, v53, v60
+	v_add_f32_e32 v49, v54, v61
+	.loc	1 129 53                        ; crpz_orig_waves2.py:129:53
+	buffer_load_dwordx4 v[51:54], v55, s[52:55], 0 offen
+	.loc	1 130 80                        ; crpz_orig_waves2.py:130:80
+	s_and_b32 s53, s27, 0xffff
+	s_mov_b32 s52, s26
+	.loc	1 137 24                        ; crpz_orig_waves2.py:137:24
+	s_cmp_eq_u32 s7, 39
+	s_cselect_b64 s[18:19], -1, 0
+	.loc	1 129 122                       ; crpz_orig_waves2.py:129:122
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v56, v51
+	v_cvt_f32_f16_sdwa v57, v51 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v58, v52
+	v_cvt_f32_f16_sdwa v59, v52 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v60, v53
+	v_cvt_f32_f16_sdwa v61, v53 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v62, v54
+	v_cvt_f32_f16_sdwa v63, v54 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 130 80                        ; crpz_orig_waves2.py:130:80
+	buffer_load_dwordx4 v[51:54], v55, s[52:55], 0 offen
+	.loc	1 139 36                        ; crpz_orig_waves2.py:139:36
+	s_add_u32 s52, s28, s58
+	s_addc_u32 s20, s29, s59
+	.loc	1 139 53 is_stmt 0              ; crpz_orig_waves2.py:139:53
+	s_and_b32 s53, s20, 0xffff
+	.loc	1 130 149 is_stmt 1             ; crpz_orig_waves2.py:130:149
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v55, v51
+	v_cvt_f32_f16_sdwa v51, v51 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v69, v54 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v64, v52
+	v_cvt_f32_f16_sdwa v65, v52 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v66, v53
+	v_cvt_f32_f16_sdwa v67, v53 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v68, v54
+	.loc	1 131 24                        ; crpz_orig_waves2.py:131:24
+	v_add_f32_e32 v53, v57, v51
+	v_add_f32_e32 v51, v63, v69
+	.loc	1 139 53                        ; crpz_orig_waves2.py:139:53
+	v_cndmask_b32_e64 v63, -1, v2, s[18:19]
+	.loc	1 131 24                        ; crpz_orig_waves2.py:131:24
+	v_add_f32_e32 v52, v56, v55
+	v_add_f32_e32 v54, v58, v64
+	v_add_f32_e32 v55, v59, v65
+	v_add_f32_e32 v56, v60, v66
+	v_add_f32_e32 v57, v61, v67
+	v_add_f32_e32 v58, v62, v68
+	.loc	1 139 53                        ; crpz_orig_waves2.py:139:53
+	buffer_load_dwordx4 v[59:62], v63, s[52:55], 0 offen
+	.loc	1 140 80                        ; crpz_orig_waves2.py:140:80
+	s_and_b32 s53, s31, 0xffff
+	s_mov_b32 s52, s30
+	.loc	1 147 24                        ; crpz_orig_waves2.py:147:24
+	s_cmp_eq_u32 s7, 40
+	s_cselect_b64 s[20:21], -1, 0
+	.loc	1 139 122                       ; crpz_orig_waves2.py:139:122
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v64, v59
+	v_cvt_f32_f16_sdwa v65, v59 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v66, v60
+	v_cvt_f32_f16_sdwa v67, v60 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v68, v61
+	v_cvt_f32_f16_sdwa v69, v61 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v70, v62
+	v_cvt_f32_f16_sdwa v71, v62 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 140 80                        ; crpz_orig_waves2.py:140:80
+	buffer_load_dwordx4 v[59:62], v63, s[52:55], 0 offen
+	.loc	1 149 36                        ; crpz_orig_waves2.py:149:36
+	s_add_u32 s52, s80, s58
+	s_addc_u32 s22, s81, s59
+	.loc	1 149 53 is_stmt 0              ; crpz_orig_waves2.py:149:53
+	s_and_b32 s53, s22, 0xffff
+	.loc	1 140 149 is_stmt 1             ; crpz_orig_waves2.py:140:149
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v63, v59
+	v_cvt_f32_f16_sdwa v75, v62 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v59, v59 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v72, v60
+	v_cvt_f32_f16_sdwa v60, v60 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v73, v61
+	v_cvt_f32_f16_sdwa v61, v61 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v74, v62
+	.loc	1 141 24                        ; crpz_orig_waves2.py:141:24
+	v_add_f32_e32 v64, v64, v63
+	v_add_f32_e32 v63, v71, v75
+	.loc	1 149 53                        ; crpz_orig_waves2.py:149:53
+	v_cndmask_b32_e64 v71, -1, v2, s[20:21]
+	.loc	1 141 24                        ; crpz_orig_waves2.py:141:24
+	v_add_f32_e32 v65, v65, v59
+	v_add_f32_e32 v59, v67, v60
+	v_add_f32_e32 v60, v68, v73
+	v_add_f32_e32 v61, v69, v61
+	v_add_f32_e32 v62, v70, v74
+	.loc	1 149 53                        ; crpz_orig_waves2.py:149:53
+	buffer_load_dwordx4 v[67:70], v71, s[52:55], 0 offen
+	.loc	1 150 80                        ; crpz_orig_waves2.py:150:80
+	s_and_b32 s53, s83, 0xffff
+	s_mov_b32 s52, s82
+	.loc	1 141 24                        ; crpz_orig_waves2.py:141:24
+	v_add_f32_e32 v66, v66, v72
+	.loc	1 157 26                        ; crpz_orig_waves2.py:157:26
+	s_cmp_eq_u32 s7, 41
+	s_cselect_b64 s[22:23], -1, 0
+	.loc	1 149 122                       ; crpz_orig_waves2.py:149:122
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v72, v67
+	v_cvt_f32_f16_sdwa v73, v67 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v74, v68
+	v_cvt_f32_f16_sdwa v75, v68 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v76, v69
+	v_cvt_f32_f16_sdwa v77, v69 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v78, v70
+	v_cvt_f32_f16_sdwa v79, v70 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 150 80                        ; crpz_orig_waves2.py:150:80
+	buffer_load_dwordx4 v[67:70], v71, s[52:55], 0 offen
+	.loc	1 159 37                        ; crpz_orig_waves2.py:159:37
+	s_add_u32 s52, s84, s58
+	s_addc_u32 s24, s85, s59
+	.loc	1 159 54 is_stmt 0              ; crpz_orig_waves2.py:159:54
+	s_and_b32 s53, s24, 0xffff
+	.loc	1 150 149 is_stmt 1             ; crpz_orig_waves2.py:150:149
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v81, v68
+	v_cvt_f32_f16_sdwa v86, v70 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v71, v67
+	v_cvt_f32_f16_sdwa v80, v67 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v82, v68 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v83, v69
+	v_cvt_f32_f16_sdwa v84, v69 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v85, v70
+	.loc	1 151 25                        ; crpz_orig_waves2.py:151:25
+	v_add_f32_e32 v69, v74, v81
+	v_add_f32_e32 v74, v79, v86
+	.loc	1 159 54                        ; crpz_orig_waves2.py:159:54
+	v_cndmask_b32_e64 v79, -1, v2, s[22:23]
+	.loc	1 151 25                        ; crpz_orig_waves2.py:151:25
+	v_add_f32_e32 v67, v72, v71
+	v_add_f32_e32 v68, v73, v80
+	v_add_f32_e32 v70, v75, v82
+	v_add_f32_e32 v71, v76, v83
+	v_add_f32_e32 v72, v77, v84
+	v_add_f32_e32 v73, v78, v85
+	.loc	1 159 54                        ; crpz_orig_waves2.py:159:54
+	buffer_load_dwordx4 v[75:78], v79, s[52:55], 0 offen
+	.loc	1 160 81                        ; crpz_orig_waves2.py:160:81
+	s_and_b32 s53, s87, 0xffff
+	s_mov_b32 s52, s86
+	.loc	1 167 26                        ; crpz_orig_waves2.py:167:26
+	s_cmp_eq_u32 s7, 42
+	s_cselect_b64 s[24:25], -1, 0
+	.loc	1 159 124                       ; crpz_orig_waves2.py:159:124
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v80, v75
+	v_cvt_f32_f16_sdwa v81, v75 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v82, v76
+	v_cvt_f32_f16_sdwa v83, v76 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v84, v77
+	v_cvt_f32_f16_sdwa v85, v77 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v86, v78
+	v_cvt_f32_f16_sdwa v87, v78 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 160 81                        ; crpz_orig_waves2.py:160:81
+	buffer_load_dwordx4 v[75:78], v79, s[52:55], 0 offen
+	.loc	1 169 37                        ; crpz_orig_waves2.py:169:37
+	s_add_u32 s52, s88, s58
+	s_addc_u32 s26, s89, s59
+	.loc	1 169 54 is_stmt 0              ; crpz_orig_waves2.py:169:54
+	s_and_b32 s53, s26, 0xffff
+	.loc	1 160 151 is_stmt 1             ; crpz_orig_waves2.py:160:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v89, v76
+	v_cvt_f32_f16_sdwa v95, v78 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v79, v75
+	v_cvt_f32_f16_sdwa v88, v75 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v90, v76 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v92, v77
+	v_cvt_f32_f16_sdwa v93, v77 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v94, v78
+	.loc	1 161 26                        ; crpz_orig_waves2.py:161:26
+	v_add_f32_e32 v77, v82, v89
+	v_add_f32_e32 v82, v87, v95
+	.loc	1 169 54                        ; crpz_orig_waves2.py:169:54
+	v_cndmask_b32_e64 v87, -1, v2, s[24:25]
+	.loc	1 161 26                        ; crpz_orig_waves2.py:161:26
+	v_add_f32_e32 v75, v80, v79
+	v_add_f32_e32 v76, v81, v88
+	v_add_f32_e32 v78, v83, v90
+	v_add_f32_e32 v79, v84, v92
+	v_add_f32_e32 v80, v85, v93
+	v_add_f32_e32 v81, v86, v94
+	.loc	1 169 54                        ; crpz_orig_waves2.py:169:54
+	buffer_load_dwordx4 v[83:86], v87, s[52:55], 0 offen
+	.loc	1 170 81                        ; crpz_orig_waves2.py:170:81
+	s_and_b32 s53, s91, 0xffff
+	s_mov_b32 s52, s90
+	.loc	1 177 26                        ; crpz_orig_waves2.py:177:26
+	s_cmp_eq_u32 s7, 43
+	s_cselect_b64 s[26:27], -1, 0
+	.loc	1 169 124                       ; crpz_orig_waves2.py:169:124
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v88, v83
+	v_cvt_f32_f16_sdwa v89, v83 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v90, v84
+	v_cvt_f32_f16_sdwa v92, v84 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v93, v85
+	v_cvt_f32_f16_sdwa v94, v85 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v95, v86
+	v_cvt_f32_f16_sdwa v96, v86 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 170 81                        ; crpz_orig_waves2.py:170:81
+	buffer_load_dwordx4 v[83:86], v87, s[52:55], 0 offen
+	.loc	1 179 37                        ; crpz_orig_waves2.py:179:37
+	s_add_u32 s52, s92, s58
+	s_addc_u32 s28, s93, s59
+	.loc	1 179 54 is_stmt 0              ; crpz_orig_waves2.py:179:54
+	s_and_b32 s53, s28, 0xffff
+	.loc	1 170 151 is_stmt 1             ; crpz_orig_waves2.py:170:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v98, v84
+	v_cvt_f32_f16_sdwa v103, v86 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v87, v83
+	v_cvt_f32_f16_sdwa v97, v83 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v99, v84 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v100, v85
+	v_cvt_f32_f16_sdwa v101, v85 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v102, v86
+	.loc	1 171 26                        ; crpz_orig_waves2.py:171:26
+	v_add_f32_e32 v85, v90, v98
+	v_add_f32_e32 v90, v96, v103
+	.loc	1 179 54                        ; crpz_orig_waves2.py:179:54
+	v_cndmask_b32_e64 v96, -1, v2, s[26:27]
+	.loc	1 171 26                        ; crpz_orig_waves2.py:171:26
+	v_add_f32_e32 v83, v88, v87
+	v_add_f32_e32 v84, v89, v97
+	v_add_f32_e32 v86, v92, v99
+	v_add_f32_e32 v87, v93, v100
+	v_add_f32_e32 v88, v94, v101
+	v_add_f32_e32 v89, v95, v102
+	.loc	1 179 54                        ; crpz_orig_waves2.py:179:54
+	buffer_load_dwordx4 v[92:95], v96, s[52:55], 0 offen
+	.loc	1 180 81                        ; crpz_orig_waves2.py:180:81
+	s_and_b32 s53, s95, 0xffff
+	s_mov_b32 s52, s94
+	.loc	1 187 26                        ; crpz_orig_waves2.py:187:26
+	s_cmp_eq_u32 s7, 44
+	s_cselect_b64 s[28:29], -1, 0
+	.loc	1 179 124                       ; crpz_orig_waves2.py:179:124
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v97, v92
+	v_cvt_f32_f16_sdwa v98, v92 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v99, v93
+	v_cvt_f32_f16_sdwa v100, v93 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v101, v94
+	v_cvt_f32_f16_sdwa v102, v94 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v103, v95
+	v_cvt_f32_f16_sdwa v104, v95 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 180 81                        ; crpz_orig_waves2.py:180:81
+	buffer_load_dwordx4 v[92:95], v96, s[52:55], 0 offen
+	.loc	1 189 37                        ; crpz_orig_waves2.py:189:37
+	s_add_u32 s52, s64, s58
+	s_addc_u32 s30, s65, s59
+	.loc	1 189 54 is_stmt 0              ; crpz_orig_waves2.py:189:54
+	s_and_b32 s53, s30, 0xffff
+	.loc	1 180 151 is_stmt 1             ; crpz_orig_waves2.py:180:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v106, v93
+	v_cvt_f32_f16_sdwa v111, v95 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v96, v92
+	v_cvt_f32_f16_sdwa v105, v92 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v107, v93 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v108, v94
+	v_cvt_f32_f16_sdwa v109, v94 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v110, v95
+	.loc	1 181 26                        ; crpz_orig_waves2.py:181:26
+	v_add_f32_e32 v94, v99, v106
+	v_add_f32_e32 v99, v104, v111
+	.loc	1 189 54                        ; crpz_orig_waves2.py:189:54
+	v_cndmask_b32_e64 v104, -1, v2, s[28:29]
+	.loc	1 181 26                        ; crpz_orig_waves2.py:181:26
+	v_add_f32_e32 v92, v97, v96
+	v_add_f32_e32 v93, v98, v105
+	v_add_f32_e32 v95, v100, v107
+	v_add_f32_e32 v96, v101, v108
+	v_add_f32_e32 v97, v102, v109
+	v_add_f32_e32 v98, v103, v110
+	.loc	1 189 54                        ; crpz_orig_waves2.py:189:54
+	buffer_load_dwordx4 v[100:103], v104, s[52:55], 0 offen
+	.loc	1 190 81                        ; crpz_orig_waves2.py:190:81
+	s_and_b32 s53, s67, 0xffff
+	s_mov_b32 s52, s66
+	.loc	1 197 26                        ; crpz_orig_waves2.py:197:26
+	s_cmp_eq_u32 s7, 45
+	s_cselect_b64 s[30:31], -1, 0
+	.loc	1 189 124                       ; crpz_orig_waves2.py:189:124
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v105, v100
+	v_cvt_f32_f16_sdwa v106, v100 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v107, v101
+	v_cvt_f32_f16_sdwa v108, v101 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v109, v102
+	v_cvt_f32_f16_sdwa v110, v102 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v111, v103
+	v_cvt_f32_f16_sdwa v112, v103 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 190 81                        ; crpz_orig_waves2.py:190:81
+	buffer_load_dwordx4 v[100:103], v104, s[52:55], 0 offen
+	.loc	1 199 37                        ; crpz_orig_waves2.py:199:37
+	s_add_u32 s52, s68, s58
+	s_addc_u32 s33, s69, s59
+	.loc	1 199 54 is_stmt 0              ; crpz_orig_waves2.py:199:54
+	s_and_b32 s53, s33, 0xffff
+	.loc	1 203 26 is_stmt 1              ; crpz_orig_waves2.py:203:26
+	s_cmp_eq_u32 s7, 46
+	s_cselect_b64 s[34:35], -1, 0
+	.loc	1 190 151                       ; crpz_orig_waves2.py:190:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_sdwa v115, v101 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_sdwa v113, v100 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v114, v101
+	v_cvt_f32_f16_sdwa v119, v103 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v104, v100
+	v_cvt_f32_f16_e32 v116, v102
+	v_cvt_f32_f16_e32 v118, v103
+	.loc	1 191 26                        ; crpz_orig_waves2.py:191:26
+	v_add_f32_e32 v103, v108, v115
+	.loc	1 199 54                        ; crpz_orig_waves2.py:199:54
+	v_cndmask_b32_e64 v108, -1, v2, s[30:31]
+	.loc	1 190 151                       ; crpz_orig_waves2.py:190:151
+	v_cvt_f32_f16_sdwa v117, v102 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 191 26                        ; crpz_orig_waves2.py:191:26
+	v_add_f32_e32 v101, v106, v113
+	v_add_f32_e32 v102, v107, v114
+	v_add_f32_e32 v107, v112, v119
+	.loc	1 199 54                        ; crpz_orig_waves2.py:199:54
+	buffer_load_dwordx4 v[112:115], v108, s[52:55], 0 offen
+	.loc	1 205 37                        ; crpz_orig_waves2.py:205:37
+	s_add_u32 s52, s70, s58
+	s_addc_u32 s33, s71, s59
+	.loc	1 205 54 is_stmt 0              ; crpz_orig_waves2.py:205:54
+	s_and_b32 s53, s33, 0xffff
+	.loc	1 191 26 is_stmt 1              ; crpz_orig_waves2.py:191:26
+	v_add_f32_e32 v100, v105, v104
+	v_add_f32_e32 v104, v109, v116
+	.loc	1 205 54                        ; crpz_orig_waves2.py:205:54
+	v_cndmask_b32_e64 v116, -1, v2, s[34:35]
+	.loc	1 209 26                        ; crpz_orig_waves2.py:209:26
+	s_cmp_eq_u32 s7, 47
+	.loc	1 205 54                        ; crpz_orig_waves2.py:205:54
+	buffer_load_dwordx4 v[120:123], v116, s[52:55], 0 offen
+	.loc	1 209 26                        ; crpz_orig_waves2.py:209:26
+	s_cselect_b64 s[36:37], -1, 0
+	.loc	1 211 37                        ; crpz_orig_waves2.py:211:37
+	s_add_u32 s52, s72, s58
+	s_addc_u32 s33, s73, s59
+	.loc	1 211 54 is_stmt 0              ; crpz_orig_waves2.py:211:54
+	s_and_b32 s53, s33, 0xffff
+	v_cndmask_b32_e64 v124, -1, v2, s[36:37]
+	.loc	1 215 26 is_stmt 1              ; crpz_orig_waves2.py:215:26
+	s_cmp_eq_u32 s7, 48
+	.loc	1 211 54                        ; crpz_orig_waves2.py:211:54
+	buffer_load_dwordx4 v[128:131], v124, s[52:55], 0 offen
+	.loc	1 215 26                        ; crpz_orig_waves2.py:215:26
+	s_cselect_b64 s[38:39], -1, 0
+	.loc	1 217 37                        ; crpz_orig_waves2.py:217:37
+	s_add_u32 s52, s74, s58
+	s_addc_u32 s33, s75, s59
+	.loc	1 217 54 is_stmt 0              ; crpz_orig_waves2.py:217:54
+	s_and_b32 s53, s33, 0xffff
+	.loc	1 221 26 is_stmt 1              ; crpz_orig_waves2.py:221:26
+	s_cmp_eq_u32 s7, 49
+	s_cselect_b64 s[40:41], -1, 0
+	.loc	1 217 54                        ; crpz_orig_waves2.py:217:54
+	v_cndmask_b32_e64 v132, -1, v2, s[38:39]
+	.loc	1 223 99                        ; crpz_orig_waves2.py:223:99
+	s_and_b64 s[42:43], s[40:41], s[0:1]
+	.loc	1 217 54                        ; crpz_orig_waves2.py:217:54
+	buffer_load_dwordx4 v[136:139], v132, s[52:55], 0 offen
+	.loc	1 223 81                        ; crpz_orig_waves2.py:223:81
+	s_and_b32 s53, s77, 0xffff
+	s_mov_b32 s52, s76
+	v_cndmask_b32_e64 v140, -1, v168, s[42:43]
+	v_cndmask_b32_e64 v144, -1, v169, s[42:43]
+	buffer_load_dwordx4 v[140:143], v140, s[52:55], 0 offen
+	buffer_load_dwordx4 v[144:147], v144, s[52:55], 0 offen
+	.loc	1 225 81                        ; crpz_orig_waves2.py:225:81
+	s_and_b32 s53, s79, 0xffff
+	s_mov_b32 s52, s78
+	v_cndmask_b32_e64 v148, -1, v91, s[42:43]
+	buffer_load_dwordx4 v[148:151], v148, s[52:55], 0 offen
+	s_load_dwordx16 s[60:75], s[4:5], 0x100
+	.loc	1 234 26                        ; crpz_orig_waves2.py:234:26
+	s_cmp_eq_u32 s7, 50
+	s_cselect_b64 s[42:43], -1, 0
+	.loc	1 236 99                        ; crpz_orig_waves2.py:236:99
+	s_and_b64 s[44:45], s[42:43], s[0:1]
+	.loc	1 238 81                        ; crpz_orig_waves2.py:238:81
+	v_cndmask_b32_e64 v156, -1, v91, s[44:45]
+	.loc	1 236 81                        ; crpz_orig_waves2.py:236:81
+	s_waitcnt lgkmcnt(0)
+	s_and_b32 s53, s61, 0xffff
+	s_mov_b32 s52, s60
+	s_mov_b64 s[58:59], s[62:63]
+	s_mov_b64 s[60:61], s[64:65]
+	s_mov_b64 s[62:63], s[66:67]
+	s_mov_b64 s[64:65], s[68:69]
+	s_mov_b64 s[66:67], s[70:71]
+	.loc	1 191 26                        ; crpz_orig_waves2.py:191:26
+	v_add_f32_e32 v105, v110, v117
+	v_add_f32_e32 v106, v111, v118
+	s_mov_b64 s[68:69], s[72:73]
+	s_mov_b64 s[70:71], s[74:75]
+	.loc	1 199 124                       ; crpz_orig_waves2.py:199:124
+	s_waitcnt vmcnt(6)
+	v_cvt_f32_f16_e32 v108, v112
+	v_cvt_f32_f16_sdwa v109, v112 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v110, v113
+	v_cvt_f32_f16_sdwa v111, v113 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v112, v114
+	v_cvt_f32_f16_sdwa v113, v114 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v114, v115
+	v_cvt_f32_f16_sdwa v115, v115 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 205 124                       ; crpz_orig_waves2.py:205:124
+	s_waitcnt vmcnt(5)
+	v_cvt_f32_f16_e32 v116, v120
+	v_cvt_f32_f16_sdwa v117, v120 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v118, v121
+	v_cvt_f32_f16_sdwa v119, v121 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v120, v122
+	v_cvt_f32_f16_sdwa v121, v122 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v122, v123
+	.loc	1 211 124                       ; crpz_orig_waves2.py:211:124
+	s_waitcnt vmcnt(4)
+	v_cvt_f32_f16_e32 v124, v128
+	v_cvt_f32_f16_sdwa v125, v128 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v126, v129
+	v_cvt_f32_f16_sdwa v127, v129 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v128, v130
+	v_cvt_f32_f16_sdwa v129, v130 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v130, v131
+	v_cvt_f32_f16_sdwa v131, v131 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 205 124                       ; crpz_orig_waves2.py:205:124
+	v_cvt_f32_f16_sdwa v123, v123 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 217 124                       ; crpz_orig_waves2.py:217:124
+	s_waitcnt vmcnt(3)
+	v_cvt_f32_f16_e32 v132, v136
+	v_cvt_f32_f16_sdwa v133, v136 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v134, v137
+	v_cvt_f32_f16_sdwa v135, v137 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v136, v138
+	v_cvt_f32_f16_sdwa v137, v138 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v138, v139
+	v_cvt_f32_f16_sdwa v139, v139 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 225 151                       ; crpz_orig_waves2.py:225:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v152, v148
+	v_cvt_f32_f16_sdwa v148, v148 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v153, v149
+	v_cvt_f32_f16_sdwa v149, v149 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v154, v150
+	v_cvt_f32_f16_sdwa v150, v150 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v155, v151
+	v_cvt_f32_f16_sdwa v151, v151 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 226 26                        ; crpz_orig_waves2.py:226:26
+	v_add_f32_e32 v141, v141, v148
+	v_add_f32_e32 v143, v143, v149
+	v_add_f32_e32 v148, v144, v154
+	v_add_f32_e32 v140, v140, v152
+	v_add_f32_e32 v142, v142, v153
+	v_add_f32_e32 v149, v145, v150
+	v_add_f32_e32 v150, v146, v155
+	v_add_f32_e32 v151, v147, v151
+	.loc	1 228 26                        ; crpz_orig_waves2.py:228:26
+	v_add_f32_e32 v144, 0, v143
+	v_add_f32_e32 v143, 0, v148
+	.loc	1 236 81                        ; crpz_orig_waves2.py:236:81
+	v_cndmask_b32_e64 v148, -1, v168, s[44:45]
+	v_cndmask_b32_e64 v152, -1, v169, s[44:45]
+	.loc	1 228 26                        ; crpz_orig_waves2.py:228:26
+	v_add_f32_e32 v147, 0, v140
+	v_add_f32_e32 v146, 0, v141
+	v_add_f32_e32 v145, 0, v142
+	v_add_f32_e32 v142, 0, v149
+	v_add_f32_e32 v141, 0, v150
+	v_add_f32_e32 v140, 0, v151
+	.loc	1 236 81                        ; crpz_orig_waves2.py:236:81
+	buffer_load_dwordx4 v[148:151], v148, s[52:55], 0 offen
+	buffer_load_dwordx4 v[152:155], v152, s[52:55], 0 offen
+	.loc	1 238 81                        ; crpz_orig_waves2.py:238:81
+	s_and_b32 s53, s59, 0xffff
+	s_mov_b32 s52, s58
+	buffer_load_dwordx4 v[156:159], v156, s[52:55], 0 offen
+	.loc	1 247 26                        ; crpz_orig_waves2.py:247:26
+	s_cmp_eq_u32 s7, 51
+	s_cselect_b64 s[44:45], -1, 0
+	.loc	1 249 99                        ; crpz_orig_waves2.py:249:99
+	s_and_b64 s[46:47], s[44:45], s[0:1]
+	.loc	1 249 81 is_stmt 0              ; crpz_orig_waves2.py:249:81
+	s_and_b32 s53, s61, 0xffff
+	s_mov_b32 s52, s60
+	.loc	1 251 81 is_stmt 1              ; crpz_orig_waves2.py:251:81
+	v_cndmask_b32_e64 v164, -1, v91, s[46:47]
+	.loc	1 238 151                       ; crpz_orig_waves2.py:238:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v160, v156
+	v_cvt_f32_f16_sdwa v156, v156 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v161, v157
+	v_cvt_f32_f16_sdwa v157, v157 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v162, v158
+	v_cvt_f32_f16_sdwa v158, v158 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v163, v159
+	v_cvt_f32_f16_sdwa v159, v159 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 239 26                        ; crpz_orig_waves2.py:239:26
+	v_add_f32_e32 v149, v149, v156
+	v_add_f32_e32 v151, v151, v157
+	v_add_f32_e32 v156, v152, v162
+	v_add_f32_e32 v148, v148, v160
+	v_add_f32_e32 v150, v150, v161
+	v_add_f32_e32 v157, v153, v158
+	v_add_f32_e32 v158, v154, v163
+	v_add_f32_e32 v159, v155, v159
+	.loc	1 241 26                        ; crpz_orig_waves2.py:241:26
+	v_add_f32_e32 v152, 0, v151
+	v_add_f32_e32 v151, 0, v156
+	.loc	1 249 81                        ; crpz_orig_waves2.py:249:81
+	v_cndmask_b32_e64 v156, -1, v168, s[46:47]
+	v_cndmask_b32_e64 v160, -1, v169, s[46:47]
+	.loc	1 241 26                        ; crpz_orig_waves2.py:241:26
+	v_add_f32_e32 v155, 0, v148
+	v_add_f32_e32 v154, 0, v149
+	v_add_f32_e32 v153, 0, v150
+	v_add_f32_e32 v150, 0, v157
+	v_add_f32_e32 v149, 0, v158
+	v_add_f32_e32 v148, 0, v159
+	.loc	1 249 81                        ; crpz_orig_waves2.py:249:81
+	buffer_load_dwordx4 v[156:159], v156, s[52:55], 0 offen
+	buffer_load_dwordx4 v[160:163], v160, s[52:55], 0 offen
+	.loc	1 251 81                        ; crpz_orig_waves2.py:251:81
+	s_and_b32 s53, s63, 0xffff
+	s_mov_b32 s52, s62
+	buffer_load_dwordx4 v[164:167], v164, s[52:55], 0 offen
+	.loc	1 257 25                        ; crpz_orig_waves2.py:257:25
+	s_cmp_gt_i32 s7, 51
+	s_cselect_b64 s[46:47], -1, 0
+	.loc	1 261 99                        ; crpz_orig_waves2.py:261:99
+	s_and_b64 s[48:49], s[46:47], s[0:1]
+	.loc	1 261 81 is_stmt 0              ; crpz_orig_waves2.py:261:81
+	s_and_b32 s53, s65, 0xffff
+	s_mov_b32 s52, s64
+	.loc	1 263 81 is_stmt 1              ; crpz_orig_waves2.py:263:81
+	v_cndmask_b32_e64 v91, -1, v91, s[48:49]
+	.loc	1 251 151                       ; crpz_orig_waves2.py:251:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v170, v164
+	v_cvt_f32_f16_sdwa v164, v164 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v171, v165
+	v_cvt_f32_f16_sdwa v165, v165 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v172, v166
+	v_cvt_f32_f16_sdwa v166, v166 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v173, v167
+	v_cvt_f32_f16_sdwa v167, v167 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 252 26                        ; crpz_orig_waves2.py:252:26
+	v_add_f32_e32 v157, v157, v164
+	v_add_f32_e32 v159, v159, v165
+	v_add_f32_e32 v164, v160, v172
+	v_add_f32_e32 v156, v156, v170
+	v_add_f32_e32 v158, v158, v171
+	v_add_f32_e32 v165, v161, v166
+	v_add_f32_e32 v166, v162, v173
+	v_add_f32_e32 v167, v163, v167
+	.loc	1 254 26                        ; crpz_orig_waves2.py:254:26
+	v_add_f32_e32 v160, 0, v159
+	v_add_f32_e32 v159, 0, v164
+	.loc	1 261 81                        ; crpz_orig_waves2.py:261:81
+	v_cndmask_b32_e64 v164, -1, v168, s[48:49]
+	v_cndmask_b32_e64 v168, -1, v169, s[48:49]
+	.loc	1 254 26                        ; crpz_orig_waves2.py:254:26
+	v_add_f32_e32 v163, 0, v156
+	v_add_f32_e32 v162, 0, v157
+	v_add_f32_e32 v161, 0, v158
+	v_add_f32_e32 v158, 0, v165
+	v_add_f32_e32 v157, 0, v166
+	v_add_f32_e32 v156, 0, v167
+	.loc	1 261 81                        ; crpz_orig_waves2.py:261:81
+	buffer_load_dwordx4 v[164:167], v164, s[52:55], 0 offen
+	buffer_load_dwordx4 v[168:171], v168, s[52:55], 0 offen
+	.loc	1 263 81                        ; crpz_orig_waves2.py:263:81
+	s_and_b32 s53, s67, 0xffff
+	s_mov_b32 s52, s66
+	buffer_load_dwordx4 v[172:175], v91, s[52:55], 0 offen
+	.loc	1 263 151 is_stmt 0             ; crpz_orig_waves2.py:263:151
+	s_waitcnt vmcnt(0)
+	v_cvt_f32_f16_e32 v91, v172
+	v_cvt_f32_f16_sdwa v172, v172 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v176, v173
+	v_cvt_f32_f16_sdwa v173, v173 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v177, v174
+	v_cvt_f32_f16_sdwa v174, v174 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	v_cvt_f32_f16_e32 v178, v175
+	v_cvt_f32_f16_sdwa v175, v175 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+	.loc	1 264 26 is_stmt 1              ; crpz_orig_waves2.py:264:26
+	v_add_f32_e32 v91, v164, v91
+	v_add_f32_e32 v164, v165, v172
+	v_add_f32_e32 v165, v166, v176
+	v_add_f32_e32 v166, v167, v173
+	v_add_f32_e32 v167, v168, v177
+	v_add_f32_e32 v168, v169, v174
+	v_add_f32_e32 v169, v170, v178
+	v_add_f32_e32 v170, v171, v175
+	.loc	1 266 26                        ; crpz_orig_waves2.py:266:26
+	v_add_f32_e32 v91, 0, v91
+	v_add_f32_e32 v164, 0, v164
+	v_add_f32_e32 v165, 0, v165
+	v_add_f32_e32 v166, 0, v166
+	v_add_f32_e32 v167, 0, v167
+	v_add_f32_e32 v168, 0, v168
+	v_add_f32_e32 v169, 0, v169
+	v_add_f32_e32 v170, 0, v170
+	.loc	1 268 42                        ; crpz_orig_waves2.py:268:42
+	v_cndmask_b32_e64 v91, 0, v91, s[46:47]
+	v_cndmask_b32_e64 v164, 0, v164, s[46:47]
+	v_cndmask_b32_e64 v165, 0, v165, s[46:47]
+	v_cndmask_b32_e64 v166, 0, v166, s[46:47]
+	v_cndmask_b32_e64 v167, 0, v167, s[46:47]
+	v_cndmask_b32_e64 v168, 0, v168, s[46:47]
+	v_cndmask_b32_e64 v169, 0, v169, s[46:47]
+	v_cndmask_b32_e64 v170, 0, v170, s[46:47]
+	.loc	1 269 42                        ; crpz_orig_waves2.py:269:42
+	v_cndmask_b32_e64 v91, v91, v163, s[44:45]
+	v_cndmask_b32_e64 v162, v164, v162, s[44:45]
+	v_cndmask_b32_e64 v161, v165, v161, s[44:45]
+	v_cndmask_b32_e64 v160, v166, v160, s[44:45]
+	v_cndmask_b32_e64 v159, v167, v159, s[44:45]
+	v_cndmask_b32_e64 v158, v168, v158, s[44:45]
+	v_cndmask_b32_e64 v157, v169, v157, s[44:45]
+	v_cndmask_b32_e64 v156, v170, v156, s[44:45]
+	.loc	1 270 42                        ; crpz_orig_waves2.py:270:42
+	v_cndmask_b32_e64 v91, v91, v155, s[42:43]
+	v_cndmask_b32_e64 v154, v162, v154, s[42:43]
+	v_cndmask_b32_e64 v153, v161, v153, s[42:43]
+	v_cndmask_b32_e64 v152, v160, v152, s[42:43]
+	v_cndmask_b32_e64 v151, v159, v151, s[42:43]
+	v_cndmask_b32_e64 v150, v158, v150, s[42:43]
+	v_cndmask_b32_e64 v149, v157, v149, s[42:43]
+	v_cndmask_b32_e64 v148, v156, v148, s[42:43]
+	.loc	1 271 42                        ; crpz_orig_waves2.py:271:42
+	v_cndmask_b32_e64 v91, v91, v147, s[40:41]
+	v_cndmask_b32_e64 v146, v154, v146, s[40:41]
+	v_cndmask_b32_e64 v145, v153, v145, s[40:41]
+	v_cndmask_b32_e64 v144, v152, v144, s[40:41]
+	v_cndmask_b32_e64 v143, v151, v143, s[40:41]
+	v_cndmask_b32_e64 v142, v150, v142, s[40:41]
+	v_cndmask_b32_e64 v141, v149, v141, s[40:41]
+	v_cndmask_b32_e64 v140, v148, v140, s[40:41]
+	.loc	1 272 42                        ; crpz_orig_waves2.py:272:42
+	v_cndmask_b32_e64 v91, v91, v132, s[38:39]
+	v_cndmask_b32_e64 v132, v146, v133, s[38:39]
+	v_cndmask_b32_e64 v133, v145, v134, s[38:39]
+	v_cndmask_b32_e64 v134, v144, v135, s[38:39]
+	v_cndmask_b32_e64 v135, v143, v136, s[38:39]
+	v_cndmask_b32_e64 v136, v142, v137, s[38:39]
+	v_cndmask_b32_e64 v137, v141, v138, s[38:39]
+	v_cndmask_b32_e64 v138, v140, v139, s[38:39]
+	.loc	1 273 42                        ; crpz_orig_waves2.py:273:42
+	v_cndmask_b32_e64 v91, v91, v124, s[36:37]
+	v_cndmask_b32_e64 v124, v132, v125, s[36:37]
+	v_cndmask_b32_e64 v125, v133, v126, s[36:37]
+	v_cndmask_b32_e64 v126, v134, v127, s[36:37]
+	v_cndmask_b32_e64 v127, v135, v128, s[36:37]
+	v_cndmask_b32_e64 v128, v136, v129, s[36:37]
+	v_cndmask_b32_e64 v129, v137, v130, s[36:37]
+	v_cndmask_b32_e64 v130, v138, v131, s[36:37]
+	.loc	1 274 42                        ; crpz_orig_waves2.py:274:42
+	v_cndmask_b32_e64 v91, v91, v116, s[34:35]
+	v_cndmask_b32_e64 v116, v124, v117, s[34:35]
+	v_cndmask_b32_e64 v117, v125, v118, s[34:35]
+	v_cndmask_b32_e64 v118, v126, v119, s[34:35]
+	v_cndmask_b32_e64 v119, v127, v120, s[34:35]
+	v_cndmask_b32_e64 v120, v128, v121, s[34:35]
+	v_cndmask_b32_e64 v121, v129, v122, s[34:35]
+	v_cndmask_b32_e64 v122, v130, v123, s[34:35]
+	.loc	1 275 42                        ; crpz_orig_waves2.py:275:42
+	v_cndmask_b32_e64 v91, v91, v108, s[30:31]
+	v_cndmask_b32_e64 v108, v116, v109, s[30:31]
+	v_cndmask_b32_e64 v109, v117, v110, s[30:31]
+	v_cndmask_b32_e64 v110, v118, v111, s[30:31]
+	v_cndmask_b32_e64 v111, v119, v112, s[30:31]
+	v_cndmask_b32_e64 v112, v120, v113, s[30:31]
+	v_cndmask_b32_e64 v113, v121, v114, s[30:31]
+	v_cndmask_b32_e64 v114, v122, v115, s[30:31]
+	.loc	1 276 42                        ; crpz_orig_waves2.py:276:42
+	v_cndmask_b32_e64 v91, v91, v100, s[28:29]
+	v_cndmask_b32_e64 v100, v108, v101, s[28:29]
+	v_cndmask_b32_e64 v101, v109, v102, s[28:29]
+	v_cndmask_b32_e64 v102, v110, v103, s[28:29]
+	v_cndmask_b32_e64 v103, v111, v104, s[28:29]
+	v_cndmask_b32_e64 v104, v112, v105, s[28:29]
+	v_cndmask_b32_e64 v105, v113, v106, s[28:29]
+	v_cndmask_b32_e64 v106, v114, v107, s[28:29]
+	.loc	1 277 42                        ; crpz_orig_waves2.py:277:42
+	v_cndmask_b32_e64 v91, v91, v92, s[26:27]
+	v_cndmask_b32_e64 v92, v100, v93, s[26:27]
+	v_cndmask_b32_e64 v93, v101, v94, s[26:27]
+	v_cndmask_b32_e64 v94, v102, v95, s[26:27]
+	v_cndmask_b32_e64 v95, v103, v96, s[26:27]
+	v_cndmask_b32_e64 v96, v104, v97, s[26:27]
+	v_cndmask_b32_e64 v97, v105, v98, s[26:27]
+	v_cndmask_b32_e64 v98, v106, v99, s[26:27]
+	.loc	1 278 42                        ; crpz_orig_waves2.py:278:42
+	v_cndmask_b32_e64 v83, v91, v83, s[24:25]
+	v_cndmask_b32_e64 v84, v92, v84, s[24:25]
+	v_cndmask_b32_e64 v85, v93, v85, s[24:25]
+	v_cndmask_b32_e64 v86, v94, v86, s[24:25]
+	v_cndmask_b32_e64 v87, v95, v87, s[24:25]
+	v_cndmask_b32_e64 v88, v96, v88, s[24:25]
+	v_cndmask_b32_e64 v89, v97, v89, s[24:25]
+	v_cndmask_b32_e64 v90, v98, v90, s[24:25]
+	.loc	1 279 42                        ; crpz_orig_waves2.py:279:42
+	v_cndmask_b32_e64 v75, v83, v75, s[22:23]
+	v_cndmask_b32_e64 v76, v84, v76, s[22:23]
+	v_cndmask_b32_e64 v77, v85, v77, s[22:23]
+	v_cndmask_b32_e64 v78, v86, v78, s[22:23]
+	v_cndmask_b32_e64 v79, v87, v79, s[22:23]
+	v_cndmask_b32_e64 v80, v88, v80, s[22:23]
+	v_cndmask_b32_e64 v81, v89, v81, s[22:23]
+	v_cndmask_b32_e64 v82, v90, v82, s[22:23]
+	.loc	1 280 41                        ; crpz_orig_waves2.py:280:41
+	v_cndmask_b32_e64 v67, v75, v67, s[20:21]
+	v_cndmask_b32_e64 v68, v76, v68, s[20:21]
+	v_cndmask_b32_e64 v69, v77, v69, s[20:21]
+	v_cndmask_b32_e64 v70, v78, v70, s[20:21]
+	v_cndmask_b32_e64 v71, v79, v71, s[20:21]
+	v_cndmask_b32_e64 v72, v80, v72, s[20:21]
+	v_cndmask_b32_e64 v73, v81, v73, s[20:21]
+	v_cndmask_b32_e64 v74, v82, v74, s[20:21]
+	.loc	1 281 40                        ; crpz_orig_waves2.py:281:40
+	v_cndmask_b32_e64 v64, v67, v64, s[18:19]
+	v_cndmask_b32_e64 v65, v68, v65, s[18:19]
+	v_cndmask_b32_e64 v66, v69, v66, s[18:19]
+	v_cndmask_b32_e64 v59, v70, v59, s[18:19]
+	v_cndmask_b32_e64 v60, v71, v60, s[18:19]
+	v_cndmask_b32_e64 v61, v72, v61, s[18:19]
+	v_cndmask_b32_e64 v62, v73, v62, s[18:19]
+	v_cndmask_b32_e64 v63, v74, v63, s[18:19]
+	.loc	1 282 40                        ; crpz_orig_waves2.py:282:40
+	v_cndmask_b32_e64 v52, v64, v52, s[16:17]
+	v_cndmask_b32_e64 v53, v65, v53, s[16:17]
+	v_cndmask_b32_e64 v54, v66, v54, s[16:17]
+	v_cndmask_b32_e64 v55, v59, v55, s[16:17]
+	v_cndmask_b32_e64 v56, v60, v56, s[16:17]
+	v_cndmask_b32_e64 v57, v61, v57, s[16:17]
+	v_cndmask_b32_e64 v58, v62, v58, s[16:17]
+	v_cndmask_b32_e64 v51, v63, v51, s[16:17]
+	.loc	1 283 40                        ; crpz_orig_waves2.py:283:40
+	v_cndmask_b32_e64 v43, v52, v43, s[14:15]
+	v_cndmask_b32_e64 v44, v53, v44, s[14:15]
+	v_cndmask_b32_e64 v45, v54, v45, s[14:15]
+	v_cndmask_b32_e64 v46, v55, v46, s[14:15]
+	v_cndmask_b32_e64 v47, v56, v47, s[14:15]
+	v_cndmask_b32_e64 v48, v57, v48, s[14:15]
+	v_cndmask_b32_e64 v49, v58, v49, s[14:15]
+	v_cndmask_b32_e64 v50, v51, v50, s[14:15]
+	.loc	1 284 40                        ; crpz_orig_waves2.py:284:40
+	v_cndmask_b32_e64 v35, v43, v35, s[12:13]
+	v_cndmask_b32_e64 v36, v44, v36, s[12:13]
+	v_cndmask_b32_e64 v37, v45, v37, s[12:13]
+	v_cndmask_b32_e64 v38, v46, v38, s[12:13]
+	v_cndmask_b32_e64 v39, v47, v39, s[12:13]
+	v_cndmask_b32_e64 v40, v48, v40, s[12:13]
+	v_cndmask_b32_e64 v41, v49, v41, s[12:13]
+	v_cndmask_b32_e64 v42, v50, v42, s[12:13]
+	.loc	1 285 40                        ; crpz_orig_waves2.py:285:40
+	v_cndmask_b32_e64 v29, v35, v29, s[10:11]
+	v_cndmask_b32_e64 v30, v36, v30, s[10:11]
+	v_cndmask_b32_e64 v31, v37, v31, s[10:11]
+	v_cndmask_b32_e64 v32, v38, v32, s[10:11]
+	v_cndmask_b32_e64 v33, v39, v33, s[10:11]
+	v_cndmask_b32_e64 v34, v40, v34, s[10:11]
+	v_cndmask_b32_e64 v27, v41, v27, s[10:11]
+	v_cndmask_b32_e64 v28, v42, v28, s[10:11]
+	.loc	1 286 40                        ; crpz_orig_waves2.py:286:40
+	v_cndmask_b32_e64 v19, v29, v19, s[8:9]
+	v_cndmask_b32_e64 v20, v30, v20, s[8:9]
+	v_cndmask_b32_e64 v21, v31, v21, s[8:9]
+	v_cndmask_b32_e64 v22, v32, v22, s[8:9]
+	v_cndmask_b32_e64 v23, v33, v23, s[8:9]
+	v_cndmask_b32_e64 v24, v34, v24, s[8:9]
+	v_cndmask_b32_e64 v25, v27, v25, s[8:9]
+	v_cndmask_b32_e64 v26, v28, v26, s[8:9]
+	.loc	1 287 40                        ; crpz_orig_waves2.py:287:40
+	v_cndmask_b32_e64 v11, v19, v11, s[2:3]
+	v_cndmask_b32_e64 v12, v20, v12, s[2:3]
+	v_cndmask_b32_e64 v13, v21, v13, s[2:3]
+	v_cndmask_b32_e64 v14, v22, v14, s[2:3]
+	v_cndmask_b32_e64 v15, v23, v15, s[2:3]
+	v_cndmask_b32_e64 v16, v24, v16, s[2:3]
+	v_cndmask_b32_e64 v17, v25, v17, s[2:3]
+	v_cndmask_b32_e64 v18, v26, v18, s[2:3]
+	.loc	1 288 39                        ; crpz_orig_waves2.py:288:39
+	v_cndmask_b32_e32 v11, v11, v3, vcc
+	v_cndmask_b32_e32 v12, v12, v4, vcc
+	v_cndmask_b32_e32 v13, v13, v5, vcc
+	v_cndmask_b32_e32 v14, v14, v6, vcc
+	v_cndmask_b32_e32 v7, v15, v7, vcc
+	v_cndmask_b32_e32 v8, v16, v8, vcc
+	v_cndmask_b32_e32 v9, v17, v9, vcc
+	v_cndmask_b32_e32 v10, v18, v10, vcc
+	.loc	1 297 41                        ; crpz_orig_waves2.py:297:41
+	s_mul_i32 s2, s6, 0x4f8
+	.loc	1 294 66                        ; crpz_orig_waves2.py:294:66
+	v_cndmask_b32_e64 v15, 0, v11, s[0:1]
+	v_cndmask_b32_e64 v16, 0, v12, s[0:1]
+	v_cndmask_b32_e64 v17, 0, v13, s[0:1]
+	v_cndmask_b32_e64 v18, 0, v14, s[0:1]
+	v_cndmask_b32_e64 v19, 0, v7, s[0:1]
+	v_cndmask_b32_e64 v6, 0, v8, s[0:1]
+	v_cndmask_b32_e64 v5, 0, v9, s[0:1]
+	v_cndmask_b32_e64 v4, 0, v10, s[0:1]
+	.loc	1 297 29                        ; crpz_orig_waves2.py:297:29
+	s_ashr_i32 s3, s2, 31
+	.loc	1 297 54 is_stmt 0              ; crpz_orig_waves2.py:297:54
+	v_cvt_f16_f32_e32 v11, v11
+	v_cvt_f16_f32_e32 v12, v12
+	v_cvt_f16_f32_e32 v13, v13
+	v_cvt_f16_f32_e32 v14, v14
+	v_cvt_f16_f32_e32 v7, v7
+	v_cvt_f16_f32_e32 v8, v8
+	v_cvt_f16_f32_e32 v9, v9
+	v_cvt_f16_f32_e32 v10, v10
+	s_mov_b64 s[12:13], s[68:69]
+	.loc	1 297 29                        ; crpz_orig_waves2.py:297:29
+	s_lshl_b64 s[2:3], s[2:3], 1
+	s_add_u32 s52, s12, s2
+	s_addc_u32 s2, s13, s3
+	.loc	1 297 54                        ; crpz_orig_waves2.py:297:54
+	s_and_b32 s53, s2, 0xffff
+	v_pack_b32_f16 v10, v9, v10
+	v_pack_b32_f16 v9, v7, v8
+	v_pack_b32_f16 v8, v13, v14
+	v_pack_b32_f16 v7, v11, v12
+	.loc	1 296 70 is_stmt 1              ; crpz_orig_waves2.py:296:70
+	v_cndmask_b32_e64 v3, 0, 1.0, s[0:1]
+	.loc	1 297 54                        ; crpz_orig_waves2.py:297:54
+	buffer_store_dwordx4 v[7:10], v2, s[52:55], 0 offen
+.Ltmp0:
+	.file	2 "/usr/local/lib/python3.11/site-packages/torch/_inductor/runtime" "triton_helpers.py"
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v2, v16, v15
+	s_mov_b64 s[14:15], s[70:71]
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_cndmask_b32_e64 v7, 0, 2.0, s[0:1]
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v8, s[2:3], v7, v7, v3
+	s_nop 0
+	v_rcp_f32_e32 v9, v8
+	v_fma_f32 v10, -v8, v9, 1.0
+	v_fmac_f32_e32 v9, v10, v9
+	v_div_scale_f32 v10, vcc, v3, v7, v3
+	v_mul_f32_e32 v11, v10, v9
+	v_fma_f32 v12, -v8, v11, v10
+	v_fmac_f32_e32 v11, v12, v9
+	v_fma_f32 v8, -v8, v11, v10
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_mov_b32_e32 v10, 0x40400000
+	v_cndmask_b32_e64 v10, 0, v10, s[0:1]
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fmas_f32 v8, v8, v9, v11
+	v_div_scale_f32 v11, s[2:3], v10, v10, v3
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v7
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v8, v8, v7, v3
+	v_rcp_f32_e32 v12, v11
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v8, 0, v8, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v9, v8, v2
+	.loc	2 221 17 is_stmt 0              ; triton_helpers.py:221:17
+	v_add_f32_e32 v9, v15, v9
+	.loc	2 219 60 is_stmt 1              ; triton_helpers.py:219:60
+	v_fma_f32 v13, -v11, v12, 1.0
+	v_fmac_f32_e32 v12, v13, v12
+	v_div_scale_f32 v13, vcc, v3, v10, v3
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v2, v2, v2
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v2, v3, v2
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v2, v8, v2
+	.loc	2 217 21 is_stmt 1              ; triton_helpers.py:217:21
+	v_sub_f32_e32 v8, v17, v9
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, 0, v2
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_mul_f32_e32 v14, v13, v12
+	v_fma_f32 v15, -v11, v14, v13
+	v_fmac_f32_e32 v14, v15, v12
+	v_fma_f32 v11, -v11, v14, v13
+	v_div_fmas_f32 v11, v11, v12, v14
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v10
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v11, v11, v10, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v11, 0, v11, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v12, v11, v8
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v8, v8, v8
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v7, v7, v8
+	.loc	2 218 28 is_stmt 1              ; triton_helpers.py:218:28
+	v_cndmask_b32_e64 v8, 0, 4.0, s[0:1]
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v7, v11, v7
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v11, s[2:3], v8, v8, v3
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v9, v9, v12
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v7
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v7, v18, v9
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v12, v11
+	v_fma_f32 v13, -v11, v12, 1.0
+	v_fmac_f32_e32 v12, v13, v12
+	v_div_scale_f32 v13, vcc, v3, v8, v3
+	v_mul_f32_e32 v14, v13, v12
+	v_fma_f32 v15, -v11, v14, v13
+	v_fmac_f32_e32 v14, v15, v12
+	v_fma_f32 v11, -v11, v14, v13
+	v_div_fmas_f32 v11, v11, v12, v14
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v8
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v11, v11, v8, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v11, 0, v11, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v12, v11, v7
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v7, v7, v7
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v7, v10, v7
+	.loc	2 218 28 is_stmt 1              ; triton_helpers.py:218:28
+	v_mov_b32_e32 v10, 0x40a00000
+	v_cndmask_b32_e64 v10, 0, v10, s[0:1]
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v7, v11, v7
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v11, s[2:3], v10, v10, v3
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v9, v9, v12
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v7
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v7, v19, v9
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v12, v11
+	v_fma_f32 v13, -v11, v12, 1.0
+	v_fmac_f32_e32 v12, v13, v12
+	v_div_scale_f32 v13, vcc, v3, v10, v3
+	v_mul_f32_e32 v14, v13, v12
+	v_fma_f32 v15, -v11, v14, v13
+	v_fmac_f32_e32 v14, v15, v12
+	v_fma_f32 v11, -v11, v14, v13
+	v_div_fmas_f32 v11, v11, v12, v14
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v10
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v11, v11, v10, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v11, 0, v11, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v12, v11, v7
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v7, v7, v7
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v7, v8, v7
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v7, v11, v7
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v7
+	.loc	2 218 28 is_stmt 1              ; triton_helpers.py:218:28
+	v_mov_b32_e32 v7, 0x40c00000
+	v_cndmask_b32_e64 v7, 0, v7, s[0:1]
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v8, s[2:3], v7, v7, v3
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v9, v9, v12
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v6, v6, v9
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v11, v8
+	v_fma_f32 v12, -v8, v11, 1.0
+	v_fmac_f32_e32 v11, v12, v11
+	v_div_scale_f32 v12, vcc, v3, v7, v3
+	v_mul_f32_e32 v13, v12, v11
+	v_fma_f32 v14, -v8, v13, v12
+	v_fmac_f32_e32 v13, v14, v11
+	v_fma_f32 v8, -v8, v13, v12
+	v_div_fmas_f32 v8, v8, v11, v13
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v7
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v8, v8, v7, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v8, 0, v8, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v11, v8, v6
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v6, v6, v6
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v6, v10, v6
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v6, v8, v6
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v6
+	.loc	2 218 28 is_stmt 1              ; triton_helpers.py:218:28
+	v_mov_b32_e32 v6, 0x40e00000
+	v_cndmask_b32_e64 v6, 0, v6, s[0:1]
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v8, s[2:3], v6, v6, v3
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v9, v9, v11
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v5, v5, v9
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v10, v8
+	v_fma_f32 v11, -v8, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_div_scale_f32 v11, vcc, v3, v6, v3
+	v_mul_f32_e32 v12, v11, v10
+	v_fma_f32 v13, -v8, v12, v11
+	v_fmac_f32_e32 v12, v13, v10
+	v_fma_f32 v8, -v8, v12, v11
+	v_div_fmas_f32 v8, v8, v10, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v6
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v8, v8, v6, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v8, 0, v8, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v10, v8, v5
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v5, v5, v5
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v5, v7, v5
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v5, v8, v5
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v5
+	.loc	2 218 28 is_stmt 1              ; triton_helpers.py:218:28
+	v_mov_b32_e32 v5, 0x41000000
+	v_cndmask_b32_e64 v5, 0, v5, s[0:1]
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v7, s[0:1], v5, v5, v3
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v9, v9, v10
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v4, v4, v9
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v8, v7
+	v_fma_f32 v10, -v7, v8, 1.0
+	v_fmac_f32_e32 v8, v10, v8
+	v_div_scale_f32 v10, vcc, v3, v5, v3
+	v_mul_f32_e32 v11, v10, v8
+	v_fma_f32 v12, -v7, v11, v10
+	v_fmac_f32_e32 v11, v12, v8
+	v_fma_f32 v7, -v7, v11, v10
+	v_div_fmas_f32 v7, v7, v8, v11
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v5
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v3, v7, v5, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v3, 0, v3, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v7, v3, v4
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v4, v4, v4
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v4, v6, v4
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v3, v3, v4
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v3
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	v_lshlrev_b32_e32 v3, 2, v0
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v7, v9, v7
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_xor_b32_e32 v3, 0x80, v3
+	ds_bpermute_b32 v4, v3, v7
+	ds_bpermute_b32 v6, v3, v2
+	ds_bpermute_b32 v3, v3, v5
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	s_waitcnt lgkmcnt(2)
+	v_sub_f32_e32 v4, v4, v7
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	s_waitcnt lgkmcnt(1)
+	v_add_f32_e32 v2, v2, v6
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	s_waitcnt lgkmcnt(0)
+	v_add_f32_e32 v8, v5, v3
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v9, s[0:1], v8, v8, v3
+	s_nop 0
+	v_rcp_f32_e32 v10, v9
+	v_fma_f32 v11, -v9, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_div_scale_f32 v11, vcc, v3, v8, v3
+	v_mul_f32_e32 v12, v11, v10
+	v_fma_f32 v13, -v9, v12, v11
+	v_fmac_f32_e32 v12, v13, v10
+	v_fma_f32 v9, -v9, v12, v11
+	v_div_fmas_f32 v9, v9, v10, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v8
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v3, v9, v8, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v3, 0, v3, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v9, v3, v4
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v4, v4, v4
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v4, v5, v4
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	ds_swizzle_b32 v5, v8 offset:swizzle(SWAP,16)
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v7, v7, v9
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v3, v3, v4
+	.loc	2 222 22 is_stmt 0              ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v3
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	ds_swizzle_b32 v3, v7 offset:swizzle(SWAP,16)
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	s_waitcnt lgkmcnt(1)
+	v_add_f32_e32 v6, v8, v5
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v9, s[0:1], v6, v6, v5
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	ds_swizzle_b32 v4, v2 offset:swizzle(SWAP,16)
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	s_waitcnt lgkmcnt(1)
+	v_sub_f32_e32 v3, v3, v7
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	s_waitcnt lgkmcnt(0)
+	v_add_f32_e32 v2, v2, v4
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v10, v9
+	v_fma_f32 v11, -v9, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_div_scale_f32 v11, vcc, v5, v6, v5
+	v_mul_f32_e32 v12, v11, v10
+	v_fma_f32 v13, -v9, v12, v11
+	v_fmac_f32_e32 v12, v13, v10
+	v_fma_f32 v9, -v9, v12, v11
+	v_div_fmas_f32 v9, v9, v10, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v6
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v5, v9, v6, v5
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v5, 0, v5, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v9, v5, v3
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v3, v3, v3
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v3, v8, v3
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v3, v5, v3
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	v_mov_b32_e32 v5, v6
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v7, v7, v9
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v3
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v5, v5 row_shr:8 row_mask:0xf bank_mask:0xc
+	v_mov_b32_e32 v3, v7
+	v_mov_b32_e32 v4, v2
+	v_mov_b32_dpp v5, v6 row_shl:8 row_mask:0xf bank_mask:0x3
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_add_f32_e32 v8, v6, v5
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v9, s[0:1], v8, v8, v5
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v3, v3 row_shr:8 row_mask:0xf bank_mask:0xc
+	v_mov_b32_dpp v4, v4 row_shr:8 row_mask:0xf bank_mask:0xc
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v10, v9
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v3, v7 row_shl:8 row_mask:0xf bank_mask:0x3
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v3, v3, v7
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v4, v2 row_shl:8 row_mask:0xf bank_mask:0x3
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_fma_f32 v11, -v9, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_div_scale_f32 v11, vcc, v5, v8, v5
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	v_add_f32_e32 v2, v2, v4
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_mul_f32_e32 v12, v11, v10
+	v_fma_f32 v13, -v9, v12, v11
+	v_fmac_f32_e32 v12, v13, v10
+	v_fma_f32 v9, -v9, v12, v11
+	v_div_fmas_f32 v9, v9, v10, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v8
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v5, v9, v8, v5
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v5, 0, v5, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v9, v5, v3
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v3, v3, v3
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v3, v6, v3
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v3, v5, v3
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	v_mov_b32_e32 v5, v8
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v7, v7, v9
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v2, v3
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v5, v5 row_shr:4 row_mask:0xf bank_mask:0xa
+	v_mov_b32_e32 v3, v7
+	v_mov_b32_e32 v4, v2
+	v_mov_b32_dpp v5, v8 row_shl:4 row_mask:0xf bank_mask:0x5
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_add_f32_e32 v6, v8, v5
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v9, s[0:1], v6, v6, v5
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v3, v3 row_shr:4 row_mask:0xf bank_mask:0xa
+	v_mov_b32_dpp v4, v4 row_shr:4 row_mask:0xf bank_mask:0xa
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v10, v9
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v3, v7 row_shl:4 row_mask:0xf bank_mask:0x5
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v3, v3, v7
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v4, v2 row_shl:4 row_mask:0xf bank_mask:0x5
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_fma_f32 v11, -v9, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_div_scale_f32 v11, vcc, v5, v6, v5
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	v_add_f32_e32 v2, v2, v4
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_mul_f32_e32 v12, v11, v10
+	v_fma_f32 v13, -v9, v12, v11
+	v_fmac_f32_e32 v12, v13, v10
+	v_fma_f32 v9, -v9, v12, v11
+	v_div_fmas_f32 v9, v9, v10, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v6
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v5, v9, v6, v5
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v5, 0, v5, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v9, v5, v3
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v3, v3, v3
+	.loc	2 222 38 is_stmt 0              ; triton_helpers.py:222:38
+	v_mul_f32_e32 v3, v8, v3
+	.loc	2 221 17 is_stmt 1              ; triton_helpers.py:221:17
+	v_add_f32_e32 v7, v7, v9
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v3, v5, v3
+	.loc	2 222 22 is_stmt 0              ; triton_helpers.py:222:22
+	v_add_f32_e32 v4, v2, v3
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	v_mov_b32_e32 v2, v7
+	v_mov_b32_e32 v3, v6
+	v_mov_b32_e32 v5, v4
+	v_mov_b32_dpp v2, v2 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf
+	v_mov_b32_dpp v3, v3 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v8, v2, v7
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_add_f32_e32 v2, v6, v3
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v9, s[0:1], v2, v2, v3
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v5, v5 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	v_add_f32_e32 v4, v4, v5
+	.loc	2 222 30 is_stmt 0              ; triton_helpers.py:222:30
+	v_mul_f32_e32 v5, v8, v8
+	.loc	2 222 38                        ; triton_helpers.py:222:38
+	v_mul_f32_e32 v5, v6, v5
+	.loc	2 219 60 is_stmt 1              ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v10, v9
+	v_fma_f32 v11, -v9, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_div_scale_f32 v11, vcc, v3, v2, v3
+	v_mul_f32_e32 v12, v11, v10
+	v_fma_f32 v13, -v9, v12, v11
+	v_fmac_f32_e32 v12, v13, v10
+	v_fma_f32 v9, -v9, v12, v11
+	v_div_fmas_f32 v9, v9, v10, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v2
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v3, v9, v2, v3
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v9, 0, v3, vcc
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v3, v9, v8
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v5, v9, v5
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v3, v7, v3
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v4, v4, v5
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_e32 v7, v3
+	v_mov_b32_e32 v6, v4
+	v_mov_b32_e32 v5, v2
+	v_mov_b32_dpp v7, v7 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf
+	v_mov_b32_dpp v6, v6 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf
+	v_mov_b32_dpp v5, v5 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf
+	v_cmp_eq_u32_e32 vcc, 0, v1
+	s_and_saveexec_b64 s[0:1], vcc
+	s_cbranch_execz .LBB0_2
+; %bb.1:                                ; %.critedge10
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_add_f32_e32 v1, v2, v5
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v8, s[2:3], v1, v1, v5
+	v_div_scale_f32 v9, vcc, v5, v1, v5
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v7, v7, v3
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	v_add_f32_e32 v4, v4, v6
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v10, v8
+	v_fma_f32 v11, -v8, v10, 1.0
+	v_fmac_f32_e32 v10, v11, v10
+	v_mul_f32_e32 v11, v9, v10
+	v_fma_f32 v12, -v8, v11, v9
+	v_fmac_f32_e32 v11, v12, v10
+	v_fma_f32 v8, -v8, v11, v9
+	v_div_fmas_f32 v8, v8, v10, v11
+	v_lshrrev_b32_e32 v9, 4, v0
+	v_add_u32_e32 v6, 0, v9
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v9, v7, v7
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v1
+	.loc	2 222 38                        ; triton_helpers.py:222:38
+	v_mul_f32_e32 v2, v2, v9
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v5, v8, v1, v5
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v5, 0, v5, vcc
+	v_mul_f32_e32 v7, v5, v7
+	.loc	2 222 49 is_stmt 1              ; triton_helpers.py:222:49
+	v_mul_f32_e32 v2, v5, v2
+	v_add_f32_e32 v3, v3, v7
+	.loc	2 222 22 is_stmt 0              ; triton_helpers.py:222:22
+	v_add_f32_e32 v2, v4, v2
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	ds_write2_b32 v6, v3, v2 offset1:4
+	ds_write_b32 v6, v1 offset:32
+.LBB0_2:                                ; %.critedge11
+	.loc	2 0 46 is_stmt 0                ; triton_helpers.py:0:46
+	s_or_b64 exec, exec, s[0:1]
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_cmp_gt_i32_e64 s[0:1], 4, v0
+	v_lshl_add_u32 v1, v0, 2, 0
+	v_mov_b32_e32 v4, 0
+	v_mov_b32_e32 v2, 0
+	s_waitcnt vmcnt(0) lgkmcnt(0)
+	s_barrier
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execnz .LBB0_11
+; %bb.3:
+	.loc	2 0 46                          ; triton_helpers.py:0:46
+	s_or_b64 exec, exec, s[2:3]
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execnz .LBB0_12
+.LBB0_4:
+	.loc	2 0 46                          ; triton_helpers.py:0:46
+	s_or_b64 exec, exec, s[2:3]
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_e32 v5, 0
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execz .LBB0_6
+.LBB0_5:
+	ds_read_b32 v5, v1 offset:32
+.LBB0_6:
+	.loc	2 0 46                          ; triton_helpers.py:0:46
+	s_or_b64 exec, exec, s[2:3]
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	s_waitcnt lgkmcnt(0)
+	v_mov_b32_e32 v6, v5
+	s_nop 1
+	v_mov_b32_dpp v6, v6 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf
+	.loc	2 218 28 is_stmt 1              ; triton_helpers.py:218:28
+	v_add_f32_e32 v3, v5, v6
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v7, s[2:3], v3, v3, v6
+	v_div_scale_f32 v8, vcc, v6, v3, v6
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e64 s[2:3], 0, v3
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v9, v7
+	v_fma_f32 v10, -v7, v9, 1.0
+	v_fmac_f32_e32 v9, v10, v9
+	v_mul_f32_e32 v10, v8, v9
+	v_fma_f32 v11, -v7, v10, v8
+	v_fmac_f32_e32 v10, v11, v9
+	v_fma_f32 v7, -v7, v10, v8
+	v_div_fmas_f32 v7, v7, v9, v10
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	v_mov_b32_e32 v8, v2
+	v_and_b32_e32 v10, 3, v0
+	v_mov_b32_e32 v9, v4
+	v_mov_b32_dpp v8, v8 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v8, v8, v2
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_cmp_eq_u32_e32 vcc, 0, v10
+	.loc	2 222 30                        ; triton_helpers.py:222:30
+	v_mul_f32_e32 v10, v8, v8
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_dpp v9, v9 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf
+	.loc	2 222 38                        ; triton_helpers.py:222:38
+	v_mul_f32_e32 v5, v5, v10
+	.loc	2 222 15 is_stmt 0              ; triton_helpers.py:222:15
+	v_add_f32_e32 v9, v4, v9
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	v_mov_b32_e32 v4, v3
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v6, v7, v3, v6
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cndmask_b32_e64 v6, 0, v6, s[2:3]
+	.loc	2 221 25 is_stmt 1              ; triton_helpers.py:221:25
+	v_mul_f32_e32 v7, v8, v6
+	.loc	2 222 49                        ; triton_helpers.py:222:49
+	v_mul_f32_e32 v5, v5, v6
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v2, v2, v7
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v5, v9, v5
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_e32 v6, v2
+	v_mov_b32_e32 v7, v5
+	v_mov_b32_dpp v4, v4 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf
+	v_mov_b32_dpp v6, v6 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf
+	v_mov_b32_dpp v7, v7 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf
+	s_and_b64 s[2:3], s[0:1], vcc
+	s_and_saveexec_b64 s[0:1], s[2:3]
+	s_cbranch_execz .LBB0_8
+; %bb.7:                                ; %.critedge
+	.loc	2 218 28                        ; triton_helpers.py:218:28
+	v_add_f32_e32 v8, v3, v4
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_scale_f32 v9, s[2:3], v8, v8, v4
+	v_div_scale_f32 v10, vcc, v4, v8, v4
+	.loc	2 217 21                        ; triton_helpers.py:217:21
+	v_sub_f32_e32 v6, v6, v2
+	.loc	2 222 15                        ; triton_helpers.py:222:15
+	v_add_f32_e32 v5, v5, v7
+	.loc	2 222 30 is_stmt 0              ; triton_helpers.py:222:30
+	v_mul_f32_e32 v7, v6, v6
+	.loc	2 222 38                        ; triton_helpers.py:222:38
+	v_mul_f32_e32 v3, v3, v7
+	.loc	2 219 60 is_stmt 1              ; triton_helpers.py:219:60
+	v_rcp_f32_e32 v11, v9
+	v_fma_f32 v12, -v9, v11, 1.0
+	v_fmac_f32_e32 v11, v12, v11
+	v_mul_f32_e32 v12, v10, v11
+	v_fma_f32 v13, -v9, v12, v10
+	v_fmac_f32_e32 v12, v13, v11
+	v_fma_f32 v9, -v9, v12, v10
+	v_div_fmas_f32 v9, v9, v11, v12
+	.loc	2 219 49 is_stmt 0              ; triton_helpers.py:219:49
+	v_cmp_neq_f32_e32 vcc, 0, v8
+	.loc	2 219 60                        ; triton_helpers.py:219:60
+	v_div_fixup_f32 v4, v9, v8, v4
+	.loc	2 219 49                        ; triton_helpers.py:219:49
+	v_cndmask_b32_e32 v4, 0, v4, vcc
+	.loc	2 222 49 is_stmt 1              ; triton_helpers.py:222:49
+	v_mul_f32_e32 v3, v4, v3
+	.loc	2 221 25                        ; triton_helpers.py:221:25
+	v_mul_f32_e32 v4, v6, v4
+	.loc	2 222 22                        ; triton_helpers.py:222:22
+	v_add_f32_e32 v3, v5, v3
+	.loc	2 221 17                        ; triton_helpers.py:221:17
+	v_add_f32_e32 v2, v2, v4
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	ds_write2_b32 v1, v2, v3 offset1:4
+	ds_write_b32 v1, v8 offset:32
+.LBB0_8:                                ; %.critedge1
+	.loc	2 0 46 is_stmt 0                ; triton_helpers.py:0:46
+	s_or_b64 exec, exec, s[0:1]
+	.loc	2 229 46                        ; triton_helpers.py:229:46
+	v_mov_b32_e32 v3, 0
+	s_waitcnt lgkmcnt(0)
+	s_barrier
+	ds_read2_b32 v[1:2], v3 offset1:4
+.Ltmp1:
+	.loc	1 302 38 is_stmt 1              ; crpz_orig_waves2.py:302:38
+	v_cmp_eq_u32_e32 vcc, 0, v0
+	.loc	1 302 25 is_stmt 0              ; crpz_orig_waves2.py:302:25
+	s_ashr_i32 s7, s6, 31
+	.loc	1 302 38                        ; crpz_orig_waves2.py:302:38
+	s_and_b64 s[0:1], vcc, s[56:57]
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execnz .LBB0_13
+; %bb.9:                                ; %else
+	.loc	1 0 38                          ; crpz_orig_waves2.py:0:38
+	s_or_b64 exec, exec, s[2:3]
+	.loc	1 303 38 is_stmt 1              ; crpz_orig_waves2.py:303:38
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execnz .LBB0_14
+.LBB0_10:                               ; %else2
+	.loc	1 303 4 is_stmt 0               ; crpz_orig_waves2.py:303:4
+	s_endpgm
+.LBB0_11:
+.Ltmp2:
+	.loc	2 229 46 is_stmt 1              ; triton_helpers.py:229:46
+	ds_read_b32 v2, v1
+	s_or_b64 exec, exec, s[2:3]
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execz .LBB0_4
+.LBB0_12:
+	ds_read_b32 v4, v1 offset:16
+	s_or_b64 exec, exec, s[2:3]
+	v_mov_b32_e32 v5, 0
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execnz .LBB0_5
+	s_branch .LBB0_6
+.Ltmp3:
+.LBB0_13:                               ; %cond.store
+	.loc	1 302 25                        ; crpz_orig_waves2.py:302:25
+	s_lshl_b64 s[8:9], s[6:7], 2
+	s_add_u32 s8, s14, s8
+	s_addc_u32 s9, s15, s9
+	.loc	1 302 38 is_stmt 0              ; crpz_orig_waves2.py:302:38
+	s_waitcnt lgkmcnt(0)
+	global_store_dword v3, v1, s[8:9]
+	s_or_b64 exec, exec, s[2:3]
+	.loc	1 303 38 is_stmt 1              ; crpz_orig_waves2.py:303:38
+	s_and_saveexec_b64 s[2:3], s[0:1]
+	s_cbranch_execz .LBB0_10
+.LBB0_14:                               ; %cond.store1
+	.loc	1 34 28                         ; crpz_orig_waves2.py:34:28
+	s_load_dwordx2 s[0:1], s[4:5], 0x140
+	.loc	1 303 25                        ; crpz_orig_waves2.py:303:25
+	s_lshl_b64 s[2:3], s[6:7], 2
+	v_mov_b32_e32 v0, 0
+	s_waitcnt lgkmcnt(0)
+	s_add_u32 s0, s0, s2
+	s_addc_u32 s1, s1, s3
+	.loc	1 303 38 is_stmt 0              ; crpz_orig_waves2.py:303:38
+	global_store_dword v0, v2, s[0:1]
+	.loc	1 303 4                         ; crpz_orig_waves2.py:303:4
+	s_endpgm
+.Ltmp4:
+	.section	.rodata,"a",@progbits
+	.p2align	6, 0x0
+	.amdhsa_kernel triton_red_fused__to_copy_cat_native_layer_norm_67
+		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_private_segment_fixed_size 0
+		.amdhsa_kernarg_size 336
+		.amdhsa_user_sgpr_count 6
+		.amdhsa_user_sgpr_private_segment_buffer 1
+		.amdhsa_user_sgpr_dispatch_ptr 0
+		.amdhsa_user_sgpr_queue_ptr 0
+		.amdhsa_user_sgpr_kernarg_segment_ptr 1
+		.amdhsa_user_sgpr_dispatch_id 0
+		.amdhsa_user_sgpr_flat_scratch_init 0
+		.amdhsa_user_sgpr_private_segment_size 0
+		.amdhsa_uses_dynamic_stack 0
+		.amdhsa_system_sgpr_private_segment_wavefront_offset 0
+		.amdhsa_system_sgpr_workgroup_id_x 1
+		.amdhsa_system_sgpr_workgroup_id_y 0
+		.amdhsa_system_sgpr_workgroup_id_z 0
+		.amdhsa_system_sgpr_workgroup_info 0
+		.amdhsa_system_vgpr_workitem_id 0
+		.amdhsa_next_free_vgpr 179
+		.amdhsa_next_free_sgpr 96
+		.amdhsa_reserve_flat_scratch 0
+		.amdhsa_reserve_xnack_mask 0
+		.amdhsa_float_round_mode_32 0
+		.amdhsa_float_round_mode_16_64 0
+		.amdhsa_float_denorm_mode_32 3
+		.amdhsa_float_denorm_mode_16_64 3
+		.amdhsa_dx10_clamp 1
+		.amdhsa_ieee_mode 1
+		.amdhsa_fp16_overflow 0
+		.amdhsa_load_store_out_of_order 0
+		.amdhsa_matrix_excp 0
+		.amdhsa_cancellation_excp 0
+		.amdhsa_exception_fp_ieee_invalid_op 0
+		.amdhsa_exception_fp_denorm_src 0
+		.amdhsa_exception_fp_ieee_div_zero 0
+		.amdhsa_exception_fp_ieee_overflow 0
+		.amdhsa_exception_fp_ieee_underflow 0
+		.amdhsa_exception_fp_ieee_inexact 0
+		.amdhsa_exception_int_div_zero 0
+	.end_amdhsa_kernel
+	.text
+.Lfunc_end0:
+	.size	triton_red_fused__to_copy_cat_native_layer_norm_67, .Lfunc_end0-triton_red_fused__to_copy_cat_native_layer_norm_67
+	.cfi_endproc
+                                        ; -- End function
+	.section	.AMDGPU.csdata,"",@progbits
+; Kernel info:
+; codeLenInByte = 7960
+; NumSgprs: 98
+; NumVgprs: 179
+; ScratchSize: 0
+; MemoryBound: 0
+; FloatMode: 240
+; IeeeMode: 1
+; LDSByteSize: 0 bytes/workgroup (compile time only)
+; SGPRBlocks: 12
+; VGPRBlocks: 44
+; NumSGPRsForWavesPerEU: 98
+; NumVGPRsForWavesPerEU: 179
+; Occupancy: 4
+; WaveLimiterHint : 1
+; COMPUTE_PGM_RSRC2:SCRATCH_EN: 0
+; COMPUTE_PGM_RSRC2:USER_SGPR: 6
+; COMPUTE_PGM_RSRC2:TRAP_HANDLER: 0
+; COMPUTE_PGM_RSRC2:TGID_X_EN: 1
+; COMPUTE_PGM_RSRC2:TGID_Y_EN: 0
+; COMPUTE_PGM_RSRC2:TGID_Z_EN: 0
+; COMPUTE_PGM_RSRC2:TIDIG_COMP_CNT: 0
+	.section	.debug_abbrev,"",@progbits
+	.byte	1                               ; Abbreviation Code
+	.byte	17                              ; DW_TAG_compile_unit
+	.byte	1                               ; DW_CHILDREN_yes
+	.byte	37                              ; DW_AT_producer
+	.byte	14                              ; DW_FORM_strp
+	.byte	19                              ; DW_AT_language
+	.byte	5                               ; DW_FORM_data2
+	.byte	3                               ; DW_AT_name
+	.byte	14                              ; DW_FORM_strp
+	.byte	16                              ; DW_AT_stmt_list
+	.byte	23                              ; DW_FORM_sec_offset
+	.byte	27                              ; DW_AT_comp_dir
+	.byte	14                              ; DW_FORM_strp
+	.byte	17                              ; DW_AT_low_pc
+	.byte	1                               ; DW_FORM_addr
+	.byte	18                              ; DW_AT_high_pc
+	.byte	6                               ; DW_FORM_data4
+	.byte	0                               ; EOM(1)
+	.byte	0                               ; EOM(2)
+	.byte	2                               ; Abbreviation Code
+	.byte	46                              ; DW_TAG_subprogram
+	.byte	0                               ; DW_CHILDREN_no
+	.byte	3                               ; DW_AT_name
+	.byte	14                              ; DW_FORM_strp
+	.byte	32                              ; DW_AT_inline
+	.byte	11                              ; DW_FORM_data1
+	.byte	0                               ; EOM(1)
+	.byte	0                               ; EOM(2)
+	.byte	3                               ; Abbreviation Code
+	.byte	46                              ; DW_TAG_subprogram
+	.byte	1                               ; DW_CHILDREN_yes
+	.byte	17                              ; DW_AT_low_pc
+	.byte	1                               ; DW_FORM_addr
+	.byte	18                              ; DW_AT_high_pc
+	.byte	6                               ; DW_FORM_data4
+	.byte	49                              ; DW_AT_abstract_origin
+	.byte	19                              ; DW_FORM_ref4
+	.byte	0                               ; EOM(1)
+	.byte	0                               ; EOM(2)
+	.byte	4                               ; Abbreviation Code
+	.byte	29                              ; DW_TAG_inlined_subroutine
+	.byte	0                               ; DW_CHILDREN_no
+	.byte	49                              ; DW_AT_abstract_origin
+	.byte	19                              ; DW_FORM_ref4
+	.byte	85                              ; DW_AT_ranges
+	.byte	23                              ; DW_FORM_sec_offset
+	.byte	88                              ; DW_AT_call_file
+	.byte	11                              ; DW_FORM_data1
+	.byte	89                              ; DW_AT_call_line
+	.byte	5                               ; DW_FORM_data2
+	.byte	87                              ; DW_AT_call_column
+	.byte	11                              ; DW_FORM_data1
+	.byte	0                               ; EOM(1)
+	.byte	0                               ; EOM(2)
+	.byte	0                               ; EOM(3)
+	.section	.debug_info,"",@progbits
+.Lcu_begin0:
+	.long	.Ldebug_info_end0-.Ldebug_info_start0 ; Length of Unit
+.Ldebug_info_start0:
+	.short	4                               ; DWARF version number
+	.long	.debug_abbrev                   ; Offset Into Abbrev. Section
+	.byte	8                               ; Address Size (in bytes)
+	.byte	1                               ; Abbrev [1] 0xb:0x45 DW_TAG_compile_unit
+	.long	.Linfo_string0                  ; DW_AT_producer
+	.short	2                               ; DW_AT_language
+	.long	.Linfo_string1                  ; DW_AT_name
+	.long	.Lline_table_start0             ; DW_AT_stmt_list
+	.long	.Linfo_string2                  ; DW_AT_comp_dir
+	.quad	.Lfunc_begin0                   ; DW_AT_low_pc
+	.long	.Lfunc_end0-.Lfunc_begin0       ; DW_AT_high_pc
+	.byte	2                               ; Abbrev [2] 0x2a:0x6 DW_TAG_subprogram
+	.long	.Linfo_string3                  ; DW_AT_name
+	.byte	1                               ; DW_AT_inline
+	.byte	3                               ; Abbrev [3] 0x30:0x1f DW_TAG_subprogram
+	.quad	.Lfunc_begin0                   ; DW_AT_low_pc
+	.long	.Lfunc_end0-.Lfunc_begin0       ; DW_AT_high_pc
+	.long	42                              ; DW_AT_abstract_origin
+	.byte	4                               ; Abbrev [4] 0x41:0xd DW_TAG_inlined_subroutine
+	.long	42                              ; DW_AT_abstract_origin
+	.long	.Ldebug_ranges0                 ; DW_AT_ranges
+	.byte	1                               ; DW_AT_call_file
+	.short	298                             ; DW_AT_call_line
+	.byte	91                              ; DW_AT_call_column
+	.byte	0                               ; End Of Children Mark
+	.byte	0                               ; End Of Children Mark
+.Ldebug_info_end0:
+	.section	.debug_ranges,"",@progbits
+.Ldebug_ranges0:
+	.quad	.Ltmp0-.Lfunc_begin0
+	.quad	.Ltmp1-.Lfunc_begin0
+	.quad	.Ltmp2-.Lfunc_begin0
+	.quad	.Ltmp3-.Lfunc_begin0
+	.quad	0
+	.quad	0
+	.section	.debug_str,"MS",@progbits,1
+.Linfo_string0:
+	.asciz	"triton"                        ; string offset=0
+.Linfo_string1:
+	.asciz	"crpz_orig_waves2.py"           ; string offset=7
+.Linfo_string2:
+	.asciz	"/home/xukang/CACHE_DENSE/rp"   ; string offset=27
+.Linfo_string3:
+	.asciz	"triton_red_fused__to_copy_cat_native_layer_norm_67" ; string offset=55
+	.ident	"clang version 17.0.0 (http://10.4.0.1/dcutoolkit/driverruntime/llvm-project.git ff5bf917a679c83afe927af051a20b86fef7b07d)"
+	.section	".note.GNU-stack","",@progbits
+	.addrsig
+	.amdgpu_metadata
+---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         16
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         24
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         32
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         40
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         48
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         56
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         64
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         72
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         80
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         88
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         96
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         104
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         112
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         120
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         128
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         136
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         144
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         152
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         160
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         168
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         176
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         184
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         192
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         200
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         208
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         216
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         224
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         232
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         240
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         248
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         256
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         264
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         272
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         280
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         288
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         296
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         304
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         312
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         320
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         328
+        .size:           4
+        .value_kind:     by_value
+      - .offset:         332
+        .size:           4
+        .value_kind:     by_value
+    .group_segment_fixed_size: 0
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 336
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 256
+    .name:           triton_red_fused__to_copy_cat_native_layer_norm_67
+    .private_segment_fixed_size: 0
+    .sgpr_count:     98
+    .sgpr_spill_count: 0
+    .symbol:         triton_red_fused__to_copy_cat_native_layer_norm_67.kd
+    .unfolded_args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         16
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         24
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         32
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         40
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         48
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         56
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         64
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         72
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         80
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         88
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         96
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         104
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         112
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         120
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         128
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         136
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         144
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         152
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         160
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         168
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         176
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         184
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         192
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         200
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         208
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         216
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         224
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         232
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         240
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         248
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         256
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         264
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         272
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         280
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         288
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         296
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         304
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         312
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         320
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         328
+        .size:           4
+        .value_kind:     by_value
+      - .offset:         332
+        .size:           4
+        .value_kind:     by_value
+    .uses_dynamic_stack: false
+    .vgpr_count:     179
+    .vgpr_spill_count: 0
+    .wavefront_size: 64
+amdhsa.target:   'amdgcn-amd-amdhsa--gfx936:xnack-'
+amdhsa.version:
+  - 1
+  - 2
+...
+
+	.end_amdgpu_metadata
+	.section	.debug_line,"",@progbits
+.Lline_table_start0:

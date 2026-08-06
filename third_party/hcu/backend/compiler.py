@@ -98,6 +98,18 @@ class HIPOptions:
     #    - see get_options_args() to get more options.
     sched_latency: str = 'none'
 
+    # LLVM MachineScheduler / AMDGPU scheduling knobs passed to clang (llir->amdgcn).
+    # Defaults keep LLVM baseline (neither aggressive knob):
+    #   misched_regpressure=True  → no flag (LLVM keeps reg-pressure-aware scheduling)
+    #   misched_regpressure=False → -mllvm=-misched-regpressure=false
+    #   amdgpu_enable_max_ilp_scheduling_strategy=True → -mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true
+    misched_regpressure: bool = True
+    amdgpu_enable_max_ilp_scheduling_strategy: bool = False
+
+    # Memory load/store clustering dword budget (LLVM fn attr).
+    # None: omit attr (LLVM default 8). Allowed: 8, 16, 24, 32, 40, 48.
+    amdgpu_max_memory_cluster_dwords: int = None
+
     # Extend options for HCU, used for buffer ops with cache swizzle enable or disalbe.
     # mls ignore this and enable default due to better performance.
     buffer_cache_swizzle: bool = False
@@ -202,6 +214,15 @@ class HIPBackend(BaseBackend):
             raise ValueError(
                 f"enable_v_mmac_cluster must be 0, 1, or 2; got {cluster}")
         args["enable_v_mmac_cluster"] = cluster
+
+        mem_cluster = args.get("amdgpu_max_memory_cluster_dwords")
+        if mem_cluster is not None:
+            mem_cluster = int(mem_cluster)
+            if mem_cluster not in (8, 16, 24, 32, 40, 48):
+                raise ValueError(
+                    "amdgpu_max_memory_cluster_dwords must be one of "
+                    f"8, 16, 24, 32, 40, 48; got {mem_cluster}")
+            args["amdgpu_max_memory_cluster_dwords"] = mem_cluster
 
         # Consume the legacy `instruction_sched_variant` option and map it to
         # `schedule_hint`. If both are present, keep the explicit schedule_hint.
@@ -464,6 +485,12 @@ class HIPBackend(BaseBackend):
 
         if options.enable_fp_fusion:
             options_args.extend(["-mllvm=-fp-fuse=fast"])
+
+        if not options.misched_regpressure:
+            options_args.append("-mllvm=-misched-regpressure=false")
+
+        if options.amdgpu_enable_max_ilp_scheduling_strategy:
+            options_args.append("-mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true")
 
         clang_args = [
             "-target", amd.TARGET_TRIPLE,
@@ -784,6 +811,11 @@ class HIPBackend(BaseBackend):
         # FIXME: Keep legacy HCU behavior from Triton 3.1.x, need check triton-llvm waves_per_eu {0} or {0, 0} why not eliminate
         # fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}, {options.waves_per_eu}")
         fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}")
+        if options.amdgpu_max_memory_cluster_dwords is not None:
+            fns[0].add_fn_attr(
+                "amdgpu-max-memory-cluster-dwords",
+                str(options.amdgpu_max_memory_cluster_dwords),
+            )
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
         if knobs.compilation.enable_asan:

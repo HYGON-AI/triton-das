@@ -25,6 +25,8 @@ pytest_cases=(
   "${hcu_file_path}/test_buffer_atomic_dtypes.py"
   "${hcu_file_path}/regression_subprocess.py"
   "${hcu_file_path}/test_hcu_barrier_pc_mlir.py"
+  "${hcu_file_path}/test_misched_max_ilp_amdgcn.py"
+  "${hcu_file_path}/test_amdgpu_max_memory_cluster_amdgcn.py"
   # WASP/WDRA IR shape: lit test/TritonGPU/hcu/hcu-gemm-wasp-wdra.mlir
   # Runtime matrix: test_wasp_mls_regression.py (run separately / via launch.sh)
 )
