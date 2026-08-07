@@ -19,6 +19,8 @@ pytest_cases=(
   "${hcu_file_path}/test_cvt_scale_pk.py"
   "${hcu_file_path}/test_amd_buffer_ops_4gb.py"
   "${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"
+  "${hcu_file_path}/test_buffer_ops_branch_offset.py"
+  "${hcu_file_path}/test_buffer_ops_mode_suite.py"
   "${hcu_file_path}/gluon/gluon_kernel_gemm_a8w8.py"
   "${hcu_file_path}/gluon/gluon_kernel_pa_decode.py"
   "${hcu_file_path}/gluon/gluon_kernel_pa_mqa_logits.py"

@@ -338,6 +338,28 @@ bool verifyNonNegativeExpr(
                 verifyNonNegativeExpr(binOp->getOperand(1), assumptions);
             return nnLhs && nnRhs;
           })
+      // Joined offsets from TTGIR `tl.where` / Python `if` (scf.if). Both arms
+      // must be non-negative — same soundness as requiring all phi predecessors.
+      .Case<arith::SelectOp>([&](arith::SelectOp selectOp) {
+        return verifyNonNegativeExpr(selectOp.getTrueValue(), assumptions) &&
+               verifyNonNegativeExpr(selectOp.getFalseValue(), assumptions);
+      })
+      .Case<scf::IfOp>([&](scf::IfOp ifOp) {
+        // Walk the result index of `expr` through then/else yields.
+        unsigned resIdx = mlir::cast<OpResult>(expr).getResultNumber();
+        auto thenYield = ifOp.thenYield();
+        if (!thenYield || resIdx >= thenYield.getNumOperands())
+          return false;
+        if (!verifyNonNegativeExpr(thenYield.getOperand(resIdx), assumptions))
+          return false;
+        // If without else: only then region defines the result.
+        if (ifOp.getElseRegion().empty())
+          return true;
+        auto elseYield = ifOp.elseYield();
+        if (!elseYield || resIdx >= elseYield.getNumOperands())
+          return false;
+        return verifyNonNegativeExpr(elseYield.getOperand(resIdx), assumptions);
+      })
       .Default([&](Operation *op) {
         if (auto attr =
                 op->template getAttrOfType<mlir::BoolAttr>("non-negative")) {

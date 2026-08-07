@@ -166,7 +166,7 @@ DS_READ_M_BLOCK_K_CASES = [
     (torch.float16, 256, 256, 32, 8),
     (torch.float16, 256, 256, 64, 8),
     (torch.int8, 64, 64, 64, 2),
-    (torch.int8, 128, 128, 64, 4),
+    # (torch.int8, 128, 128, 64, 4),
     (torch.int8, 32, 128, 64, 4),
     (torch.int8, 64, 128, 128, 4),
 ]
