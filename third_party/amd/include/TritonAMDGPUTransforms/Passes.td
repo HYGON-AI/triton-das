@@ -160,6 +160,9 @@ def TritonAMDGPUConvertToBufferOps : Pass<"tritonamdgpu-convert-buffer-ops", "ml
     Option<"emitBufferOpsOffsetAssert", "emit-buffer-ops-offset-assert",
            "bool", /*default=*/"false",
            "Insert tt.assert before amdgpu buffer load/store to check offset * elem_size is in [0, 2^32-2] bytes.">,
+    Option<"useRangeAnalysis", "use-range-analysis",
+           "bool", /*default=*/"false",
+           "If true, prove offsets with RangeAnalysis (isByteOffsetWithin4GB). If false (default), use verifyNonNegativeExpr like Triton 3.2.">,
     Option<"bufferCacheSwizzle", "buffer-cache-swizzle",
            "bool", /*default=*/"false",
            "Enable buffer cache swizzle on kongming/zhongda/bmz/nmz/yueying (14-bit stride heuristics, max 8KB).">

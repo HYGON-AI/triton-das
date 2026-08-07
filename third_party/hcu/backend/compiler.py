@@ -659,6 +659,7 @@ class HIPBackend(BaseBackend):
                 knobs.amd.use_buffer_atomics,
                 knobs.amd.buffer_ops_analyze_small_tensor_range,
                 knobs.amd.emit_buffer_ops_offset_assert,
+                knobs.amd.buffer_ops_use_range_analysis,
                 options.buffer_cache_swizzle,
             )
 

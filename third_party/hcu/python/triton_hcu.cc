@@ -43,9 +43,9 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_mls_lowering_pass",
                      mlir::createTritonHCUMlsLowering);
   // HCU wrapper around AMD ConvertToBufferOps — passes extra HCU-specific options.
-  ADD_PASS_OPTION_WRAPPER_5("add_convert_to_buffer_ops",
+  ADD_PASS_OPTION_WRAPPER_6("add_convert_to_buffer_ops",
                             mlir::createTritonAMDGPUConvertToBufferOps,
-                            const std::string &, bool, bool, bool, bool);
+                            const std::string &, bool, bool, bool, bool, bool);
   m.def("add_warp_specialize_to_llvm", [](mlir::PassManager &pm, const std::string &arch,
       int waspNumLoadWarps, int waspNumMmaWarps, bool wdraEnabled, int wdraNumLoadRegs,
       int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {

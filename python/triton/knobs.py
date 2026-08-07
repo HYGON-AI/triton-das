@@ -506,6 +506,8 @@ class amd_knobs(base_knobs):
     use_buffer_atomics: env_bool = env_bool("AMDGCN_USE_BUFFER_ATOMICS", True)
     # Note: This requires use_buffer_ops be true to have any effect
     buffer_ops_analyze_small_tensor_range: env_bool = env_bool("AMDGCN_ANALYZE_SMALL_TENSOR_RANGE", False)
+    # Default: verifyNonNegativeExpr fallback (Triton 3.2-style). Opt into RA/4GB check.
+    buffer_ops_use_range_analysis: env_bool = env_bool("AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS", False)
     emit_buffer_ops_offset_assert: env_bool = env_bool("TRITON_AMDGPU_EMIT_BUFFER_OPS_OFFSET_ASSERT", False)
     buffer_cache_swizzle: env_bool = env_bool("TRITON_BUFFER_CACHE_SWIZZLE", False)
     # HCU ds_read_m for N-major B; default on. C++ also treats unset as enabled

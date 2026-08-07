@@ -233,6 +233,121 @@ bool isByteOffsetWithin4GB(triton::AddPtrOp addPtrOp,
   return byteOfst <= szLimit4GB;
 }
 
+bool verifyNonNegativeByAssumption(
+    Value expr,
+    const DenseMap<Value, SetVector<Operation *>> &assumptions) {
+  for (const auto &[assumeVal, ops] : assumptions) {
+    for (Operation *op : ops) {
+      if (auto cmpOp = dyn_cast<arith::CmpIOp>(op)) {
+        bool isGreaterThan =
+            (cmpOp.getPredicate() == arith::CmpIPredicate::sge ||
+             cmpOp.getPredicate() == arith::CmpIPredicate::sgt);
+        APInt cst;
+        if (isGreaterThan && (cmpOp.getLhs() == expr) &&
+            matchPattern(cmpOp.getRhs(), m_ConstantInt(&cst))) {
+          return cst.isNonNegative();
+        }
+      }
+    }
+    if (auto blockArg = dyn_cast<BlockArgument>(assumeVal)) {
+      if (blockArg.getOwner()->isEntryBlock() &&
+          isa<tt::PointerType>(blockArg.getType())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Lightweight non-negativity proof used as the default convert-to-buffer-ops
+// fallback (aligned with Triton 3.2 after Drop RangeAnalysis).
+bool verifyNonNegativeExpr(
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions) {
+  if (verifyNonNegativeByAssumption(expr, assumptions)) {
+    LDBG("Non negative by assumption");
+    return true;
+  }
+
+  if (auto blockArg = dyn_cast<BlockArgument>(expr)) {
+    Block *block = blockArg.getOwner();
+
+    if (auto forOp = dyn_cast<scf::ForOp>(block->getParentOp())) {
+      if (forOp.getInductionVar() == expr) {
+        LDBG("matched forOp loop args");
+        Value lowerBound = forOp.getLowerBound();
+        Value upperBound = forOp.getUpperBound();
+        Value step = forOp.getStep();
+
+        bool lowerBoundNonNeg = verifyNonNegativeExpr(lowerBound, assumptions);
+        bool upperBoundNonNeg = verifyNonNegativeExpr(upperBound, assumptions);
+        bool stepNonNeg = verifyNonNegativeExpr(step, assumptions);
+        LDBG("forOp lowerBoundNonNeg:" << lowerBoundNonNeg);
+        LDBG("forOp upperBoundNonNeg:" << upperBoundNonNeg);
+        LDBG("forOp stepNonNeg:" << stepNonNeg);
+        if (stepNonNeg) {
+          return lowerBoundNonNeg;
+        }
+        return lowerBoundNonNeg && upperBoundNonNeg;
+      }
+    }
+  }
+
+  Operation *op = expr.getDefiningOp();
+  if (!op)
+    return false;
+
+  return llvm::TypeSwitch<Operation *, bool>(expr.getDefiningOp())
+      .Case<triton::BroadcastOp>([&](auto broadcastOp) {
+        return verifyNonNegativeExpr(broadcastOp.getSrc(), assumptions);
+      })
+      .Case<triton::ExpandDimsOp>([&](auto expandOp) {
+        return verifyNonNegativeExpr(expandOp.getSrc(), assumptions);
+      })
+      .Case<triton::SplatOp>([&](auto splatOp) {
+        return verifyNonNegativeExpr(splatOp.getSrc(), assumptions);
+      })
+      .Case<triton::MakeRangeOp>([&](auto makeRangeOp) {
+        return makeRangeOp.getStart() >= 0 && makeRangeOp.getEnd() >= 0;
+      })
+      .Case<arith::ConstantIntOp>(
+          [&](auto constIntOp) { return constIntOp.value() >= 0; })
+      .Case<arith::ConstantOp>([&](arith::ConstantOp constOp) {
+        Value val = constOp.getResult();
+        DenseIntElementsAttr constVal;
+        if (matchPattern(val, m_Constant(&constVal)) && constVal.isSplat())
+          return constVal.getSplatValue<APInt>().isNonNegative();
+        return false;
+      })
+      .Case<triton::GetProgramIdOp>([&](auto pidOp) { return true; })
+      .Case<arith::MaxSIOp>([&](auto maxOp) {
+        bool nnLhs = verifyNonNegativeExpr(maxOp.getLhs(), assumptions);
+        bool nnRhs = verifyNonNegativeExpr(maxOp.getRhs(), assumptions);
+        return nnLhs || nnRhs;
+      })
+      .Case<arith::RemSIOp>([&](auto remsiOp) {
+        return verifyNonNegativeExpr(remsiOp.getLhs(), assumptions);
+      })
+      .Case<arith::TruncIOp, arith::ExtSIOp>([&](Operation *unaryOp) {
+        return verifyNonNegativeExpr(unaryOp->getOperand(0), assumptions);
+      })
+      .Case<arith::AddIOp, arith::MinSIOp, arith::MulIOp, arith::DivSIOp>(
+          [&](Operation *binOp) {
+            bool nnLhs =
+                verifyNonNegativeExpr(binOp->getOperand(0), assumptions);
+            bool nnRhs =
+                verifyNonNegativeExpr(binOp->getOperand(1), assumptions);
+            return nnLhs && nnRhs;
+          })
+      .Default([&](Operation *op) {
+        if (auto attr =
+                op->template getAttrOfType<mlir::BoolAttr>("non-negative")) {
+          if (attr.getValue())
+            return true;
+        }
+        return false;
+      });
+}
+
 bool isFuncArgWith32bitPtrRange(mlir::Value value) {
   // WASP/WDRA capture kernel pointer args into ttg.warp_specialize partitions.
   // Those partition block args do not carry tt.pointer_range; look through the
@@ -263,7 +378,7 @@ bool isFuncArgWith32bitPtrRange(mlir::Value value) {
 bool canUseBufferOps(Value ptr,
                      const DenseMap<Value, SetVector<Operation *>> &assumptions,
                      std::shared_ptr<DataFlowSolver> solver,
-                     bool analyzeSmallTensorOfst) {
+                     bool analyzeSmallTensorOfst, bool useRangeAnalysis) {
   // 1. Check if the pointer is uniform: i.e., if it comes from a uniform
   // pointer(splatted) and non-uniform offset addition
 
@@ -306,7 +421,12 @@ bool canUseBufferOps(Value ptr,
   if (isFuncArgPtrWithNonNegativeAssumption(maybeSplatOp.getSrc(), assumptions))
     return true;
 
-  return isByteOffsetWithin4GB(addPtrOp, std::move(solver));
+  if (useRangeAnalysis) {
+    if (!solver)
+      return false;
+    return isByteOffsetWithin4GB(addPtrOp, std::move(solver));
+  }
+  return verifyNonNegativeExpr(offset, assumptions);
 }
 
 /// Insert `tt.assert` before each `amdgpu.buffer_{load,store}` so that the
@@ -600,11 +720,12 @@ struct ConvertTritonAtomicCASOpToBufferAtomicCAS
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
       std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
-      bool emitBufferOpsOffsetAssert_)
+      bool useRangeAnalysis_, bool emitBufferOpsOffsetAssert_)
       : mlir::OpRewritePattern<triton::AtomicCASOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
         solver(std::move(solver)),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        useRangeAnalysis(useRangeAnalysis_),
         emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
 
   mlir::LogicalResult
@@ -615,7 +736,8 @@ struct ConvertTritonAtomicCASOpToBufferAtomicCAS
     auto sem = op.getSem();
     auto scope = op.getScope();
 
-    if (!canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst)) {
+    if (!canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst,
+                       useRangeAnalysis)) {
       return rewriter.notifyMatchFailure(op, "canUseBufferOps check failed");
     }
 
@@ -685,6 +807,7 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool useRangeAnalysis;
   bool emitBufferOpsOffsetAssert;
 };
 
@@ -697,14 +820,14 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
       std::shared_ptr<DataFlowSolver> solver, ISAFamily isaFamily,
-      bool analyzeSmallTensorOfst_, bool emitBufferOpsOffsetAssert_,
-      std::string arch_)
+      bool analyzeSmallTensorOfst_, bool useRangeAnalysis_,
+      bool emitBufferOpsOffsetAssert_, std::string arch_)
       : mlir::OpRewritePattern<triton::AtomicRMWOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
-        solver(std::move(solver)), isaFamily(isaFamily),
+        solver(std::move(solver)), isaFamily(isaFamily), arch(std::move(arch_)),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
-        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_),
-        arch(std::move(arch_)) {}
+        useRangeAnalysis(useRangeAnalysis_),
+        emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::AtomicRMWOp op,
@@ -717,7 +840,8 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
 
     // In addition to the `canUserBufferOps` check, we should ensure that
     // 1. Perform the canUserBufferOps check
-    if (!canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst)) {
+    if (!canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst,
+                       useRangeAnalysis)) {
       return rewriter.notifyMatchFailure(op, "canUseBufferOps check failed");
     }
 
@@ -849,6 +973,7 @@ private:
   ISAFamily isaFamily;
   std::string arch;
   bool analyzeSmallTensorOfst;
+  bool useRangeAnalysis;
   bool emitBufferOpsOffsetAssert;
 };
 
@@ -865,10 +990,12 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
-      bool emitBufferOpsOffsetAssert_, bool bufferCacheSwizzleEnabled_)
+      bool useRangeAnalysis_, bool emitBufferOpsOffsetAssert_,
+      bool bufferCacheSwizzleEnabled_)
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
         solver(std::move(solver)),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        useRangeAnalysis(useRangeAnalysis_),
         emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_),
         bufferCacheSwizzleEnabled(bufferCacheSwizzleEnabled_) {}
 
@@ -880,7 +1007,8 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
     // Triton 3.2 has no f32+tt.dot LLC dodge; allow converting f32 loads even
     // when the function contains tt.dot.
 
-    if (canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst)) {
+    if (canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst,
+                       useRangeAnalysis)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
       Value tensorPtr = addPtrOp.getPtr();
       Value tensorOffset = addPtrOp.getOffset();
@@ -940,6 +1068,7 @@ private:
   DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool useRangeAnalysis;
   bool emitBufferOpsOffsetAssert;
   bool bufferCacheSwizzleEnabled;
 };
@@ -952,10 +1081,12 @@ struct ConvertTritonStoreToBufferStore
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
-      bool emitBufferOpsOffsetAssert_, bool bufferCacheSwizzleEnabled_)
+      bool useRangeAnalysis_, bool emitBufferOpsOffsetAssert_,
+      bool bufferCacheSwizzleEnabled_)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
         assumptions(assumptions), solver(std::move(solver)),
         analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        useRangeAnalysis(useRangeAnalysis_),
         emitBufferOpsOffsetAssert(emitBufferOpsOffsetAssert_),
         bufferCacheSwizzleEnabled(bufferCacheSwizzleEnabled_) {}
 
@@ -965,7 +1096,8 @@ struct ConvertTritonStoreToBufferStore
     LDBG("Try to convert: " << op);
     Value ptr = op.getPtr();
 
-    if (canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst)) {
+    if (canUseBufferOps(ptr, assumptions, solver, analyzeSmallTensorOfst,
+                       useRangeAnalysis)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
       Value tensorPtr = addPtrOp.getPtr();
       Value tensorOffset = addPtrOp.getOffset();
@@ -995,6 +1127,7 @@ private:
   DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool useRangeAnalysis;
   bool emitBufferOpsOffsetAssert;
   bool bufferCacheSwizzleEnabled;
 };
@@ -1013,18 +1146,21 @@ struct TritonAMDGPUConvertToBufferOpsPass
     auto arch = getAMDArch(mod);
     triton::AMD::TargetInfo targetInfo(arch ? arch->str() : "");
 
-    // Collect assumptions in the function
+    // Collect assumptions in the function (cheap; used by assume / nonneg paths)
     DenseMap<Value, SetVector<Operation *>> assumptions =
         AMD::TritonIntegerRangeAnalysis::collectAssumptions(getOperation());
     collectAssumptionsForFuncArgPtr(mod, assumptions);
-    std::shared_ptr<DataFlowSolver> solver = createDataFlowSolver();
 
-    AMD::TritonIntegerRangeAnalysis *rangeAnalysis =
-        solver->load<AMD::TritonIntegerRangeAnalysis>(
-            assumptions, &getAnalysis<DominanceInfo>());
-    AMD::initializeFuncOps(mod, rangeAnalysis);
-    if (failed(solver->initializeAndRun(getOperation())))
-      return signalPassFailure();
+    std::shared_ptr<DataFlowSolver> solver;
+    if (this->useRangeAnalysis) {
+      solver = createDataFlowSolver();
+      AMD::TritonIntegerRangeAnalysis *rangeAnalysis =
+          solver->load<AMD::TritonIntegerRangeAnalysis>(
+              assumptions, &getAnalysis<DominanceInfo>());
+      AMD::initializeFuncOps(mod, rangeAnalysis);
+      if (failed(solver->initializeAndRun(getOperation())))
+        return signalPassFailure();
+    }
 
     AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     const bool bufferCacheSwizzleEnabled =
@@ -1033,14 +1169,17 @@ struct TritonAMDGPUConvertToBufferOpsPass
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
                  ConvertTritonStoreToBufferStore>(
         context, assumptions, solver, this->analyzeSmallTensorOfst,
-        this->emitBufferOpsOffsetAssert, bufferCacheSwizzleEnabled);
+        this->useRangeAnalysis, this->emitBufferOpsOffsetAssert,
+        bufferCacheSwizzleEnabled);
     // BufferLoadToLds is only supported on CDNA3 and CDNA4
     if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                            targetInfo.getISAFamily())) {
       patterns
           .add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(
               context, assumptions, solver, this->analyzeSmallTensorOfst,
-              this->emitBufferOpsOffsetAssert, /*bufferCacheSwizzleEnabled=*/false);
+              this->useRangeAnalysis,
+              this->emitBufferOpsOffsetAssert,
+              /*bufferCacheSwizzleEnabled=*/false);
     }
 
     // Gate buffer atomics behind CDNA3 for now
@@ -1052,11 +1191,12 @@ struct TritonAMDGPUConvertToBufferOpsPass
         (ISAFamily::CDNA3 == isaFamily || ISAFamily::CDNA4 == isaFamily))
       patterns.add<ConvertTritonAtomicRMWOpToBufferAtomicRMW>(
           context, assumptions, axisInfoAnalysis, solver, isaFamily,
-          this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert,
-          archGenerationName);
+          this->analyzeSmallTensorOfst, this->useRangeAnalysis,
+          this->emitBufferOpsOffsetAssert, archGenerationName);
     patterns.add<ConvertTritonAtomicCASOpToBufferAtomicCAS>(
         context, assumptions, axisInfoAnalysis, solver,
-        this->analyzeSmallTensorOfst, this->emitBufferOpsOffsetAssert);
+        this->analyzeSmallTensorOfst, this->useRangeAnalysis,
+        this->emitBufferOpsOffsetAssert);
 
     if (applyPatternsGreedily(mod, std::move(patterns)).failed())
       signalPassFailure();

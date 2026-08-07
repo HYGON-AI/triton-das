@@ -14,6 +14,7 @@ namespace mlir::triton {
 inline const std::set<std::string> CACHE_INVALIDATING_ENV_VARS = {
     // clang-format off
     "AMDGCN_ANALYZE_SMALL_TENSOR_RANGE",
+    "AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS",
     "AMDGCN_ENABLE_DUMP",
     "AMDGCN_USE_BUFFER_ATOMICS",
     "AMDGCN_USE_BUFFER_OPS",

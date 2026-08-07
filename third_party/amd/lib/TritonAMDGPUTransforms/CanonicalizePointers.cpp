@@ -1853,6 +1853,7 @@ struct InitFuncPtrArgs : OpRewritePattern<tt::FuncOp> {
           ValueRange{arg, zeroOffset});
       rewriter.replaceAllUsesExcept(arg, dummyCast.getResult(0), dummyCast);
       fatPtrs[{arg, zeroOffset}].canNarrow = true;
+      // pointer_range=32 → small-tensor path (do not fold U).
       if (bitness != 64)
         fatPtrs[{arg, zeroOffset}].isSmallTensor = true;
     }
