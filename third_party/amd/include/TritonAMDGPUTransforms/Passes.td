@@ -125,7 +125,7 @@ def TritonAMDGPUCanonicalizePointers : Pass<"tritonamdgpu-canonicalize-pointers"
 
   let options = [
     Option<"enableLargeTensorPtrCanon", "enable-large-tensor-ptr-canon",
-           "bool", /*default=*/"false",
+           "bool", /*default=*/"true",
            "Whether to enable canonicalization for pointers pointing to large-tensors (a specialization for tensors over 2GB)">
   ];
 }
