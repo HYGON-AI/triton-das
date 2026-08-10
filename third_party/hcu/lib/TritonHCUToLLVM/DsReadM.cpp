@@ -1,4 +1,5 @@
 #include "PatternTritonGPUOpToLLVM.h"
+#include "TritonHCU/DsReadMLayout.h"
 #include "TritonHCU/MlsGroup.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -23,51 +24,74 @@ struct DsReadMPlan {
   DsReadMKind kind;
   int64_t bk;
   int64_t bn;
+  int64_t ldsBk;
+  int64_t ldsBn;
   int64_t maxPhase;
+  bool panelMajor;
   unsigned warpsN;
   unsigned nPanels;
   unsigned kTiles; // b16: BK/16; b8: BK/32
 };
 
-std::optional<unsigned> getDsReadMBitWidth(Type srcElemTy, Type dstElemTy) {
+std::optional<DsReadMLayoutSpec>
+getDsReadMLayoutSpecForTypes(Type srcElemTy, Type dstElemTy) {
   if (!srcElemTy.isIntOrFloat() || !dstElemTy.isIntOrFloat())
     return std::nullopt;
 
   unsigned srcBits = srcElemTy.getIntOrFloatBitWidth();
   unsigned dstBits = dstElemTy.getIntOrFloatBitWidth();
-  if (srcBits != dstBits || (srcBits != 8 && srcBits != 16))
+  if (srcBits != dstBits)
     return std::nullopt;
-  return srcBits;
-}
-
-// TODO: ds_read_m may not strictly require maxPhase to match this
-int64_t getExpectedMaxPhase(unsigned elemBits, int64_t bn) {
-  return elemBits == 8 ? std::min<int64_t>(4, bn / 16) : 2;
+  return mlir::triton::HCU::getDsReadMLayoutSpec(srcBits);
 }
 
 bool hasExpectedSharedLayout(SwizzledSharedEncodingAttr sharedEnc,
-                             unsigned elemBits, int64_t bn) {
+                             const DsReadMLayoutSpec &spec, int64_t bn) {
   if (!sharedEnc || sharedEnc.getOrder().size() != 2 ||
       sharedEnc.getOrder()[0] != 1 || sharedEnc.getOrder()[1] != 0)
     return false;
 
-  if (elemBits == 16)
-    return sharedEnc.getVec() == 8 && sharedEnc.getPerPhase() == 2 &&
-           sharedEnc.getMaxPhase() == getExpectedMaxPhase(elemBits, bn);
+  return sharedEnc.getVec() == spec.vec &&
+         sharedEnc.getPerPhase() == spec.perPhase &&
+         sharedEnc.getMaxPhase() == getDsReadMFlatMaxPhase(spec, bn);
+}
 
-  return sharedEnc.getVec() == 16 && sharedEnc.getPerPhase() == 1 &&
-         sharedEnc.getMaxPhase() == getExpectedMaxPhase(elemBits, bn);
+struct DsReadMPanelViewPlan {
+  int64_t ldsBk;
+  int64_t ldsBn;
+};
+
+// Prove from the memdesc type that a local_load view is a translation within
+// one panel-major address space. allocShape identifies the complete physical
+// panel allocation, while shape identifies the selected logical view. Keeping
+// the full N dimension and shrinking only K by whole ds_read_m tiles preserves
+// every N32 panel; the affine K origin is already folded into the converted
+// shared-memory base. Slicing N would change the panel address formula.
+std::optional<DsReadMPanelViewPlan>
+buildDsReadMPanelViewPlan(MemDescType viewTy,
+                          const DsReadMLayoutSpec &spec) {
+  auto panelEncoding =
+      dyn_cast<SharedLinearEncodingAttr>(viewTy.getEncoding());
+  ArrayRef<int64_t> viewShape = viewTy.getShape();
+  ArrayRef<int64_t> allocShape = viewTy.getAllocShape();
+  if (!panelEncoding || viewShape.size() != 2 || allocShape.size() < 2)
+    return std::nullopt;
+
+  ArrayRef<int64_t> panelShape = allocShape.take_back(2);
+  if (!isDsReadMPanelEncoding(panelEncoding, panelShape[0], panelShape[1],
+                              spec.elementBitWidth) ||
+      viewShape[1] != panelShape[1] || viewShape[0] > panelShape[0] ||
+      viewShape[0] % spec.kPerTile != 0)
+    return std::nullopt;
+
+  return DsReadMPanelViewPlan{panelShape[0], 32};
 }
 
 std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
   // Default-on: unset => enabled; ENABLE=0/false/off disables.
   // (getBoolEnv treats unset as false, so do not use it for this flag.)
-  std::string enableEnv =
-      triton::tools::getStrEnv("TRITON_HCU_ENABLE_DS_READ_M");
-  if (!enableEnv.empty()) {
-    if (auto v = triton::tools::isEnvValueBool(enableEnv); v && !*v)
-      return std::nullopt;
-  }
+  if (!isDsReadMEnabled())
+    return std::nullopt;
 
   auto srcTy = cast<MemDescType>(op.getSrc().getType());
   auto dstTy = cast<RankedTensorType>(op.getType());
@@ -76,20 +100,25 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
       dotEnc.getOpIdx() != 1)
     return std::nullopt;
 
-  auto bitWidth =
-      getDsReadMBitWidth(srcTy.getElementType(), dstTy.getElementType());
-  auto sharedEnc = dyn_cast<SwizzledSharedEncodingAttr>(srcTy.getEncoding());
-  // Dense N-major B[BK, BN] only; affine/sliced LDS needs a separate vaddr path.
-  if (!bitWidth ||
-      LLVM::SharedMemoryObject::isAffineSharedMemoryAccess(srcTy))
+  auto spec = getDsReadMLayoutSpecForTypes(srcTy.getElementType(),
+                                          dstTy.getElementType());
+  if (!spec)
     return std::nullopt;
 
   // b16: ds_read_m32x16 covers K=16; b8: ds_read_m32x32 covers K=32.
   int64_t bk = dstTy.getShape()[0], bn = dstTy.getShape()[1];
-  unsigned kPerTile = *bitWidth == 8 ? 32 : 16;
-  unsigned kWidth = *bitWidth == 8 ? 8 : 4;
-  if (bn < 32 || bn % 32 || bk < kPerTile || bk % kPerTile ||
-      !hasExpectedSharedLayout(sharedEnc, *bitWidth, bn))
+  auto sharedEnc = dyn_cast<SwizzledSharedEncodingAttr>(srcTy.getEncoding());
+  std::optional<DsReadMPanelViewPlan> panelViewPlan =
+      buildDsReadMPanelViewPlan(srcTy, *spec);
+  bool panelMajor = panelViewPlan.has_value();
+  if (!isDsReadMTileShape(bk, bn, *spec) ||
+      (!panelMajor && !hasExpectedSharedLayout(sharedEnc, *spec, bn)))
+    return std::nullopt;
+
+  // Generic affine shared views remain unsupported.  The only affine panel
+  // view accepted here was fully proved by buildDsReadMPanelViewPlan above.
+  if (LLVM::SharedMemoryObject::isAffineSharedMemoryAccess(srcTy) &&
+      !panelMajor)
     return std::nullopt;
 
   auto mfmaEnc = cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
@@ -100,18 +129,23 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
   // AccelerateHCUMatmul redistributes warpsPerCTA so warpsN <= BN/32.
   unsigned warpsN = warpsPerCTA.size() == 2 ? warpsPerCTA[1] : 0;
   if (instrShape.size() != 3 || instrShape[0] != 16 || instrShape[1] != 16 ||
-      instrShape[2] != kPerTile || dotEnc.getKWidth() != kWidth ||
+      instrShape[2] != spec->kPerTile || dotEnc.getKWidth() != spec->kWidth ||
       tilesPerWarp.size() != 2 || tilesPerWarp[0] != 1 ||
       tilesPerWarp[1] != 2 || warpsN == 0 || bn % (warpsN * 32))
     return std::nullopt;
 
-  return DsReadMPlan{*bitWidth == 8 ? DsReadMKind::B8 : DsReadMKind::B16,
+  return DsReadMPlan{spec->elementBitWidth == 8 ? DsReadMKind::B8
+                                                : DsReadMKind::B16,
                      bk,
                      bn,
-                     getExpectedMaxPhase(*bitWidth, bn),
+                     panelMajor ? panelViewPlan->ldsBk : bk,
+                     panelMajor ? panelViewPlan->ldsBn : bn,
+                     panelMajor ? spec->panelMaxPhase
+                                : getDsReadMFlatMaxPhase(*spec, bn),
+                     panelMajor,
                      warpsN,
                      static_cast<unsigned>(bn / (warpsN * 32)),
-                     static_cast<unsigned>(bk / kPerTile)};
+                     static_cast<unsigned>(bk / spec->kPerTile)};
 }
 
 Value createDsReadM32x16B16(Location loc, RewriterBase &rewriter,
@@ -145,23 +179,9 @@ SmallVector<Value> unpackI32Regs(Location loc, Type elemTy,
 
 // Emit ds_read_m32x16_b16 for each (nPanel, kTile).
 //
-// Contiguous N-major B[K,N] panel addressing:
-//   k_addr = lane >> 2                         // 0..15, K row this lane addresses
-//   c      = lane & 3                          // 4 lanes cover one K row
-//   n0     = panel * 32 + c * 8                // logical N start of 8-half chunk
-//   vaddr_half_contiguous = k_addr * N + n0
-//
-// Swizzled shared {vec=8, perPhase=2, maxPhase=2, order=[1,0]}:
-//   phase(k)        = (k / perPhase) % maxPhase
-//   swizzled_n(k,n) = ((n / vec) ^ phase(k)) * vec + (n % vec)
-//   vaddr_half      = k * N + swizzled_n(k, n0)
-//
-// With vec=8, n0 is always 8-aligned, so this simplifies to:
-//   phase = ((lane >> 2) / 2) % 2              // == (k_addr >> 1) & 1
-//   vaddr_half =
-//       (lane >> 2) * N + (((panel * 4 + (lane & 3)) ^ phase) * 8)
-//
-// Multi-warp / multi-K: panel = nPanel * warpsN + warpN; k_addr += kTile * 16.
+// Both paths return the same logical N32 x K16 fragment. Panel-major LDS uses
+// one physical [BK,32] panel per N-warp, while the flat path addresses the
+// complete [BK,BN] tile. Their address formulas are documented at each path.
 SmallVector<SmallVector<Value>>
 emitB16Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
              Type smemPtrTy, Type elemTy, Value smemBase, Value laneId,
@@ -170,19 +190,69 @@ emitB16Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
   Type vecTy = vec_ty(elemTy, 8);
 
   Value colInQuad = b.and_(laneId, b.i32_val(3)); // c = lane & 3
+  if (plan.panelMajor) {
+    // Panel-major physical addressing:
+    //   k_addr = lane >> 2
+    //   c       = lane & 3
+    //   phase   = (k_addr >> 1) & 1
+    //   vaddr_elem = warpN * BK * 32 + k_addr * 32 + ((c ^ phase) * 8)
+    //
+    // The VGPR address selects this warp's first physical [BK,32] panel.
+    // kTile and nPanel select later K16 tiles and N32 panel groups through the
+    // instruction immediate, avoiding repeated per-instruction VGPR address
+    // arithmetic:
+    //   offset_bytes =
+    //       (kTile * 16 * 32 + nPanel * warpsN * BK * 32) * sizeof(b16)
+    Value kAddr = b.lshr(laneId, b.i32_val(2));
+    Value phase = b.and_(b.lshr(kAddr, b.i32_val(1)), b.i32_val(1));
+    Value nGroup = b.xor_(colInQuad, phase);
+    Value vaddrElem =
+        b.add(b.add(b.mul(kAddr, b.i32_val(plan.ldsBn)),
+                    b.mul(nGroup, b.i32_val(8))),
+              b.mul(warpId, b.i32_val(plan.ldsBk * plan.ldsBn)));
+    Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, vaddrElem,
+                              LLVM::GEPNoWrapFlags::inbounds);
+
+    for (unsigned nPanel = 0; nPanel < plan.nPanels; ++nPanel) {
+      for (unsigned kTile = 0; kTile < plan.kTiles; ++kTile) {
+        int64_t offsetBytes =
+            (static_cast<int64_t>(kTile) * 16 * plan.ldsBn +
+             static_cast<int64_t>(nPanel) * plan.warpsN * plan.ldsBk *
+                 plan.ldsBn) *
+            2;
+        Value dsValue = createDsReadM32x16B16(
+            loc, rewriter, vecTy, loadAddress, b.i32_val(offsetBytes));
+        SmallVector<Value> elems;
+        for (int i = 0; i < 8; ++i)
+          elems.push_back(b.extract_element(elemTy, dsValue, b.i32_val(i)));
+        elemsByKTile.push_back(elems);
+      }
+    }
+    return elemsByKTile;
+  }
+
+  // Flat [BK,BN] addressing:
+  //   k_addr = (lane >> 2) + kTile * 16
+  //   c       = lane & 3
+  //   panel   = nPanel * warpsN + warpN
+  //   n0      = panel * 32 + c * 8
+  //
+  // For shared {vec=8, perPhase=2, maxPhase=2, order=[1,0]}:
+  //   phase         = (k_addr >> 1) & 1
+  //   swizzled_n    = ((n0 / 8) ^ phase) * 8
+  //   vaddr_elem    = k_addr * BN + swizzled_n
+  //
+  // The full K/N displacement is carried by the VGPR address, so the
+  // instruction immediate remains zero.
   for (unsigned nPanel = 0; nPanel < plan.nPanels; ++nPanel) {
     for (unsigned kTile = 0; kTile < plan.kTiles; ++kTile) {
-      // k_addr = (lane >> 2) + kTile * 16
       Value kAddr =
           b.add(b.lshr(laneId, b.i32_val(2)), b.i32_val(kTile * 16));
-      // phase = (k_addr / 2) % 2
       Value phase = b.and_(b.lshr(kAddr, b.i32_val(1)), b.i32_val(1));
-      // nGroup = (panel * 4 + c) ^ phase, panel = nPanel * warpsN + warpN
       Value nPanelBase = b.mul(b.i32_val(nPanel * plan.warpsN), b.i32_val(4));
       Value nGroup = b.xor_(
           b.add(b.add(nPanelBase, b.mul(warpId, b.i32_val(4))), colInQuad),
           phase);
-      // vaddr_half = k_addr * BN + nGroup * 8
       Value vaddrElem =
           b.add(b.mul(kAddr, b.i32_val(plan.bn)), b.mul(nGroup, b.i32_val(8)));
 
@@ -203,24 +273,10 @@ emitB16Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
 
 // Emit ds_read_m32x32_b8 for each (nPanel, kTile).
 //
-// Contiguous N-major B[K,N] panel addressing (16 i8 = 128-bit per lane):
-//   k_addr = lane >> 1                         // 0..31, K row this lane addresses
-//   c      = lane & 1                          // 2 lanes cover one K row
-//   n0     = panel * 32 + c * 16               // logical N start of 16-i8 chunk
-//   vaddr_i8_contiguous = k_addr * N + n0
-//
-// Swizzled shared {vec=16, perPhase=1, maxPhase=min(4, BN/16), order=[1,0]}:
-//   phase(k)        = (k / perPhase) % maxPhase   // == k % maxPhase
-//   swizzled_n(k,n) = ((n / vec) ^ phase(k)) * vec + (n % vec)
-//   vaddr_i8        = k * N + swizzled_n(k, n0)
-//
-// With vec=16, n0 is always 16-aligned, so this simplifies to:
-//   phase = k_addr % maxPhase
-//   vaddr_i8 =
-//       (lane >> 1) * N + (((panel * 2 + (lane & 1)) ^ phase) * 16)
-//
-// Multi-warp / multi-K: panel = nPanel * warpsN + warpN; k_addr += kTile * 32.
-// Hardware returns 4xi32 = two 8-element MMAC-B K fragments (regs[0:2], [2:4]).
+// Both paths return the same logical N32 x K32 fragment. Panel-major LDS uses
+// one physical [BK,32] panel per N-warp, while the flat path addresses the
+// complete [BK,BN] tile. Hardware returns 4xi32, which form two 8-element
+// MMAC-B K fragments. Address formulas are documented at each path.
 SmallVector<SmallVector<Value>>
 emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
             Type smemPtrTy, Type elemTy, Value smemBase, Value laneId,
@@ -228,19 +284,84 @@ emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
   SmallVector<SmallVector<Value>> elemsByPanel;
   Value colInPair = b.and_(laneId, b.i32_val(1)); // c = lane & 1
   Type vecTy = vec_ty(rewriter.getI32Type(), 4);
+  if (plan.panelMajor) {
+    // Panel-major physical addressing:
+    //   k_addr = lane >> 1
+    //   c       = lane & 1
+    //   phase   = k_addr & 1
+    //   panel   = nPanel * warpsN + warpN
+    //   physical_k = k_addr ^ (panel & 3)
+    //   vaddr_elem = warpN * BK * 32 + physical_k * 32
+    //              + ((c ^ phase) * 16)
+    //
+    // maxPhase=2 keeps the N XOR within the two 16-byte groups of this warp's
+    // physical N32 panel. The panel-dependent K skew matches the store layout
+    // and rotates adjacent panels onto disjoint banks. kTile and nPanel select
+    // later K32 tiles and N32 panel groups through the byte-unit immediate:
+    //   offset_bytes = kTile * 32 * 32 + nPanel * warpsN * BK * 32
+    Value kAddr = b.lshr(laneId, b.i32_val(1));
+    Value phase = b.and_(kAddr, b.i32_val(1));
+    Value nGroup = b.xor_(colInPair, phase);
+
+    for (unsigned nPanel = 0; nPanel < plan.nPanels; ++nPanel) {
+      // The panel layout XORs panel-id bits [1:0] into the physical K row to
+      // make N-contiguous vector stores bank-disjoint across four panels.
+      // Undo that skew in the matrix-read address.  nPanel selects a later
+      // group of warpsN panels through the immediate below, so include it when
+      // forming the full logical panel id.
+      Value panelId = b.add(warpId, b.i32_val(nPanel * plan.warpsN));
+      Value panelK = b.and_(panelId, b.i32_val(3));
+      Value physicalK = b.xor_(kAddr, panelK);
+      Value vaddrElem =
+          b.add(b.add(b.mul(physicalK, b.i32_val(plan.ldsBn)),
+                      b.mul(nGroup, b.i32_val(16))),
+                b.mul(warpId, b.i32_val(plan.ldsBk * plan.ldsBn)));
+      Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, vaddrElem,
+                                LLVM::GEPNoWrapFlags::inbounds);
+      for (unsigned kTile = 0; kTile < plan.kTiles; ++kTile) {
+        int64_t offsetBytes =
+            static_cast<int64_t>(kTile) * 32 * plan.ldsBn +
+            static_cast<int64_t>(nPanel) * plan.warpsN * plan.ldsBk *
+                plan.ldsBn;
+        Value dsValue = createDsReadM32x32B8(
+            loc, rewriter, vecTy, loadAddress, b.i32_val(offsetBytes));
+
+        SmallVector<Value> regs;
+        for (int i = 0; i < 4; ++i)
+          regs.push_back(
+              b.extract_element(rewriter.getI32Type(), dsValue, b.i32_val(i)));
+        ArrayRef<Value> regRef(regs);
+        elemsByPanel.push_back(
+            unpackI32Regs(loc, elemTy, regRef.take_front(2), b));
+        elemsByPanel.push_back(
+            unpackI32Regs(loc, elemTy, regRef.drop_front(2), b));
+      }
+    }
+    return elemsByPanel;
+  }
+
+  // Flat [BK,BN] addressing:
+  //   k_addr = (lane >> 1) + kTile * 32
+  //   c       = lane & 1
+  //   panel   = nPanel * warpsN + warpN
+  //   n0      = panel * 32 + c * 16
+  //
+  // For shared {vec=16, perPhase=1, maxPhase=min(4, BN/16), order=[1,0]}:
+  //   phase         = k_addr % maxPhase
+  //   swizzled_n    = ((n0 / 16) ^ phase) * 16
+  //   vaddr_elem    = k_addr * BN + swizzled_n
+  //
+  // The full K/N displacement is carried by the VGPR address, so the
+  // instruction immediate remains zero.
   for (unsigned nPanel = 0; nPanel < plan.nPanels; ++nPanel) {
     for (unsigned kTile = 0; kTile < plan.kTiles; ++kTile) {
-      // k_addr = (lane >> 1) + kTile * 32
       Value kAddr =
           b.add(b.lshr(laneId, b.i32_val(1)), b.i32_val(kTile * 32));
-      // phase = k_addr % maxPhase
       Value phase = b.urem(kAddr, b.i32_val(plan.maxPhase));
-      // nGroup = (panel * 2 + c) ^ phase, panel = nPanel * warpsN + warpN
       Value nPanelBase = b.mul(b.i32_val(nPanel * plan.warpsN), b.i32_val(2));
       Value nGroup = b.xor_(
           b.add(b.add(nPanelBase, b.mul(warpId, b.i32_val(2))), colInPair),
           phase);
-      // vaddr_i8 = k_addr * BN + nGroup * 16
       Value vaddrElem = b.add(b.mul(kAddr, b.i32_val(plan.bn)),
                               b.mul(nGroup, b.i32_val(16)));
 
@@ -313,7 +434,13 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
     Type elemTy = typeConverter->convertType(srcTy.getElementType());
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          elemTy, rewriter);
-
+    // canUseDsReadM accepts an affine view only after proving that it is a
+    // panel-preserving K-tile translation. Fold that translation into the LDS
+    // base; otherwise K0 and K1 subslices would issue from the same address.
+    Value smemBase =
+        LLVM::SharedMemoryObject::isAffineSharedMemoryAccess(srcTy)
+            ? smemObj.getShmemAffineBase(loc, rewriter, srcTy)
+            : smemObj.getBase();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto mfmaEnc = cast<AMDMfmaEncodingAttr>(
@@ -327,9 +454,9 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
     SmallVector<SmallVector<Value>> elemsByKTile =
         plan->kind == DsReadMKind::B16
             ? emitB16Reads(loc, rewriter, b, smemPtrTy, elemTy,
-                           smemObj.getBase(), laneId, warpN, *plan)
+                           smemBase, laneId, warpN, *plan)
             : emitB8Reads(loc, rewriter, b, smemPtrTy, elemTy,
-                          smemObj.getBase(), laneId, warpN, *plan);
+                          smemBase, laneId, warpN, *plan);
 
     SmallVector<Value> outVals = packDsReadMFragments(elemsByKTile, *plan);
     Value result = packLLElements(loc, typeConverter, outVals, rewriter, dstTy);

@@ -1,5 +1,6 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
+#include "TritonHCU/DsReadMLayout.h"
 #include "TritonHCU/MlsGroup.h"
 #include "TritonHCU/WdraSplitPlan.h"
 #include "TritonAMDGPUTransforms/Passes.h"
@@ -40,17 +41,6 @@ namespace {
 using triton::AMD::ISAFamily;
 constexpr char AttrDecomposedDotScaledSource[] =
     "amdg.decomposed_dot_scaled_source";
-
-bool isDsReadMEnabled() {
-  // Default-on while keeping the ENABLE_* name: getBoolEnv() treats unset as
-  // false, so parse explicitly here instead of changing the public helper.
-  std::string s = triton::tools::getStrEnv("TRITON_HCU_ENABLE_DS_READ_M");
-  if (s.empty())
-    return true;
-  if (auto v = triton::tools::isEnvValueBool(s))
-    return *v;
-  return true;
-}
 
 struct MatrixLoadInfo {
   triton::MatrixLoadOp matrixOp;
@@ -254,6 +244,80 @@ bool hasTransInDefChain(tt::DotOpInterface dotOp, unsigned opIdx) {
   }
   return false;
 }
+
+// The dot-operand encoding describes the register fragment consumed by MMAC;
+// it no longer preserves whether the original B load walked N or K
+// contiguously.  Panel-major ds_read_m is selected only from an actual
+// N-contiguous global load.  This keeps source-layout selection here, while
+// downstream BlockPingpong keys its cadence solely from the resulting LDS
+// encoding.
+bool isNContiguousGlobalLoad(Value value) {
+  if (auto convert = value.getDefiningOp<ttg::ConvertLayoutOp>())
+    value = convert.getSrc();
+  if (!value.getDefiningOp<tt::LoadOp>())
+    return false;
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type || !isa<ttg::DistributedEncodingTrait>(type.getEncoding()))
+    return false;
+  SmallVector<unsigned> order = ttg::getOrder(type);
+  return order.size() == 2 && order[0] == 1;
+}
+
+// ds_read_m has three outcomes:
+//   1. A valid DsReadMPanelPlan selects panel-major SharedLinear LDS.
+//   2. No panel plan, but a ds_read_m-compatible dot, retains the legacy flat
+//      shared layout; DsReadM lowering decides whether that flat layout is legal.
+//   3. If neither LDS contract is legal, LocalLoad keeps its generic lowering.
+//
+// Keep panel candidacy, final legality, and its warp distribution together in
+// this plan. Its presence is the only switch for materializing panel-major LDS;
+// callers must not repeat partial panel checks with separate booleans.
+struct DsReadMPanelPlan {
+  int64_t blockK;
+  int64_t blockN;
+  unsigned elementBitWidth;
+  SmallVector<unsigned, 3> warpsPerTile;
+};
+
+std::optional<DsReadMPanelPlan> buildDsReadMPanelPlan(
+    tt::DotOp dotOp, Value b, Type bElementType, Type mfmaAElementType,
+    Type mfmaBElementType, ArrayRef<int64_t> resultShape, int numWarps,
+    Attribute resultEncoding, int64_t blockK, int64_t blockN, unsigned kBase,
+    int kPack, const DsReadMLayoutSpec &layoutSpec,
+    ArrayRef<unsigned> defaultWarpsPerTile, unsigned instrM) {
+  unsigned kWidth = kBase;
+  bool isDotChainTail = isChainDotTail(dotOp);
+  if (!isDotChainTail)
+    kWidth *= kPack;
+  if ((mfmaAElementType.isF16() || mfmaAElementType.isBF16()) && isDotChainTail)
+    kWidth = 4;
+
+  if (resultShape.size() != 2 || ttg::getNumCTAs(resultEncoding) != 1 ||
+      bElementType != mfmaBElementType || kWidth != layoutSpec.kWidth ||
+      !isNContiguousGlobalLoad(b) ||
+      !isDsReadMPanelShape(blockK, blockN, layoutSpec))
+    return std::nullopt;
+
+  int64_t resultTileCapacity =
+      (resultShape[0] / instrM) * (resultShape[1] / 16);
+  if (numWarps > resultTileCapacity)
+    return std::nullopt;
+
+  SmallVector<unsigned, 3> panelWarpsPerTile(defaultWarpsPerTile);
+  // For the common 256x256, 8-warp tile, four N-warp groups issue one
+  // independent N32 panel each. Two M-warp groups retain enough MMAC
+  // parallelism while reducing panel work per wave.
+  if (numWarps == 8 && resultShape[0] >= 2 * instrM && resultShape[1] >= 4 * 32)
+    panelWarpsPerTile = {2, 4};
+
+  if (panelWarpsPerTile.size() != 2 || panelWarpsPerTile[1] == 0 ||
+      blockN % (panelWarpsPerTile[1] * 32) != 0)
+    return std::nullopt;
+
+  return DsReadMPanelPlan{blockK, blockN, layoutSpec.elementBitWidth,
+                          std::move(panelWarpsPerTile)};
+}
+
 int getMfmaVersion(ISAFamily isaFamily) {
   switch (isaFamily) {
   case ISAFamily::CDNA1:
@@ -1036,21 +1100,43 @@ public:
     // ds_read_m on buffer-load B (not MLS): tileN=32 panel, same split as MLS.
     // b16 -> K=16; b8 -> K=32.
     bool dsReadMDot = false;
+    std::optional<DsReadMPanelPlan> dsReadMPanelPlan;
     unsigned bits =
         aElemType.isIntOrFloat() ? aElemType.getIntOrFloatBitWidth() : 0;
-    unsigned dsKPerTile = bits == 16 ? 16 : bits == 8 ? 32 : 0;
+    auto dsReadMSpec = getDsReadMLayoutSpec(bits);
     int64_t bK = oldBType.getShape()[0];
     int64_t bN = oldBType.getShape()[1];
     if (isDsReadMEnabled() && !useMatrixLoad && rank == 2 && mDim == 16 &&
-        nDim == 16 && dsKPerTile && kDim == dsKPerTile &&
+        nDim == 16 && dsReadMSpec && kDim == dsReadMSpec->kPerTile &&
         bElemType.isIntOrFloat() &&
-        bElemType.getIntOrFloatBitWidth() == bits && bK >= dsKPerTile &&
-        bK % dsKPerTile == 0 && bN >= 32 && bN % 32 == 0 &&
+        bElemType.getIntOrFloatBitWidth() == bits &&
+        isDsReadMTileShape(bK, bN, *dsReadMSpec) &&
         bN == retShape[1] && oldAType.getShape()[1] == bK) {
       unsigned tileM = mDim, tileN = 32;
       tilesPerWarp = {tileM / mDim, tileN / nDim}; // {1, 2}
       warpsPerTile =
           warpsPerTileMFMA(dotOp, retShape, numWarps, {tileM, tileN});
+
+      // Panel-major is a preferred ds_read_m layout, not a replacement for
+      // the existing flat path.  Eligible power-of-two row-row tiles use the
+      // native N32 panel view; all other ds_read_m-compatible tiles retain the
+      // flat [BK, BN] layout below.  The generic AMD pipeline only materializes
+      // the requested shared layout.  BlockPingpong may recognize that exact
+      // encoding later, but does not participate in selecting it here.
+      // Dot-operand B always has K-major register order, so its encoding
+      // cannot distinguish row-row from row-col input.  Inspect the tensor
+      // feeding the convert_layout instead: panel-major LDS is only useful
+      // when the source buffer load is N-contiguous.  A K-contiguous row-col
+      // B must retain the normal swizzled-shared path so both operands remain
+      // eligible for the generic pipeline and BlockPingpong.
+      // A null plan does not disable ds_read_m. It only selects the existing
+      // flat/generic conversion below instead of panel-major LDS.
+      dsReadMPanelPlan = buildDsReadMPanelPlan(
+          dotOp, b, bElemType, mfmaInstr->aElementType, mfmaInstr->bElementType,
+          retShape, numWarps, oldRetType.getEncoding(), bK, bN, kBase, kPack,
+          *dsReadMSpec, warpsPerTile, mDim);
+      if (dsReadMPanelPlan)
+        warpsPerTile = dsReadMPanelPlan->warpsPerTile;
       dsReadMDot = true;
     }
 
@@ -1194,8 +1280,38 @@ public:
                                                            newBEncoding, aMatInfo, bMatInfo);
       a = convertAndCastTensor(rewriter, a, newAEncoding,
                                mfmaInstr->aElementType, compatibleAEncoding);
-      b = convertAndCastTensor(rewriter, b, newBEncoding,
-                               mfmaInstr->bElementType, compatibleBEncoding);
+      // The optional plan is deliberately the sole panel selection state: all
+      // source-layout, shape, type, kWidth, CTA, and warp checks were finalized
+      // by buildDsReadMPanelPlan before the MFMA encoding was constructed.
+      if (dsReadMPanelPlan) {
+        assert(!compatibleBEncoding &&
+               "panel plan is only built for non-MLS buffer loads");
+        // Make the ds_read_m LDS contract explicit in TTGIR.  AMD's generic
+        // pipeline already preserves an immediate local_alloc user's shared
+        // encoding.  It adds the leading buffer dimension to the memdesc while
+        // each selected buffer view keeps this exact tile-rank encoding.  Thus
+        // no generic SharedLinear rank extension is required, and the normal
+        // shared-to-dot chain stays independent of BlockPingpong scheduling.
+        auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(ctx);
+        auto panelEncoding = getDsReadMPanelEncoding(
+            ctx, dsReadMPanelPlan->blockK, dsReadMPanelPlan->blockN,
+            dsReadMPanelPlan->elementBitWidth);
+        auto panelType = ttg::MemDescType::get(
+            oldBType.getShape(), bElemType, panelEncoding, sharedMemorySpace);
+        auto panelAlloc =
+            ttg::LocalAllocOp::create(rewriter, dotOp.getLoc(), panelType, b);
+        auto dotBType = RankedTensorType::get(oldBType.getShape(), bElemType,
+                                              newBEncoding);
+        b = ttg::LocalLoadOp::create(rewriter, dotOp.getLoc(), dotBType,
+                                     panelAlloc);
+      } else {
+        // Preserve the legacy flat ds_read_m path when panel-major cannot be
+        // represented.  If its own legality checks fail later, LocalLoad falls
+        // back to the generic LDS lowering as before.
+        b = convertAndCastTensor(rewriter, b, newBEncoding,
+                                 mfmaInstr->bElementType,
+                                 compatibleBEncoding);
+      }
       newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newAcc.getType(), a,
                                           b, newAcc, dotOp.getInputPrecision(),
                                           dotOp.getMaxNumImpreciseAcc());
