@@ -11,7 +11,7 @@ variables:
   DTK_PKG: "/ArchivedFile/dtk-pkg/dtk26.04/DTK-26.04-rc4-centos8-x86_64.tar.gz"
   DEVPI_URL: "http://10.16.1.201:9929/"
   CISMI_TIMEOUT: "3600"
-  TORCH_VERSION: "2.10.0"
+  TORCH_VERSION: "2.11.0"
 
 build:triton-wheel:
   stage: build
@@ -75,9 +75,12 @@ publish:
   stage: publish
   timeout: 3h
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME =~ /^(release\/|staging)/'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
   tags:
     - nmz
+  parallel:
+    matrix:
+      - TORCH_VERSION: ["2.10.0", "2.11.0"]
   before_script:
     # 安装 DTK
     - cp -f ${DTK_PKG} /opt/
@@ -116,7 +119,7 @@ publish:
     - LOCAL_VER="dtk${DTK_VER}.torch${TORCH_VER}.$(date +%y%m%d%H%M).g$(git rev-parse --short=6 HEAD)"
     - CIUpload --repair --torch_version ${TORCH_VERSION} --set_local_version ${LOCAL_VER} --outputdir output -f dist/*.whl
     # upload
-    - CIUpload --devpi_url ${DEVPI_URL} --devpi_user ${devpi_nightly_user} --devpi_password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl
+    # - CIUpload --devpi_url ${DEVPI_URL} --devpi_user ${devpi_nightly_user} --devpi_password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl
   artifacts:
     paths:
       - output/*.whl
