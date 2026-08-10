@@ -2,6 +2,7 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
+#include "mlir/Conversion/ArithCommon/AttrToLLVMConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -2269,9 +2270,13 @@ struct FDivOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
-
-      return {rewriter.create<LLVM::FDivOp>(loc, elemTy, operands[0][0],
-                                            operands[0][1])};
+    // Carry the arith fastmath flags (e.g. `arcp` set by the frontend for
+    // regular `/`) through to LLVM so the AMDGPU backend can lower fp32 fdiv
+    // to v_rcp_f32 + v_mul_f32 instead of the full Newton-Raphson sequence.
+    auto fastmath =
+        mlir::arith::convertArithFastMathFlagsToLLVM(op.getFastmath());
+    return {rewriter.create<LLVM::FDivOp>(loc, elemTy, operands[0][0],
+                                          operands[0][1], fastmath)};
   }
 };
 

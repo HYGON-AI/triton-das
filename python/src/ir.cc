@@ -1250,7 +1250,23 @@ void init_triton_ir(py::module &&m) {
            })
       .def("create_fdiv",
            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
+             // plain `a / b` -> precise IEEE division (no fastmath)
              return self.create<arith::DivFOp>(lhs, rhs);
+           })
+      .def("create_fdiv_fast",
+           [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
+             // tl.math.fdiv(..., ieee_rounding=False): mark divf with afn|arcp so
+             // the LLVM AMDGPU backend lowers fp32 fdiv to v_rcp_f32 + v_mul_f32
+             // instead of the ~13-instruction IEEE Newton-Raphson sequence.
+             // (LLVM requires `afn` for the f32 reciprocal path; `arcp` alone is
+             // not enough.) `tl.math.div_rn` / fdiv(ieee_rounding=True) stay precise.
+             auto op = self.create<arith::DivFOp>(lhs, rhs);
+             op->setAttr(
+                 "fastmath",
+                 arith::FastMathFlagsAttr::get(
+                     op.getContext(),
+                     arith::FastMathFlags::afn | arith::FastMathFlags::arcp));
+             return op;
            })
       .def("create_frem",
            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {

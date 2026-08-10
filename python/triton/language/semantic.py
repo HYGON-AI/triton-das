@@ -328,7 +328,13 @@ class TritonSemantic(Generic[TensorTy]):
         if not input_scalar_ty.is_floating() or not other_scalar_ty.is_floating():
             raise TypeError("both operands of fdiv must have floating scalar type")
         input, other = self.binary_op_type_checking_impl(input, other, False, False, False, True)
-        ret = self.builder.create_fdiv(input.handle, other.handle)
+        if ieee_rounding:
+            # precise IEEE division (rounding to nearest)
+            ret = self.builder.create_fdiv(input.handle, other.handle)
+        else:
+            # fast (approximate) division: afn|arcp -> LLVM lowers to
+            # v_rcp_f32 + v_mul_f32 on AMDGPU (relative error ~1 ulp)
+            ret = self.builder.create_fdiv_fast(input.handle, other.handle)
         return self.tensor(ret, input.type)
 
     def mod(self, input: TensorTy | numbers.Number, other: TensorTy | numbers.Number) -> TensorTy:
