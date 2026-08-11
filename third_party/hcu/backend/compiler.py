@@ -233,6 +233,12 @@ class HIPBackend(BaseBackend):
             args["buffer_cache_swizzle"] = knobs.amd.buffer_cache_swizzle
 
         if args.get("wasp_enabled"):
+            # WASP owns LDS multi-buffering via LoadMMASpecialization; only
+            # depths 2 and 4 are supported (selectStageBarId / abarrier budget).
+            num_stages = args.get("num_stages", 2)
+            if num_stages not in (2, 4):
+                raise ValueError(
+                    f"wasp requires num_stages in (2, 4); got {num_stages}")
             if args.get("wdra_enabled"):
                 # WDRA topologies (Load-first after OptimizePartitionWarps):
                 #   load=4, mma=8 → 1P+2C (12-wave): [Load, MMA_main, MMA_tail]
@@ -243,6 +249,13 @@ class HIPBackend(BaseBackend):
                 if args["wasp_num_load_warps"] == 8:
                     assert args["wasp_num_mma_warps"] == 8, (
                         "wdra 2P+2C requires wasp_num_mma_warps == 8")
+                    # 2 load groups × 2 (empty+ready) × stages × 2 pairs = 8*stages
+                    # exceeds the 16-abarrier ID hard limit when stages=4.
+                    if num_stages == 4:
+                        raise ValueError(
+                            "wdra TwoPTwoC (wasp_num_load_warps=8, "
+                            "wasp_num_mma_warps=8) does not support "
+                            "num_stages=4 (abarrier ID limit)")
             else:
                 args.pop("wdra_num_load_regs", None)
                 args.pop("wdra_num_mma_regs_main", None)
@@ -625,7 +638,11 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
 
         if options.wasp_enabled:
-            passes.ttgpuir.add_warp_specialize_hcu(pm, 2, options.wdra_enabled, options.wasp_num_load_warps, options.wasp_num_mma_warps)
+            # Under WASP, num_stages is the LDS buffer depth (2 or 4), not AMD
+            # stream-pipeline depth (MLS/AMD SWP are skipped above).
+            passes.ttgpuir.add_warp_specialize_hcu(
+                pm, options.num_stages, options.wdra_enabled,
+                options.wasp_num_load_warps, options.wasp_num_mma_warps)
             hcu.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack, options.mmac_layout_force)
             passes.ttgpuir.add_remove_layout_conversions(pm)
             if options.optimize_epilogue:

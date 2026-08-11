@@ -1,12 +1,15 @@
 """
 HCU WASP / WASP+WDRA regression matrix: GEMM & FA × MLS & non-MLS.
 
-Default scenarios (10):
-  GEMM  × {load, mls} × {wasp 4+4, wdra 4+8, wdra 8+8}
-  FA    × {load, mls} × {wasp 4+4, wdra 4+8}
+Default scenarios (12):
+  GEMM  × {load, mls} × {wasp 4+4, wdra 4+8, wdra 8+8}   # num_stages=2
+  GEMM  × {load, mls} × {wdra 4+8} × num_stages=4
+      (mls/wdra4+8/ns4 is KNOWN_XFAIL: MlsOpToLLVM multi-tile assert)
+  FA    × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
 
 Known limitation: gemm/load/wdra8+8 uses K=512; see the comment near
-WDRA88_LOAD_GEMM_SHAPE below.
+WDRA88_LOAD_GEMM_SHAPE below. wdra8+8 does not support num_stages=4
+(abarrier ID limit).
 
 Optional nowrap (no WASP/WDRA) via --mode nowrap:
   uses plain num_warps (not wasp_num_*), warp_specialize=False on GEMM.
@@ -25,6 +28,7 @@ Usage (from triton-staging root):
   python .../test_wasp_mls_regression.py --mode wasp    # 4+4 only
   python .../test_wasp_mls_regression.py --mode wdra    # 4+8 only
   python .../test_wasp_mls_regression.py --mode wdra88  # 8+8 TwoPTwoC (GEMM)
+  python .../test_wasp_mls_regression.py --only gemm --mode wdra --num-stages 4
   python .../test_wasp_mls_regression.py --only gemm --mls --mode nowrap
   python .../test_wasp_mls_regression.py --compile-only
 """
@@ -70,6 +74,7 @@ def gemm_config(
     wdra: bool,
     load_warps: Optional[int] = None,
     mma_warps: Optional[int] = None,
+    num_stages: int = 2,
 ) -> dict:
     """Launch/options for GEMM.
 
@@ -77,7 +82,8 @@ def gemm_config(
     num_warps after WS). WASP off: must use plain num_warps and must not pass
     wasp_num_*; WDRA requires WASP.
 
-    Defaults: wasp 4+4; wdra OnePTwoC 4+8; pass load/mma=8 for TwoPTwoC 8+8.
+    Under WASP, num_stages is the LDS buffer depth (2 or 4). Defaults: wasp
+    4+4; wdra OnePTwoC 4+8; pass load/mma=8 for TwoPTwoC 8+8.
     """
     if wdra and not wasp:
         raise ValueError("wdra requires wasp=True")
@@ -95,6 +101,7 @@ def gemm_config(
         "WARP_SPECIALIZE": wasp,
         "wasp_enabled": wasp,
         "wdra_enabled": wdra,
+        "num_stages": num_stages,
     }
     if wasp:
         cfg.update(
@@ -139,7 +146,8 @@ def fa_config(
         "BLOCK_M": block,
         "BLOCK_N": block,
         "pre_load_v": False,
-        "num_stages": 1,
+        # WASP LDS depth must be 2 or 4 (compiler validates when wasp_enabled).
+        "num_stages": 2,
         "wasp_enabled": wasp,
         "wdra_enabled": wdra,
     }
@@ -299,8 +307,8 @@ def gemm_mls_kernel(
 
 def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
              load_warps: Optional[int] = None, mma_warps: Optional[int] = None,
-             compile_only: bool = False, shape=(128, 128, 4096),
-             fixed_ab: bool = False) -> None:
+             num_stages: int = 2, compile_only: bool = False,
+             shape=(128, 128, 4096), fixed_ab: bool = False) -> None:
     M, N, K = shape
     torch.manual_seed(0)
     if fixed_ab:
@@ -315,7 +323,8 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
     a_dev, b_dev = a.to("cuda"), b.to("cuda")
     c = torch.empty((M, N), device="cuda", dtype=torch.float16)
     config = gemm_config(
-        wasp=wasp, wdra=wdra, load_warps=load_warps, mma_warps=mma_warps
+        wasp=wasp, wdra=wdra, load_warps=load_warps, mma_warps=mma_warps,
+        num_stages=num_stages,
     )
     kernel = gemm_mls_kernel if use_mls else gemm_load_kernel
     grid = lambda META: (
@@ -363,7 +372,11 @@ def run_fa(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
 # ---------------------------------------------------------------------------
 
 # Cases known not yet supported (tracked separately from hard failures).
-KNOWN_XFAIL: set[str] = set()
+KNOWN_XFAIL: set[str] = {
+    # WDRA OnePTwoC + MLS + stages=4 hits MlsOpToLLVM convertLayoutMultiTilesPerWarp
+    # assert totalElemsMfma == totalElemsMls (A is sliced to 32x64 under WDRA).
+    "gemm/mls/wdra4+8/ns4",
+}
 
 # Default GEMM problem size.
 DEFAULT_GEMM_SHAPE = (128, 128, 4096)
@@ -390,51 +403,65 @@ class Case:
     mma_warps: int
     run: Callable[[bool], None]
     shape: Optional[tuple] = None  # GEMM only; None => DEFAULT_GEMM_SHAPE
+    num_stages: int = 2
 
     @property
     def xfail(self) -> bool:
         return self.name in KNOWN_XFAIL
 
 
-def _mode_tag(wasp: bool, wdra: bool, load_warps: int, mma_warps: int) -> str:
+def _mode_tag(wasp: bool, wdra: bool, load_warps: int, mma_warps: int,
+              num_stages: int = 2) -> str:
     if not wasp:
         return "nowrap"
     if not wdra:
-        return f"wasp{load_warps}+{mma_warps}"
-    return f"wdra{load_warps}+{mma_warps}"
+        tag = f"wasp{load_warps}+{mma_warps}"
+    else:
+        tag = f"wdra{load_warps}+{mma_warps}"
+    if num_stages != 2:
+        tag = f"{tag}/ns{num_stages}"
+    return tag
 
 
 def all_cases(*, include_nowrap: bool = False) -> List[Case]:
     """Default matrix is wasp/wdra only; nowrap is opt-in via --mode nowrap.
 
-    Mode tuple: (wasp, wdra, load_warps, mma_warps).
+    Mode tuple: (wasp, wdra, load_warps, mma_warps, num_stages).
     GEMM also covers TwoPTwoC wdra 8+8; its tt.load case uses the known-green
-    K=512 workaround. FA stays on 4+4 / 4+8 for now.
+    K=512 workaround. FA stays on 4+4 / 4+8 for now. Extra GEMM coverage:
+    wdra4+8 with num_stages=4 (TwoPTwoC cannot use stages=4).
     """
     cases: List[Case] = []
+    # (wasp, wdra, load_warps, mma_warps, num_stages)
     modes = [
-        (True, False, 4, 4),   # wasp4+4
-        (True, True, 4, 8),    # wdra4+8 OnePTwoC
-        (True, True, 8, 8),    # wdra8+8 TwoPTwoC (GEMM only below)
+        (True, False, 4, 4, 2),   # wasp4+4
+        (True, True, 4, 8, 2),    # wdra4+8 OnePTwoC
+        (True, True, 8, 8, 2),    # wdra8+8 TwoPTwoC (GEMM only below)
+        (True, True, 4, 8, 4),    # wdra4+8 num_stages=4 (GEMM only below)
     ]
     if include_nowrap:
-        modes = [(False, False, 0, 0)]
+        modes = [(False, False, 0, 0, 2)]
     for kind in ("gemm", "fa"):
         for use_mls in (False, True):
-            for wasp, wdra, load_w, mma_w in modes:
+            for wasp, wdra, load_w, mma_w, nstages in modes:
                 if kind == "fa" and not wasp:
                     continue  # FA nowrap not supported yet
                 if kind == "fa" and wdra and load_w >= 8:
                     continue  # FA TwoPTwoC not in default matrix yet
+                if kind == "fa" and nstages != 2:
+                    continue  # FA stages=4 not in default matrix yet
+                if wdra and load_w >= 8 and nstages == 4:
+                    continue  # TwoPTwoC + stages=4 exceeds abarrier budget
                 load = "mls" if use_mls else "load"
-                name = f"{kind}/{load}/{_mode_tag(wasp, wdra, load_w, mma_w)}"
+                name = f"{kind}/{load}/{_mode_tag(wasp, wdra, load_w, mma_w, nstages)}"
                 shape = DEFAULT_GEMM_SHAPE
                 if kind == "gemm" and wdra and load_w >= 8 and not use_mls:
                     shape = WDRA88_LOAD_GEMM_SHAPE
                 if kind == "gemm":
-                    runner = lambda co, mls=use_mls, wp=wasp, w=wdra, lw=load_w, mw=mma_w, sh=shape: run_gemm(
+                    runner = lambda co, mls=use_mls, wp=wasp, w=wdra, lw=load_w, mw=mma_w, ns=nstages, sh=shape: run_gemm(
                         use_mls=mls, wasp=wp, wdra=w, load_warps=lw or None,
-                        mma_warps=mw or None, compile_only=co, shape=sh,
+                        mma_warps=mw or None, num_stages=ns, compile_only=co,
+                        shape=sh,
                     )
                 else:
                     runner = lambda co, mls=use_mls, wp=wasp, w=wdra, lw=load_w, mw=mma_w: run_fa(
@@ -444,6 +471,7 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
                 cases.append(Case(
                     name=name, kind=kind, use_mls=use_mls, wasp=wasp, wdra=wdra,
                     load_warps=load_w, mma_warps=mma_w, run=runner, shape=shape,
+                    num_stages=nstages,
                 ))
     return cases
 
@@ -467,6 +495,8 @@ def filter_cases(cases: List[Case], args: argparse.Namespace) -> List[Case]:
         out = [c for c in out if c.wdra and c.load_warps == 8 and c.mma_warps == 8]
     elif args.mode == "nowrap":
         out = [c for c in out if not c.wasp]
+    if args.num_stages is not None:
+        out = [c for c in out if c.num_stages == args.num_stages]
     return out
 
 
@@ -479,6 +509,13 @@ def main() -> int:
         choices=["wasp", "wdra", "wdra88", "nowrap", "all"],
         default="all",
         help="wasp=4+4; wdra=4+8; wdra88=8+8 TwoPTwoC; nowrap=no WASP (GEMM only)",
+    )
+    parser.add_argument(
+        "--num-stages",
+        type=int,
+        choices=[2, 4],
+        default=None,
+        help="filter by WASP LDS buffer depth (default: all)",
     )
     g = parser.add_mutually_exclusive_group()
     g.add_argument("--mls", dest="mls", action="store_true", default=None,
@@ -531,6 +568,7 @@ def main() -> int:
                     wdra=c.wdra,
                     load_warps=c.load_warps or None,
                     mma_warps=c.mma_warps or None,
+                    num_stages=c.num_stages,
                     compile_only=args.compile_only,
                     shape=c.shape or DEFAULT_GEMM_SHAPE,
                     fixed_ab=True,

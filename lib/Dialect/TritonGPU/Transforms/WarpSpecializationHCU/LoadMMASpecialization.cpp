@@ -515,13 +515,38 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
   StageCluster stageCluster = getStageCluster(firstLoad->loadOp);
   auto intCst = [&](int value) { return b.create<arith::ConstantIntOp>(value, 32); };
 
-  // Helper: pick stage bar id from a per-pair contiguous [s0, s1, ...] slice.
+  // Helper: pick stage bar id from a per-pair [s0, s1, ...] slice.
+  // Prefer base + index*stride when IDs form an arithmetic progression (the
+  // common case from contiguous allocateIds); otherwise fall back to an N-way
+  // select chain so holes in the ID space stay correct.
   auto selectStageBarId = [&](ArrayRef<int> pairBarIds) -> Value {
+    assert(!pairBarIds.empty() && "expected at least one stage bar id");
+    if (pairBarIds.size() == 1)
+      return intCst(pairBarIds.front());
+
+    int stride = pairBarIds[1] - pairBarIds[0];
+    bool isAP = true;
+    for (size_t i = 2; i < pairBarIds.size(); ++i) {
+      if (pairBarIds[i] - pairBarIds[i - 1] != stride) {
+        isAP = false;
+        break;
+      }
+    }
+    if (isAP) {
+      Value offset = index;
+      if (stride != 1)
+        offset = b.create<arith::MulIOp>(index, intCst(stride));
+      if (pairBarIds[0] == 0)
+        return offset;
+      return b.create<arith::AddIOp>(intCst(pairBarIds[0]), offset);
+    }
+
     Value cur = intCst(pairBarIds.back());
-    Value isFirstStage =
-        b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index, intCst(0));
-    cur = b.create<arith::SelectOp>(isFirstStage, intCst(pairBarIds.front()),
-                                    cur);
+    for (int i = static_cast<int>(pairBarIds.size()) - 2; i >= 0; --i) {
+      Value cond = b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index,
+                                           intCst(i));
+      cur = b.create<arith::SelectOp>(cond, intCst(pairBarIds[i]), cur);
+    }
     return cur;
   };
 
@@ -659,13 +684,7 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
     ArrayRef<int> pairReady(readyBarIds.data() + pair * numStagesStored,
                             numStagesStored);
     b.setInsertionPoint(lastLoadAndStore);
-    Value curReadyBarId = intCst(pairReady.back());
-    for (int i = static_cast<int>(pairReady.size()) - 2; i >= 0; --i) {
-      Value cond = b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, index,
-                                           intCst(i));
-      curReadyBarId =
-          b.create<arith::SelectOp>(cond, intCst(pairReady[i]), curReadyBarId);
-    }
+    Value curReadyBarId = selectStageBarId(pairReady);
     b.setInsertionPointAfter(lastLoadAndStore);
     auto readyArrive = b.createInto<ROCDL::HCUAbarrierArriveOp>(
         loadPartition, stageCluster, curReadyBarId, 1);
