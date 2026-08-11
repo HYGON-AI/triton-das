@@ -104,6 +104,8 @@ HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch) {
                                   HCUISAFeature::MLS|HCUISAFeature::CVT_FP8F32;
   HCUISAFeature commonFeatures2 = HCUISAFeature::MMAC_FP6FP4 | HCUISAFeature::MLS_FP6FP4;
   HCUISAFeature commonFeatures3 = HCUISAFeature::MMAC_SCALE | HCUISAFeature::MLS_B4;
+  HCUISAFeature acc16Features =
+      HCUISAFeature::MMAC_ACC_FP16 | HCUISAFeature::MMAC_ACC_BF16;
   static const llvm::DenseMap<llvm::AMDGPU::GPUKind, HCUISAFeature> hcuIsaFeatures = {
     {llvm::AMDGPU::GK_GFX928, HCUISAFeature::MMAC_F32_K8 },
     {llvm::AMDGPU::GK_GFX936, HCUISAFeature::MMAC_F32_K8 },
@@ -111,7 +113,7 @@ HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch) {
     {llvm::AMDGPU::GK_GFX92A, (~HCUISAFeature::MMAC_LAYOUT & commonFeatures1) | commonFeatures2 },
     // gfx946: packed FP8<->FP16/BF16 via V_CVT_SCALE_PK_*; no F32 K8.
     {llvm::AMDGPU::GK_GFX946,
-     commonFeatures1 | commonFeatures2 | commonFeatures3 |
+     commonFeatures1 | commonFeatures2 | commonFeatures3 | acc16Features |
          HCUISAFeature::CVT_SCALE_PK},
   };
 

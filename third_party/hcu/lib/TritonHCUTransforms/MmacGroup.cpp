@@ -61,12 +61,15 @@ MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
   bool cETIsI8 = isa<IntegerType>(aET) && isa<IntegerType>(bET) &&
                  cast<IntegerType>(aET).getWidth() == 8 &&
                  cast<IntegerType>(bET).getWidth() == 8;
+  bool cETIsF64 = aET.isF64() && bET.isF64();
   bool cETIsFP16 = features & HCUISAFeature::MMAC_ACC_FP16;
   bool cETIsBF16 = features & HCUISAFeature::MMAC_ACC_BF16;
-  auto cETID = cETIsI8 ? b.getI32Type().getTypeID() :
-              cETIsFP16 ? b.getType<Float16Type>().getTypeID() :
-              cETIsBF16 ? b.getType<BFloat16Type>().getTypeID() :
-              b.getType<Float32Type>().getTypeID();
+  auto cETID = cETIsI8 ? b.getI32Type().getTypeID()
+               : cETIsF64   ? b.getF64Type().getTypeID()
+               : cETIsFP16
+                   ? b.getType<Float16Type>().getTypeID()
+               : cETIsBF16 ? b.getType<BFloat16Type>().getTypeID()
+                            : b.getType<Float32Type>().getTypeID();
   return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID(), cETID};
 }
 
@@ -209,10 +212,22 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       // f16 inputs
       // mmac_f32_16x16x16xf16
       TRITON_MMAC_v3to4(16, 16, f16T, f16T, f32T, mmac_f32_16x16x16f16, 16, 4),
+      // mmac_f16_16x16x16f16
+      TRITON_MMAC_v(4, 16, 16, f16T, f16T, f16T, mmac_f16_16x16x16f16, 16, 4),
+      // mmac_bf16_16x16x16f16
+      TRITON_MMAC_v(4, 16, 16, f16T, f16T, bf16T, mmac_bf16_16x16x16f16, 16, 4),
+
+      // f64 inputs
+      // mmac_f64_16x16x4f64
+      TRITON_MMAC_v(4, 16, 16, f64T, f64T, f64T, mmac_f64_16x16x4f64, 4, 1),
 
       // bf16 inputs
       // mmac_f32_16x16x16xbf16
       TRITON_MMAC_v3to4(16, 16, bf16T, bf16T, f32T, mmac_f32_16x16x16bf16, 16, 4),
+      // mmac_f16_16x16x16bf16
+      TRITON_MMAC_v(4, 16, 16, bf16T, bf16T, f16T, mmac_f16_16x16x16bf16, 16, 4),
+      // mmac_bf16_16x16x16bf16
+      TRITON_MMAC_v(4, 16, 16, bf16T, bf16T, bf16T, mmac_bf16_16x16x16bf16, 16, 4),
 
       // int8 inputs
       // mmac_i32_16x16x32i8

@@ -1488,8 +1488,9 @@ LogicalResult AMDMfmaEncodingAttr::verify(
                        << nDim << ")";
   }
 
-  if (!(elementBitWidth == 32 || elementBitWidth == 64))
-    return emitError() << "elementBitWidth must be 32 or 64";
+  if (!(elementBitWidth == 16 || elementBitWidth == 32 ||
+        elementBitWidth == 64))
+    return emitError() << "elementBitWidth must be 16, 32, or 64";
 
   return success();
 }

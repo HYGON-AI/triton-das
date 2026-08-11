@@ -97,10 +97,12 @@ struct DotOpMFMAConversionHelper {
         mmacLayout == MmacLayout::INTERLEAVE_TRANSPOSE;
     Value ltsFlag = isMmacLTS ? b.true_val() : b.false_val();
     Value litFlag = isMmacLIT ? b.true_val() : b.false_val();
-    if (intrinsicName.compare("rocdl.mmac.16x16x4.f32") == 0) {
+    if (intrinsicName.compare("rocdl.mmac.16x16x4.f32") == 0 ||
+        intrinsicName.compare("rocdl.mmac.16x16x4.f64") == 0) {
       loweredOp.addOperands({valA, valB, valC, i32Flag, ltsFlag});
     } else if (intrinsicName.compare("rocdl.mmac.16x16x8.f32") == 0 ||
                intrinsicName.compare("rocdl.mmac.f32.16x16x16.f16") == 0 ||
+               intrinsicName.compare("rocdl.mmac.16x16x16.f16") == 0 ||
                intrinsicName.compare("rocdl.mmac.f32.16x16x16.bf16") == 0 ||
                intrinsicName.compare("rocdl.mmac.f32.16x16x32.bf8.bf8") == 0 ||
                intrinsicName.compare("rocdl.mmac.f32.16x16x32.bf8.fp8") == 0 ||
@@ -112,6 +114,21 @@ struct DotOpMFMAConversionHelper {
       Value valAi32 = b.bitcast(valA, v2i32Ty);
       Value valBi32 = b.bitcast(valB, v2i32Ty);
       loweredOp.addOperands({valAi32, valBi32, valC, litFlag, ltsFlag});
+    } else if (intrinsicName.compare("rocdl.mmac.bf16.16x16x16.f16") == 0 ||
+               intrinsicName.compare("rocdl.mmac.f16.16x16x16.bf16") == 0 ||
+               intrinsicName.compare("rocdl.mmac.16x16x16.bf16") == 0) {
+      auto toI16Vec = [&](Value v) -> Value {
+        auto vt = dyn_cast<VectorType>(v.getType());
+        if (!vt || !vt.getElementType().isBF16())
+          return v;
+        return b.bitcast(v, vec_ty(i16_ty, vt.getNumElements()));
+      };
+      Value ai = toI16Vec(valA), bi = toI16Vec(valB), ci = toI16Vec(valC);
+      OperationState bf16Op(loc, intrinsicName);
+      bf16Op.addTypes(ci.getType());
+      bf16Op.addOperands({ai, bi, ci, litFlag, ltsFlag});
+      Value raw = rewriter.create(bf16Op)->getResult(0);
+      return raw.getType() == resType ? raw : b.bitcast(raw, resType);
     }else if (intrinsicName.compare("rocdl.mmac.i32.16x16x32.i8") == 0 ||
                intrinsicName.compare("rocdl.mmac.i32.16x16x32.u8") == 0) {
       loweredOp.addOperands({valA, valB, valC, litFlag, i1Flag, ltsFlag});
@@ -289,10 +306,17 @@ struct DotOpMFMAConversionHelper {
     bool capFP8 = isa<mlir::FloatType>(aTensorTy.getElementType()) &&
                   aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
     StringRef intrinsicName;
+    HCUISAFeature intrinsicFeatures =
+        capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE;
+    Type elemTyD = dTensorTy.getElementType();
+    if (elemTyD.isF16())
+      intrinsicFeatures = intrinsicFeatures | HCUISAFeature::MMAC_ACC_FP16;
+    else if (elemTyD.isBF16())
+      intrinsicFeatures = intrinsicFeatures | HCUISAFeature::MMAC_ACC_BF16;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         op.getLoc(), mfmaVersion, mDim, nDim, kDim, elemTyA, elemTyB,
         /*withScale=*/false, allowXF32,
-        capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE);
+        intrinsicFeatures);
     if (failed(maybeMfmaIntrinsic))
       return op.emitError(
           "no matching matrix core intrinsic due to unsupported element type");

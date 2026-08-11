@@ -1059,6 +1059,10 @@ public:
       mfmaAccType = rewriter.getIntegerType(32);
     else if (oldRetType.getElementType().isF64())
       mfmaAccType = rewriter.getF64Type();
+    else if (oldRetType.getElementType().isF16())
+      mfmaAccType = rewriter.getF16Type();
+    else if (oldRetType.getElementType().isBF16())
+      mfmaAccType = rewriter.getBF16Type();
     else
       mfmaAccType = rewriter.getF32Type();
     // HCU MMAC only supports 16x16 instructions (no 4x64/64x4/32x32),
@@ -1089,6 +1093,11 @@ public:
                   isTransposed,
                   (features & HCUISAFeature::MMAC_LAYOUT) != 0)
             : mmacLayout;
+    if (aElemTy.isF64() && mDim == 16 && nDim == 16 && kDim == 4) {
+      // The current layout preserves rows but orders columns incorrectly for
+      // this F64 MMAC shape; temporarily use legacy.
+      effectiveMmacLayout = MmacLayout::LEGACY;
+    }
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(), /*verison=*/mfmaVersion, warpsPerTile,
         {mDim, nDim, kDim}, /*isTransposed=*/false, CTALayout,

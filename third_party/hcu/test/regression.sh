@@ -31,6 +31,7 @@ pytest_cases=(
   "${hcu_file_path}/test_amdgpu_max_memory_cluster_amdgcn.py"
   # WASP/WDRA IR shape: lit test/TritonGPU/hcu/hcu-gemm-wasp-wdra.mlir
   # Runtime matrix: test_wasp_mls_regression.py (run separately / via launch.sh)
+  "${hcu_file_path}/test_mmac_instructions.py"
 )
 
 pytest_args=()
