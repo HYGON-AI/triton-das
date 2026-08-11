@@ -328,13 +328,22 @@ class TritonSemantic(Generic[TensorTy]):
         if not input_scalar_ty.is_floating() or not other_scalar_ty.is_floating():
             raise TypeError("both operands of fdiv must have floating scalar type")
         input, other = self.binary_op_type_checking_impl(input, other, False, False, False, True)
-        if ieee_rounding:
-            # precise IEEE division (rounding to nearest)
-            ret = self.builder.create_fdiv(input.handle, other.handle)
-        else:
-            # fast (approximate) division: afn|arcp -> LLVM lowers to
-            # v_rcp_f32 + v_mul_f32 on AMDGPU (relative error ~1 ulp)
-            ret = self.builder.create_fdiv_fast(input.handle, other.handle)
+        # `ieee_rounding` is accepted for API compatibility but does not
+        # change the result: tl.fdiv always performs IEEE division. The fast
+        # approximate path is only reachable through tl.fdiv_fast.
+        ret = self.builder.create_fdiv(input.handle, other.handle)
+        return self.tensor(ret, input.type)
+
+    def fdiv_fast(self, input: TensorTy | numbers.Number, other: TensorTy | numbers.Number) -> TensorTy:
+        input_scalar_ty = input.type.scalar
+        other_scalar_ty = other.type.scalar
+        if not input_scalar_ty.is_floating() or not other_scalar_ty.is_floating():
+            raise TypeError("both operands of fdiv_fast must have floating scalar type")
+        input, other = self.binary_op_type_checking_impl(input, other, False, False, False, True)
+        # afn flag -> the HCU FDivOpConversion emits llvm.amdgcn.fdiv.fast for
+        # fp32 (2.5 ulp, denormal inputs flushed); AMD and other dtypes keep
+        # the baseline IEEE division.
+        ret = self.builder.create_fdiv_fast(input.handle, other.handle)
         return self.tensor(ret, input.type)
 
     def mod(self, input: TensorTy | numbers.Number, other: TensorTy | numbers.Number) -> TensorTy:

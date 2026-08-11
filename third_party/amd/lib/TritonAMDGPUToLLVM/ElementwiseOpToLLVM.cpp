@@ -1,7 +1,6 @@
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TargetInfo.h"
 #include "Utility.h"
-#include "mlir/Conversion/ArithCommon/AttrToLLVMConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -1893,10 +1892,9 @@ struct FDivOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
-    auto fastmath =
-        mlir::arith::convertArithFastMathFlagsToLLVM(op.getFastmath());
+
     return {LLVM::FDivOp::create(rewriter, loc, elemTy, operands[0][0],
-                                 operands[0][1], fastmath)};
+                                 operands[0][1])};
   }
 };
 

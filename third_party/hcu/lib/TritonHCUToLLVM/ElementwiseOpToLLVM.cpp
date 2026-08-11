@@ -2270,13 +2270,20 @@ struct FDivOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
-    // Carry the arith fastmath flags (e.g. `arcp` set by the frontend for
-    // regular `/`) through to LLVM so the AMDGPU backend can lower fp32 fdiv
-    // to v_rcp_f32 + v_mul_f32 instead of the full Newton-Raphson sequence.
-    auto fastmath =
-        mlir::arith::convertArithFastMathFlagsToLLVM(op.getFastmath());
+    // Fastmath present (tl.fdiv_fast -> create_fdiv_fast): lower fp32 division
+    // to llvm.amdgcn.fdiv.fast (AMD's 2.5 ulp fast division; denormal inputs
+    // are flushed to zero) and return.
+    if (mlir::arith::bitEnumContainsAny(
+            op.getFastmath(), mlir::arith::FastMathFlags::afn)) {
+      if (elemTy.isF32()) {
+        return {LLVM::createLLVMIntrinsicCallOp(
+                    rewriter, loc, "llvm.amdgcn.fdiv.fast", elemTy,
+                    ValueRange{operands[0][0], operands[0][1]})
+                    ->getResult(0)};
+      }
+    }
     return {rewriter.create<LLVM::FDivOp>(loc, elemTy, operands[0][0],
-                                          operands[0][1], fastmath)};
+                                          operands[0][1])};
   }
 };
 

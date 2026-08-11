@@ -200,6 +200,27 @@ def fdiv(x, y, ieee_rounding=False, _semantic=None):
     return _semantic.fdiv(x, y, ieee_rounding)
 
 
+# tl.fdiv_fast: fast approximate fp32 division (HCU only).
+#
+# * HCU lowers this to llvm.amdgcn.fdiv.fast (~2.5 ulp, v_rcp_f32-based),
+#   which is NOT bit-exact vs IEEE division;
+# * denormal inputs are flushed to zero (FTZ): 1/denorm -> inf,
+#   0/denorm -> NaN, denorm/denorm -> inf; denormal results carry a hardware
+#   guard (e.g. max/max and 1/max are preserved), but that is not a general
+#   contract;
+# * +/-0, +/-inf and NaN keep IEEE special-value semantics;
+# * AMD and non-fp32 dtypes fall back to the baseline IEEE division.
+#
+# Use tl.fdiv or tl.math.div_rn when exact IEEE 754 division or denormal
+# handling is required.
+@core.builtin
+@_add_math_2arg_docstr("approximate fast division (2.5 ulp; denormal inputs are flushed to zero)")
+def fdiv_fast(x, y, _semantic=None):
+    x = _semantic.to_tensor(x)
+    y = _semantic.to_tensor(y)
+    return _semantic.fdiv_fast(x, y)
+
+
 @core.builtin
 @_check_dtype(dtypes=["fp32"])
 @_add_math_2arg_docstr("precise division (rounding to nearest wrt the IEEE standard)")

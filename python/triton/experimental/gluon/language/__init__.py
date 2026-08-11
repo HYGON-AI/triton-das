@@ -114,6 +114,7 @@ from ._math import (
     sqrt_rn,
     abs,
     fdiv,
+    fdiv_fast,
     div_rn,
     erf,
     floor,
