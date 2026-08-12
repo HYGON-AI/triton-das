@@ -264,7 +264,12 @@ class DependencyRewriter {
 public:
   DependencyRewriter(WarpSchedule &schedule, scf::ForOp &loop)
       : schedule(schedule), loop(loop), b(loop.getLoc(), loop),
-        endBuilder(loop.getLoc(), loop->getNextNode()) {}
+        // Place abarrier.inv after epilogue stores (before the block
+        // terminator). ConvertWarpSpecialize then inserts ebarrier before the
+        // earliest inv, yielding: store -> ebarrier_sync -> abarrier.inv.
+        // Using loop->getNextNode() would put inv before the epilogue and
+        // serialize C store behind the WG rendezvous.
+        endBuilder(loop.getLoc(), loop->getBlock()->getTerminator()) {}
 
   // Partition the loop.
   LogicalResult run();
@@ -438,7 +443,6 @@ LogicalResult DependencyRewriter::run() {
 
       // Allocate buffers for the value and its associated barriers.
       b.setLoc(output.getLoc());
-      ImplicitLocOpBuilder endBuilder(b.getLoc(), loop->getNextNode());
       AsyncRef aref =
           allocateAsyncValue(tensorType, multiplicitySize, maxDistance);
 

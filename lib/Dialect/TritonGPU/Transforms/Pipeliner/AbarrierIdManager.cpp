@@ -110,6 +110,11 @@ void mlir::triton::createAbarrier(scf::ForOp forOp, int barId, int arriveCount) 
 
   rewriter.create<ROCDL::HCUAbarrierInitOp>(forOp.getLoc(), barId, arriveCount);
 
-  rewriter.setInsertionPointAfter(forOp);
+  // Invalidate after the epilogue (C store), not immediately after the K-loop.
+  // ConvertWarpSpecialize inserts ebarrier before the earliest inv, so this
+  // yields: store -> ebarrier_sync -> abarrier.inv (overlap store with the
+  // load-partition rendezvous). setInsertionPointAfter(forOp) would put inv
+  // before the epilogue and serialize store behind that sync.
+  rewriter.setInsertionPoint(forOp->getBlock()->getTerminator());
   rewriter.create<ROCDL::HCUAbarrierInvOp>(barId);
 }

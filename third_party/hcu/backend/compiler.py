@@ -561,6 +561,19 @@ class HIPBackend(BaseBackend):
                      b.get_bool_attr(bool(options.empty_arrive_after_mmac)))
         mod.set_attr("hcu.sched_barrier_between_a_b_loads",
                      b.get_bool_attr(mmac_cluster_on))
+        # Publish WDRA topology early so MlsEncodingInsertion can pick full-tile
+        # MLS for OnePTwoC (vs half-tile for TwoPTwoC). AWS re-sets the same attr.
+        if options.wasp_enabled and options.wdra_enabled:
+            load_w = int(options.wasp_num_load_warps or 4)
+            mma_w = int(options.wasp_num_mma_warps or 4)
+            # WdraTopoKind: None=0, OnePTwoC=1, TwoPTwoC=2
+            if load_w >= 8:
+                topo_kind = 2
+            elif mma_w >= 8:
+                topo_kind = 1
+            else:
+                topo_kind = 0
+            mod.set_attr("hcu.wdra_topo", b.get_int32_attr(topo_kind))
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         emuTF32 = False

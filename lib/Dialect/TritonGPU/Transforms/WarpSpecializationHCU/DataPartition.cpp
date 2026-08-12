@@ -334,12 +334,16 @@ static bool getBackwardSliceToPartition(Value v,
                                         DataPartitionScheme &partitionScheme,
                                         unsigned currentDim);
 
-// MLS LDS addressing is paired with ds_read_matrix; memdesc_subslice on
-// mls_shared is invalid.
+// MLS LDS addressing is paired with ds_read_matrix.
 //
-// Only the *partitioned* dot operand (A on M-split, B on N-split) needs a
-// per-consumer matrix_load_to_local + LocalAlloc. The other operand stays a
-// shared full-tile MLS write that every WDRA consumer reads.
+// OnePTwoC (!producerSliced): both dot operands use one full-tile
+// matrix_load_to_local + LocalAlloc. The partitioned operand's MMA consumers
+// take an M/N half via memdesc_subslice on LocalLoad (same pattern as
+// swizzled OnePTwoC). MlsOpToLLVM must honor allocShape + subslice offsets.
+//
+// TwoPTwoC (producerSliced): the partitioned operand still gets per-consumer
+// half-tile MLS write + LocalAlloc; the shared operand stays one full-tile
+// MLS write.
 static bool isMlsSharedEncoding(Attribute encoding) {
   return isa_and_nonnull<AMDMlsSharedEncodingAttr>(encoding);
 }
@@ -1356,9 +1360,9 @@ static void rewriteRematerializedOps(triton::FuncOp &funcOp,
             shape, memdescType.getElementType(), memdescType.getEncoding(),
             memdescType.getMemorySpace(), memdescType.getMutableMemory(),
             allocShape);
-        // MLS: never memdesc_subslice — clone a dedicated alloc with the sliced
-        // shape so each rematerialized dim owns a matched MLS LDS buffer.
-        if (isMlsSharedMemDesc(memdescType)) {
+        // TwoPTwoC MLS: clone a dedicated half-tile alloc (matched write/read).
+        // OnePTwoC MLS / swizzled: memdesc_subslice keeping full allocShape.
+        if (isMlsSharedMemDesc(memdescType) && partitionScheme.producerSliced) {
           auto clonedTy = MemDescType::get(
               shape, memdescType.getElementType(), memdescType.getEncoding(),
               memdescType.getMemorySpace(), memdescType.getMutableMemory());
@@ -1528,11 +1532,12 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
 
   // slice operands first
   Operation *newOp;
-  // Shared full-tile MLS (non-partitioned dot operand, e.g. B on M-split):
-  // keep the original alloc / stage view. The matrix_load itself must still be
-  // *cloned* (see MatrixLoadToLocal noOp path) so it survives scf.for takeBody
-  // into the sliced loop — identity-mapping the write drops it from load.
-  if (dim == DataPartitionScheme::noOpPartitionDim) {
+  // Full-tile MLS alloc / stage view: identity-map so producer stays one
+  // shared buffer. Applies to the non-partitioned operand always, and to the
+  // partitioned operand under OnePTwoC (!producerSliced). The matrix_load must
+  // still be *cloned* (sharedMlsClones) so it survives scf.for takeBody.
+  if (dim == DataPartitionScheme::noOpPartitionDim ||
+      !partitionScheme.producerSliced) {
     if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
       if (!allocOp.getSrc() && isMlsSharedMemDesc(allocOp.getType())) {
         mapOpIdentity(op, mappings, reverseMappings);
@@ -1561,9 +1566,8 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     //   OnePTwoC: shared by load (full tile) and MMA (M-sliced via subslice).
     //   TwoPTwoC: slice the producer alloc so each Load/MMA pair owns a half.
     //
-    // MLS partitioned operand (A on M-split): each consumer gets a dedicated
-    // alloc + matrix_load_to_local. The non-partitioned operand is handled
-    // above via noOpPartitionDim identity map.
+    // MLS TwoPTwoC partitioned operand: each consumer gets a dedicated half
+    // alloc (below). OnePTwoC MLS allocs are identity-mapped above.
     if (!allocOp.getSrc() && !isMlsSharedMemDesc(allocOp.getType())) {
       // OnePTwoC: keep full-tile buffer; MMA uses memdesc_subslice on LocalLoad.
       // TwoPTwoC: slice the alloc itself (MLS-style) so Load and MMA share a
@@ -1621,11 +1625,10 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     if (!allocOp.getSrc() && isMlsSharedMemDesc(allocOp.getType())) {
-      // MLS alloc is written by load-partition matrix_load_to_local — keep
-      // original partition/async attrs rather than MMA sliceTaskIds.
-      // Offset 0: retype the original in place (avoids a full-tile orphan
-      // alloc that still gets captured/dealloc'd and inflates LDS).
-      // Offset 1+: clone the already-sliced shape (do not divide again).
+      // TwoPTwoC MLS only (OnePTwoC already identity-mapped above).
+      // Offset 0: retype the original in place; offset 1+: clone half shape.
+      assert(partitionScheme.producerSliced &&
+             "OnePTwoC MLS alloc should have been identity-mapped");
       auto origTaskIds = hcu::getAsyncTaskIdsFromAttr(op);
       builder.setAsynTaskIdsFromArray(origTaskIds);
       if (dim != DataPartitionScheme::noOpPartitionDim && offset == 0) {
@@ -1844,20 +1847,27 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       // For LocalAlloc with a tensor src (FA P), recurse so the producer
       // chain is sliced and the cloned alloc is used directly.
       //
-      // MLS partitioned operand: never memdesc_subslice; slice the producer
-      // chain so each consumer owns a matched write+read pair. Shared MLS
-      // operand (noOp) identity-maps the producer above / via sliceOp(src).
+      // MLS:
+      //   OnePTwoC partitioned: memdesc_subslice on the full-tile producer
+      //     (same as swizzled OnePTwoC).
+      //   TwoPTwoC / shared noOp MLS: follow the producer via sliceOp(src).
       Value src = localLdOp.getSrc();
       Operation *srcDef = src.getDefiningOp();
       auto srcAlloc = dyn_cast_or_null<LocalAllocOp>(srcDef);
       bool sliceSrcAlloc = srcAlloc && srcAlloc.getSrc();
       bool isMls = isMlsSharedValue(src);
       // TwoPTwoC swizzled: producer alloc is already half-tile — follow it
-      // like MLS instead of layering memdesc_subslice on a full tile.
+      // instead of layering memdesc_subslice on a full tile.
       bool followSlicedProducer =
           partitionScheme.producerSliced &&
           dim != DataPartitionScheme::noOpPartitionDim;
-      if (sliceSrcAlloc || isMls || followSlicedProducer) {
+      // Shared MLS (noOp) or TwoPTwoC half MLS: follow producer. OnePTwoC
+      // partitioned MLS falls through to memdesc_subslice.
+      bool followMlsProducer =
+          isMls && (partitionScheme.producerSliced ||
+                    dim == DataPartitionScheme::noOpPartitionDim);
+      if (sliceSrcAlloc || followMlsProducer ||
+          (followSlicedProducer && !isMls)) {
         sliceOp(src, offset, mappings, reverseMappings, partitionScheme);
         if (Value mappedSrc = mappings.lookupOrNull(src))
           mappings.map(localLdOp.getSrc(), mappedSrc);
@@ -1945,11 +1955,14 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
   } else if (auto tensorDescOp = dyn_cast<MakeTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
   } else if (auto mlsOp = dyn_cast<tta::MatrixLoadToLocalOp>(op)) {
-    // Partitioned operand: clone sliced MLS write per consumer.
-    // Shared (noOp) operand: clone full-tile MLS write once (reuse across
-    // consumer offsets) so the write survives for takeBody.
+    // OnePTwoC / shared (noOp): one full-tile MLS write reused across consumer
+    // offsets via sharedMlsClones.
+    // TwoPTwoC partitioned: clone sliced MLS write per consumer.
     // Keep load-partition async_task_id either way.
-    if (dim == DataPartitionScheme::noOpPartitionDim) {
+    bool shareFullTileMls =
+        dim == DataPartitionScheme::noOpPartitionDim ||
+        !partitionScheme.producerSliced;
+    if (shareFullTileMls) {
       if (Operation *existing = partitionScheme.sharedMlsClones.lookup(op)) {
         mappings.map(op, existing);
         reverseMappings.map(existing, op);
@@ -1975,9 +1988,13 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
 
     SmallVector<int32_t> newTensorShape(mlsOp.getTensorShape().begin(),
                                         mlsOp.getTensorShape().end());
-    // Shared (noOp) operand: keep full tensorShape. Partitioned: slice along dim.
+    // Shared / OnePTwoC full-tile: keep full tensorShape. TwoPTwoC partitioned:
+    // slice along dim.
     int sliceSize = 0;
-    if (dim != DataPartitionScheme::noOpPartitionDim) {
+    bool sliceMlsWrite =
+        dim != DataPartitionScheme::noOpPartitionDim &&
+        partitionScheme.producerSliced;
+    if (sliceMlsWrite) {
       assert(dim < newTensorShape.size() &&
              "MLS partition dim exceeds tensorShape rank");
       sliceSize = newTensorShape[dim] / static_cast<int>(numOfPartitions);
@@ -1990,8 +2007,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       Value mapped = mappings.lookupOrNull(idx);
       if (!mapped)
         mapped = idx;
-      if (dim != DataPartitionScheme::noOpPartitionDim &&
-          static_cast<unsigned>(i) == dim && offset != 0) {
+      if (sliceMlsWrite && static_cast<unsigned>(i) == dim && offset != 0) {
         Value offVal = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
             op->getLoc(), offset * sliceSize, 32);
         mapped = builder.createWithAsyncTaskIds<arith::AddIOp>(op->getLoc(),
@@ -2041,8 +2057,8 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       for (unsigned w : oldEnc.getWarpsPerCTA())
         oldWarps *= w;
       SmallVector<unsigned> newWarpsPerCTA;
-      if (dim == DataPartitionScheme::noOpPartitionDim) {
-        // Shared full-tile write: keep original warpsPerCTA.
+      if (shareFullTileMls) {
+        // Shared / OnePTwoC full-tile write: keep original warpsPerCTA.
         newWarpsPerCTA.assign(oldEnc.getWarpsPerCTA().begin(),
                               oldEnc.getWarpsPerCTA().end());
       } else {
@@ -2074,14 +2090,17 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     mappings.map(op->getResult(0), newMlsOp.getResult());
     reverseMappings.map(newMlsOp.getResult(), op->getResult(0));
     newOp = newMlsOp.getOperation();
-    if (dim == DataPartitionScheme::noOpPartitionDim)
+    if (shareFullTileMls)
       partitionScheme.sharedMlsClones[op] = newOp;
     // Restore builder task ids for subsequent clones in this sliceOp call.
     builder.setAsynTaskIdsFromArray(sliceTaskIds);
   } else if (isa<AsyncCommitGroupOp, AsyncWaitOp>(op)) {
     // Stay with the load-partition task ids of the original op.
-    // Shared MLS async chain: clone once (same as matrix_load).
-    if (dim == DataPartitionScheme::noOpPartitionDim) {
+    // Full-tile MLS async chain (shared B or OnePTwoC A): clone once.
+    bool shareFullTileMls =
+        dim == DataPartitionScheme::noOpPartitionDim ||
+        !partitionScheme.producerSliced;
+    if (shareFullTileMls) {
       if (Operation *existing = partitionScheme.sharedMlsClones.lookup(op)) {
         mappings.map(op, existing);
         reverseMappings.map(existing, op);
@@ -2105,17 +2124,19 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       hcu::setAsyncTaskIds(newOp, origTaskIds);
     if (auto partAttr = op->getAttr("ttg.partition"))
       newOp->setAttr("ttg.partition", partAttr);
-    if (dim == DataPartitionScheme::noOpPartitionDim)
+    if (shareFullTileMls)
       partitionScheme.sharedMlsClones[op] = newOp;
     builder.setAsynTaskIdsFromArray(sliceTaskIds);
   } else if (auto memDescIndexOp = dyn_cast<MemDescIndexOp>(op)) {
-    // Swizzled shared: keep the full stage tile; MMA takes an M-subslice later
-    // via LocalLoad's memdesc_subslice.
-    // MLS partitioned operand: parent alloc is cloned/sliced — retype the stage
-    // view. Shared (noOp) MLS stage views are identity-mapped above.
-    // Keep load-partition attrs on MLS views (written by matrix_load_to_local).
+    // Swizzled / OnePTwoC MLS: keep the full stage tile; MMA takes an M-subslice
+    // later via LocalLoad's memdesc_subslice (MLS OnePTwoC identity-mapped
+    // above).
+    // TwoPTwoC MLS partitioned: parent alloc is cloned/sliced — retype the
+    // stage view. Keep load-partition attrs on MLS views.
     Value parent = memDescIndexOp.getSrc();
     if (isMlsSharedValue(op->getResult(0))) {
+      assert(partitionScheme.producerSliced &&
+             "OnePTwoC MLS MemDescIndex should have been identity-mapped");
       // Ensure the multi-buffer LocalAlloc is sliced even if it was not in the
       // partition op set (otherwise each consumer keeps a full-tile LDS alloc).
       Operation *parentOp = parent.getDefiningOp();

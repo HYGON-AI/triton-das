@@ -882,6 +882,16 @@ LogicalResult MemDescSubsliceOp::verify() {
     }
   }
 
+  // MLS LDS is addressed by ds_read_matrix tile coords, not an affine linear
+  // layout. Skip swizzle-split LL checks; MlsOpToLLVM applies logical offsets
+  // against allocShape.
+  if (isa<AMDMlsSharedEncodingAttr>(srcEnc)) {
+    if (srcEnc != dstEnc) {
+      return emitError("MLS memdesc_subslice must preserve mls_shared encoding");
+    }
+    return success();
+  }
+
   auto ctx = getContext();
   LinearLayout ll;
   if (auto paddedEncoding = dyn_cast<PaddedSharedEncodingAttr>(srcEnc)) {

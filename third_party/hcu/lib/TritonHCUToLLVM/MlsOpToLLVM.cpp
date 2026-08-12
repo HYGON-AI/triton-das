@@ -970,20 +970,59 @@ private:
       std::swap(mlsNumReps[0], mlsNumReps[1]);
     }
 
-    // 2. compute ds_read_matrix offsets
+    // 2. compute ds_read_matrix offsets into the full parent MLS buffer
+    auto parentShape = getMlsParentMatrixShape(tensorTy);
     auto offsets = computeDsReadMatrixOffsets(rewriter, loc,
                                sharedLayout, dsInsnAttr,
                                spatialWarpId, warpsPerBlockNonK, mlsNumReps,
-                               smemObj, shape);
+                               smemObj, parentShape, shape);
     Value smemBase = smemObj.getBase();
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
 
     assert(mlsInsn->getElemBitWidth() == 16 || mlsInsn->getElemBitWidth() == 8);
-    auto dsLoadsPerK = product(dsInsnAttr.instrsPerWarp);
+    unsigned dsRepPerWarpNonK = dsInsnAttr.instrsPerWarp[nonKDimIdx2D];
+    unsigned dsRepPerWarpK = dsInsnAttr.instrsPerWarp[kDimIdx2D];
+    unsigned dsLoadsPerK = dsRepPerWarpNonK * dsRepPerWarpK;
     unsigned numOfElemsPerDsInsn =
         (dsInsnAttr.instrShape[kDimIdx2D] *
          dsInsnAttr.instrShape[nonKDimIdx2D] / iWarpSize) /
         (isB4PackedDotOperand ? 2 : 1);
+
+    // Within-tile half view of a full-tile MLS write: trim nonK ds reps and
+    // fold parent dsByteOffsets delta into the GEP (offset attr is immediate).
+    Value nonKLoadBaseVal = b.i32_val(0);
+    bool withinTileHalfView = false;
+    unsigned elemByteWidth =
+        std::max<unsigned>(1, elemTy.getIntOrFloatBitWidth() / 8);
+    {
+      auto offs = smemObj.getOffsets();
+      if (offs.size() >= 2 && parentShape.size() >= 2) {
+        unsigned offBase = offs.size() - 2;
+        int64_t viewNonK = shape[nonKDimIdx];
+        int64_t parentNonK = parentShape[nonKDimIdx];
+        if (viewNonK > 0 && parentNonK > viewNonK &&
+            parentNonK % viewNonK == 0) {
+          unsigned parts = static_cast<unsigned>(parentNonK / viewNonK);
+          if (dsRepPerWarpNonK % parts == 0) {
+            dsRepPerWarpNonK /= parts;
+            dsLoadsPerK = dsRepPerWarpNonK * dsRepPerWarpK;
+            withinTileHalfView = true;
+            nonKLoadBaseVal = b.mul(
+                b.udiv(offs[offBase + nonKDimIdx2D], b.i32_val(viewNonK)),
+                b.i32_val(dsRepPerWarpNonK));
+          }
+        }
+      }
+    }
+    auto selectDsByteOffsetUnit = [&](Value parentLoadIdxVal) -> Value {
+      Value selected = b.i32_val(dsInsnAttr.dsByteOffsets[0]);
+      for (unsigned i = 1; i < dsInsnAttr.dsByteOffsets.size(); ++i) {
+        selected =
+            b.select(b.icmp_eq(parentLoadIdxVal, b.i32_val(i)),
+                     b.i32_val(dsInsnAttr.dsByteOffsets[i]), selected);
+      }
+      return selected;
+    };
 
     // 3. create ds_read_matrix ops
     SmallVector<Value> loadedValues;
@@ -996,7 +1035,22 @@ private:
           auto loadOffset = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
           loadOffset = b.add(loadOffset, batchOffset);
           for (int loadIdx = 0; loadIdx < dsLoadsPerK; ++loadIdx) {
-            Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, loadOffset);
+            unsigned loadNonKIdx = loadIdx / dsRepPerWarpK;
+            unsigned loadKIdx = loadIdx % dsRepPerWarpK;
+            unsigned localByteOff = dsInsnAttr.dsByteOffsets[loadIdx];
+            Value gepElems = loadOffset;
+            if (withinTileHalfView) {
+              Value parentLoadIdxVal = b.add(
+                  b.mul(b.add(nonKLoadBaseVal, b.i32_val(loadNonKIdx)),
+                        b.i32_val(dsRepPerWarpK)),
+                  b.i32_val(loadKIdx));
+              Value parentByteOff = selectDsByteOffsetUnit(parentLoadIdxVal);
+              Value adjElems =
+                  b.sdiv(b.sub(parentByteOff, b.i32_val(localByteOff)),
+                         b.i32_val(elemByteWidth));
+              gepElems = b.add(loadOffset, adjElems);
+            }
+            Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, gepElems);
 
             auto dsInsnResTy = getDsReadMatrixInsnResType(loc, rewriter, tensorTy,
                                                                 dsInsnAttr,
@@ -1004,7 +1058,7 @@ private:
             Value loadedValue = generateDsReadMatrixOp(loc, rewriter, dsInsnAttr.insn,
                                                        dsInsnResTy,
                                                        loadAddress,
-                                                       dsInsnAttr.dsByteOffsets[loadIdx],
+                                                       localByteOff,
                                                        dsInsnAttr.flags);
             auto unpackedValues = unpackDsReadMatrixInsnRes(loc, rewriter, tensorTy,
                                                             dsInsnAttr,
@@ -1148,31 +1202,77 @@ private:
       std::swap(mlsNumReps[0], mlsNumReps[1]);
     }
 
-    // 2. compute ds_read_matrix offsets
+    // 2. compute ds_read_matrix offsets into the full parent MLS buffer
+    auto parentShape = getMlsParentMatrixShape(tensorTy);
     auto offsets = computeDsReadMatrixOffsets(rewriter, loc,
                                sharedLayout, dsInsnAttr,
                                spatialWarpId, warpsPerBlockNonK, mlsNumReps,
-                               smemObj, shape);
+                               smemObj, parentShape, shape);
     Value smemBase = smemObj.getBase();
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
 
     assert(mlsInsn->getElemBitWidth() == 16 || mlsInsn->getElemBitWidth() == 8);
-    auto dsLoadsPerK = product(dsInsnAttr.instrsPerWarp);
 
     // 3. create ds_read_matrix ops
     unsigned dsRepPerWarpNonK = dsInsnAttr.instrsPerWarp[nonKDimIdx2D];
     unsigned dsRepPerWarpK = dsInsnAttr.instrsPerWarp[kDimIdx2D];
-    assert(dsLoadsPerK == dsRepPerWarpNonK * dsRepPerWarpK);
 
     unsigned mfmaGroupPerDsInsn = dsInsnAttr.instrShape[nonKDimIdx2D] / mfmaInstrNonK;
     assert(mfmaGroupPerDsInsn >= 1);
     unsigned mfmaKStridePerDsInsn = dsInsnAttr.instrShape[kDimIdx2D] / mfmaTileK;
 
+    // Half-view of a full-tile MLS write: encoding still describes the parent
+    // tile (e.g. mlsTile 64x64 → 8 ds_reads) but this LocalLoad only needs the
+    // MFMA coverage for the view (e.g. 4 ds_reads → 32 elems).
+    unsigned nonKDsNeeded =
+        (mfmaInstrsPerWarpNonK + mfmaGroupPerDsInsn - 1) / mfmaGroupPerDsInsn;
+    if (nonKDsNeeded < dsRepPerWarpNonK)
+      dsRepPerWarpNonK = nonKDsNeeded;
+    unsigned dsLoadsPerK = dsRepPerWarpNonK * dsRepPerWarpK;
+
     unsigned numOfElemsPerDsInsn = (dsInsnAttr.instrShape[kDimIdx2D] *
                                     dsInsnAttr.instrShape[nonKDimIdx2D] / iWarpSize) / (isB4PackedDotOperand ? 2 : 1);
     unsigned totalElemsMfma = repB * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems;
     unsigned totalElemsMls  = repB * mlsNumRepNonK * mlsNumRepK * dsLoadsPerK * numOfElemsPerDsInsn;
-    assert(totalElemsMfma == totalElemsMls);
+    assert(totalElemsMfma == totalElemsMls &&
+           "MLS LocalLoad elem count must match MFMA operand");
+
+    // Within-tile half of a full-tile MLS write: pick the matching half of
+    // dsByteOffsets. Offset comes from SharedMemoryObject (often an
+    // extractvalue, not a foldable constant). ds_read_matrix takes an immediate
+    // offset attr, so fold the parent-vs-local byte delta into the GEP.
+    Value nonKLoadBaseVal = b.i32_val(0);
+    bool withinTileHalfView = false;
+    unsigned elemByteWidth =
+        std::max<unsigned>(1, elemTy.getIntOrFloatBitWidth() / 8);
+    {
+      auto offs = smemObj.getOffsets();
+      if (offs.size() >= 2 && parentShape.size() >= 2) {
+        unsigned offBase = offs.size() - 2;
+        int64_t viewNonK = shape[nonKDimIdx];
+        int64_t parentNonK = parentShape[nonKDimIdx];
+        if (viewNonK > 0 && parentNonK > viewNonK &&
+            parentNonK % viewNonK == 0) {
+          unsigned parts = static_cast<unsigned>(parentNonK / viewNonK);
+          unsigned dsRepFull = dsInsnAttr.instrsPerWarp[nonKDimIdx2D];
+          if (dsRepFull == dsRepPerWarpNonK * parts) {
+            withinTileHalfView = true;
+            nonKLoadBaseVal = b.mul(
+                b.udiv(offs[offBase + nonKDimIdx2D], b.i32_val(viewNonK)),
+                b.i32_val(dsRepPerWarpNonK));
+          }
+        }
+      }
+    }
+    auto selectDsByteOffset = [&](Value parentLoadIdxVal) -> Value {
+      Value selected = b.i32_val(dsInsnAttr.dsByteOffsets[0]);
+      for (unsigned i = 1; i < dsInsnAttr.dsByteOffsets.size(); ++i) {
+        selected =
+            b.select(b.icmp_eq(parentLoadIdxVal, b.i32_val(i)),
+                     b.i32_val(dsInsnAttr.dsByteOffsets[i]), selected);
+      }
+      return selected;
+    };
 
     SmallVector<Value> loadedValues(totalElemsMfma);
     for (int batchIdx = 0; batchIdx < repB; ++batchIdx) {
@@ -1189,7 +1289,20 @@ private:
           for (int loadIdx = 0; loadIdx < dsLoadsPerK; ++loadIdx) {
             unsigned loadNonKIdx = loadIdx / dsRepPerWarpK;
             unsigned loadKIdx = loadIdx % dsRepPerWarpK;
-            Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, loadOffset);
+            unsigned localByteOff = dsInsnAttr.dsByteOffsets[loadIdx];
+            Value gepElems = loadOffset;
+            if (withinTileHalfView) {
+              Value parentLoadIdxVal = b.add(
+                  b.mul(b.add(nonKLoadBaseVal, b.i32_val(loadNonKIdx)),
+                        b.i32_val(dsRepPerWarpK)),
+                  b.i32_val(loadKIdx));
+              Value parentByteOff = selectDsByteOffset(parentLoadIdxVal);
+              Value adjElems =
+                  b.sdiv(b.sub(parentByteOff, b.i32_val(localByteOff)),
+                         b.i32_val(elemByteWidth));
+              gepElems = b.add(loadOffset, adjElems);
+            }
+            Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, gepElems);
 
             auto dsInsnResTy = getDsReadMatrixInsnResType(loc, rewriter, tensorTy,
                                                                 dsInsnAttr,
@@ -1197,7 +1310,7 @@ private:
             Value loadedValue = generateDsReadMatrixOp(loc, rewriter, dsInsnAttr.insn,
                                               dsInsnResTy,
                                                        loadAddress,
-                                                       dsInsnAttr.dsByteOffsets[loadIdx],
+                                                       localByteOff,
                                                        dsInsnAttr.flags);
             auto unpackedValues = unpackDsReadMatrixInsnRes(loc, rewriter, tensorTy,
                                                             dsInsnAttr, mlsInsn->getElemBitWidth(),
@@ -1234,13 +1347,14 @@ private:
     return result;
   }
 
-  llvm::  SmallVector<Value>
+  llvm::SmallVector<Value>
   computeDsReadMatrixOffsets(ConversionPatternRewriter &rewriter, Location loc,
                              const AMDMlsSharedEncodingAttr &sharedLayout,
                              const DsReadMatrixInsnAttr &dsInsnAttr,
                              Value warpNonKId, int warpsPerBlockNonK,
                              ArrayRef<unsigned> mlsReps, SharedMemoryObject smemObj,
-                             ArrayRef<int64_t> shape) const {
+                             ArrayRef<int64_t> parentShape,
+                             ArrayRef<int64_t> viewShape) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto opIdx = sharedLayout.getOpIdx();
     auto mlsTile = sharedLayout.getMlsTile();
@@ -1255,27 +1369,58 @@ private:
     const auto numMlsTilesPerBlock = numRepK;
     const auto blockSize = numMlsTilesPerBlock;
 
-    auto shapeE = getMlsExpandedShape(sharedLayout, shape, MlsTileKind::Elems);
-    auto shapeS = getMlsExpandedShape(sharedLayout, shape, MlsTileKind::Shared);
+    // Layout geometry is always the full parent MLS buffer (allocShape).
+    // mlsReps / warps cover only this LocalLoad's view (possibly a half).
+    auto shapeE =
+        getMlsExpandedShape(sharedLayout, parentShape, MlsTileKind::Elems);
+    auto shapeS =
+        getMlsExpandedShape(sharedLayout, parentShape, MlsTileKind::Shared);
     auto divFactor = product(shapeE) / product(shapeS);
     auto divFactor0 = shapeE[0] / shapeS[0];
     auto divFactor1 = shapeE[1] / shapeS[1];
 
-    SmallVector<unsigned> flattenedMlsShape{shape};
-    flattenedMlsShape[0] = shapeS[0] * divFactor0 / sharedLayout.getMlsTile()[0];
-    flattenedMlsShape[1] = shapeS[1] * divFactor1 / sharedLayout.getMlsTile()[1];
+    SmallVector<unsigned> flattenedMlsShape{parentShape.begin(),
+                                            parentShape.end()};
+    flattenedMlsShape[0] =
+        shapeS[0] * divFactor0 / sharedLayout.getMlsTile()[0];
+    flattenedMlsShape[1] =
+        shapeS[1] * divFactor1 / sharedLayout.getMlsTile()[1];
+
+    // memdesc_subslice logical offsets → parent MLS coordinates.
+    // Within-tile halves (OnePTwoC A: mlsTile covers parent, view is half) are
+    // handled by selecting the matching dsByteOffsets half in the caller.
+    // Here handle tile-aligned subslices (offset is a multiple of mlsTile).
+    Value subsliceNonKTileOff = b.i32_val(0);
+    Value subsliceKTileOff = b.i32_val(0);
+    auto offs = smemObj.getOffsets();
+    if (offs.size() >= 2 && viewShape.size() >= 2) {
+      unsigned offBase = offs.size() - 2;
+      unsigned tileNonK = mlsTile[nonKDimIdx];
+      unsigned tileK = mlsTile[kDimIdx];
+      assert(tileNonK > 0 && tileK > 0);
+      int64_t viewNonK = viewShape[nonKDimIdx];
+      // Only apply tile-index offsets when the view itself is tile-sized (or
+      // larger). Within-tile half views leave tile udiv at 0.
+      if (viewNonK >= static_cast<int64_t>(tileNonK)) {
+        subsliceNonKTileOff =
+            b.udiv(offs[offBase + nonKDimIdx], b.i32_val(tileNonK));
+      }
+      subsliceKTileOff =
+          b.udiv(offs[offBase + kDimIdx], b.i32_val(tileK));
+    }
 
     llvm::SmallVector<Value> offsets(numBlocks * numMlsTilesPerBlock);
     for (int block = 0; block < numBlocks; ++block) {
-      // assert(isKMajor(sharedLayout.getOrder(), opIdx));
       int blockNonKOffset = block * warpsPerBlockNonK;
 
       for (int mlsTileIdx = 0; mlsTileIdx < numMlsTilesPerBlock; ++mlsTileIdx) {
         Value mlsNonKOff = b.add(b.i32_val(blockNonKOffset), warpNonKId);
-        Value mlsKOff = b.i32_val(mlsTileIdx);
+        mlsNonKOff = b.add(mlsNonKOff, subsliceNonKTileOff);
+        Value mlsKOff = b.add(b.i32_val(mlsTileIdx), subsliceKTileOff);
 
-        std::array<Value, 2> mlsCoords = opIdx == 0 ? std::array<Value, 2>{mlsNonKOff, mlsKOff}
-                                                    : std::array<Value, 2>{mlsKOff, mlsNonKOff};
+        std::array<Value, 2> mlsCoords =
+            opIdx == 0 ? std::array<Value, 2>{mlsNonKOff, mlsKOff}
+                       : std::array<Value, 2>{mlsKOff, mlsNonKOff};
 
         Value mlsOff = b.mul(linearize(rewriter, loc, mlsCoords,
                                         flattenedMlsShape, sharedLayout.getOrder()),
@@ -1285,6 +1430,22 @@ private:
     }
 
     return offsets;
+  }
+
+  // Last `rank` dims of allocShape when the memdesc is a subview of a larger
+  // MLS buffer; otherwise the view shape itself.
+  static SmallVector<int64_t>
+  getMlsParentMatrixShape(MemDescType tensorTy) {
+    ArrayRef<int64_t> shape = tensorTy.getShape();
+    ArrayRef<int64_t> allocShape = tensorTy.getAllocShape();
+    SmallVector<int64_t> parent(shape.begin(), shape.end());
+    if (allocShape.size() >= shape.size()) {
+      parent.assign(allocShape.end() - shape.size(), allocShape.end());
+      for (size_t i = 0; i < parent.size(); ++i)
+        if (parent[i] < shape[i])
+          parent[i] = shape[i];
+    }
+    return parent;
   }
 
   Type getDsReadMatrixInsnResType(Location loc, RewriterBase &rewriter,

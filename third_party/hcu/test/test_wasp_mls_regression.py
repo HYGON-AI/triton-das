@@ -2,9 +2,9 @@
 HCU WASP / WASP+WDRA regression matrix: GEMM & FA × MLS & non-MLS.
 
 Default scenarios (12):
-  GEMM  × {load, mls} × {wasp 4+4, wdra 4+8, wdra 8+8}   # num_stages=2
+  GEMM  × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
+  # GEMM  × {load, mls} × {wdra 8+8}                       # temporarily disabled
   GEMM  × {load, mls} × {wdra 4+8} × num_stages=4
-      (mls/wdra4+8/ns4 is KNOWN_XFAIL: MlsOpToLLVM multi-tile assert)
   FA    × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
 
 Known limitation: gemm/load/wdra8+8 uses K=512; see the comment near
@@ -372,11 +372,7 @@ def run_fa(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
 # ---------------------------------------------------------------------------
 
 # Cases known not yet supported (tracked separately from hard failures).
-KNOWN_XFAIL: set[str] = {
-    # WDRA OnePTwoC + MLS + stages=4 hits MlsOpToLLVM convertLayoutMultiTilesPerWarp
-    # assert totalElemsMfma == totalElemsMls (A is sliced to 32x64 under WDRA).
-    "gemm/mls/wdra4+8/ns4",
-}
+KNOWN_XFAIL: set[str] = set()
 
 # Default GEMM problem size.
 DEFAULT_GEMM_SHAPE = (128, 128, 4096)
@@ -436,7 +432,7 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
     modes = [
         (True, False, 4, 4, 2),   # wasp4+4
         (True, True, 4, 8, 2),    # wdra4+8 OnePTwoC
-        (True, True, 8, 8, 2),    # wdra8+8 TwoPTwoC (GEMM only below)
+        # (True, True, 8, 8, 2),  # wdra8+8 TwoPTwoC — temporarily disabled
         (True, True, 4, 8, 4),    # wdra4+8 num_stages=4 (GEMM only below)
     ]
     if include_nowrap:

@@ -73,9 +73,13 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   int64_t logicalK = blockK;
   int64_t logicalNonK = blockNonK;
   if (auto wdraPlan = HCU::getWdraSplitPlan(dot)) {
-    // Only the operand selected by WDRA is sliced. The other dot operand
-    // remains a shared full tile (e.g. B for an M split).
-    if (wdraPlan->partitionedOperand == static_cast<unsigned>(opIdx)) {
+    // TwoPTwoC: partitioned operand is a half-tile MLS write — constrain tile
+    // selection by the eventual per-consumer shape.
+    // OnePTwoC: one full-tile MLS write; consumers memdesc_subslice — keep
+    // full-tile logicalNonK so mlsTile matches the shared write.
+    auto topo = HCU::getWdraTopologyAttr(dot);
+    if (topo.producerSliced() &&
+        wdraPlan->partitionedOperand == static_cast<unsigned>(opIdx)) {
       auto effectiveShape =
           HCU::getWdraEffectiveResultShape(dot, *wdraPlan);
       logicalNonK = effectiveShape[(rank - 2) + opIdx];

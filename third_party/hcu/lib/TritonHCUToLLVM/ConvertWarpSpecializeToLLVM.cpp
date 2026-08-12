@@ -377,7 +377,10 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   // order for TwoPTwoC). WdraInit alone is not enough — pad the live budgets
   // that feed SetVgpr as well.
   //
-  // Granularity is 4 ⇒ for 4 equal-weight branches, sum must be a multiple of 16.
+  // Granularity is 4. Equal-weight branches need sum % (numBranches * 4) == 0
+  // so the average is an integer multiple of the granularity:
+  //   TwoPTwoC (4 branches): multiple of 16
+  //   OnePTwoC (3 branches): multiple of 12
   // Load-first TwoPTwoC SetVgpr emission: [load, load, main, tail]
   // ⇒ printed BranchAvailable ≈ [tail, main, load, load].
   // Pad tail so e.g. [88, 88, 144, 140] → [88, 88, 144, 144]
@@ -390,9 +393,11 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
       wdraNumMmaRegsTail += 16 - rem;
   } else if (wdraEnabled && topo.kind == triton::HCU::WdraTopoKind::OnePTwoC) {
     int sum = wdraNumLoadRegs + wdraNumMmaRegsMain + wdraNumMmaRegsTail;
-    int rem = sum % 16;
+    // Do NOT pad to 16 here: e.g. 88+208+208=504 already has avg 168 (%4==0),
+    // but padding to 512 makes sum % 3 != 0 and clang rejects the kernel.
+    int rem = sum % 12;
     if (rem != 0)
-      wdraNumMmaRegsMain += 16 - rem;
+      wdraNumMmaRegsMain += 12 - rem;
   }
 
   // Replace the s_barrier in each partition with ebarrier.
