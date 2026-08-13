@@ -114,10 +114,7 @@ publish:
     # manylinux repair
     - bash scripts/hcu/repair_manylinux.sh
     # repair wheel
-    - DTK_VER=$(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.')
-    - TORCH_VER=$(echo ${TORCH_VERSION} | tr -d '.')
-    - LOCAL_VER="dtk${DTK_VER}.torch${TORCH_VER}.$(date +%y%m%d%H%M).g$(git rev-parse --short=6 HEAD)"
-    - CIUpload --repair --torch_version ${TORCH_VERSION} --set_local_version ${LOCAL_VER} --outputdir output -f dist/*.whl
+    - CIUpload REPAIR --dtk_version $(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.') --torch_version ${TORCH_VERSION} --git_commit $(git rev-parse --short=6 HEAD) --outputdir output -f dist/*.whl
     # upload
     - CIUpload --devpi_url ${DEVPI_URL} --devpi_user ${devpi_nightly_user} --devpi_password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl
   artifacts:
