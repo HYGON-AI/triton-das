@@ -31,6 +31,11 @@ inline constexpr StringLiteral kEmptyArriveAfterMmacAttrName =
     "hcu.empty_arrive_after_mmac";
 inline constexpr StringLiteral kSchedBarrierBetweenABLoadsAttrName =
     "hcu.sched_barrier_between_a_b_loads";
+// Unit attr on `rocdl.s.barrier` inserted by tritonhcu-consumer-pingpong.
+// ConvertWarpSpecializeToLLVM maps these to one shared ebarrier so the two
+// MMA consumers actually meet (per-partition barriers would not).
+inline constexpr StringLiteral kConsumerPingpongBarrierAttrName =
+    "hcu.consumer_pingpong";
 
 struct WdraSplitPlan {
   // C dimension to partition: 0=M, 1=N.

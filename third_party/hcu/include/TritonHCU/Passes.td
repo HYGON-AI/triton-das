@@ -49,6 +49,27 @@ def TritonHCUPrepareWdraSplitPlan
   ];
 }
 
+def TritonHCUConsumerPingpong : Pass<"tritonhcu-consumer-pingpong", "mlir::ModuleOp"> {
+  let summary = "Stagger WDRA MMA consumers so they do not contend for matrix units";
+  let description = [{
+    WDRA OnePTwoC / TwoPTwoC runs two MMA consumer warp groups that otherwise
+    lockstep through local_load + dot and compete for the same SIMD matrix
+    pipes. This pass mirrors `tritonamdgpu-block-pingpong`:
+
+      * split each consumer K-loop into a Memory cluster (wait / ds_read /
+        empty) and a Dot cluster (`tt.dot` guarded by `s_setprio`)
+      * insert a shared `rocdl.s.barrier {hcu.consumer_pingpong}` between
+        clusters (later lowered to one ebarrier with both MMA groups)
+      * offset the two groups like AMD `cond_barrier`: MMA_tail waits once
+        before the loop, MMA_main waits once after, so they stay one cluster
+        apart (one computes while the other loads)
+  }];
+  let dependentDialects = [
+    "mlir::ROCDL::ROCDLDialect",
+    "mlir::triton::gpu::TritonGPUDialect"
+  ];
+}
+
 def TritonHCUMlsStreamPipeline : Pass<"tritonhcu-mls-stream-pipeline", "mlir::ModuleOp"> {
   let summary = "Pipeline MatrixLoad to shared memory async";
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];

@@ -26,6 +26,7 @@ target_link_libraries(TritonHCUWdraSupport PRIVATE TritonAMDGPUIR)
 add_triton_library(TritonHCUTransforms
   AccelerateHCUMatmul.cpp
   ApplyFuncHintsAndClean.cpp
+  ConsumerPingpong.cpp
   MlsEncodingInsertion.cpp
   MlsStreamPipeline.cpp
   MlsLowering.cpp

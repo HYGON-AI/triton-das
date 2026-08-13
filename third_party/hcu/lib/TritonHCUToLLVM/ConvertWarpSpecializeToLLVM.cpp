@@ -80,7 +80,9 @@ static void convertOpTypes(Operation *op, const TypeConverter &typeConverter) {
 // and one for the end barrier.
 enum BarrierIndex {
   kSwitchLoopBarrierIdx,
-  kPartitionStartBarrierIdx,
+  // Shared by both MMA consumers (tritonhcu-consumer-pingpong). Replaces the
+  // unused partition-start slot so reserved IDs stay 0..5.
+  kConsumerPingpongBarrierIdx,
   kAbarrierInvBarrierIdx,
   kPartitionEndBarrierIdx,
   kDefaultWarpGroupBarrierIdx,
@@ -210,7 +212,8 @@ static void elideTrivialCaptures(LLVM::LLVMFuncOp func,
 // into `ebarrier` instructions. There is a maximum number of barriers.
 static LogicalResult rewriteWarpGroupBarriers(LLVM::LLVMFuncOp func,
                                               ArrayRef<WarpSpecializeOp> wsOps,
-                                              unsigned defaultNumWarps) {
+                                              unsigned defaultNumWarps,
+                                              unsigned mmaNumWarps) {
   func.walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
     // Walk into default regions but not partition regions.
     if (isa<WarpSpecializePartitionsOp>(op))
@@ -235,10 +238,15 @@ static LogicalResult rewriteWarpGroupBarriers(LLVM::LLVMFuncOp func,
                << " warp group partitions";
       }
       unsigned warpGroupSize = op.getPartitionNumWarps()[idx];
-      unsigned warpStartId = (*op.getWarpGroupStartIds())[idx];
       partition->walk([&](Operation *bar) {
         if (!isWarpGroupBarrierOp(bar))
           return;
+        // Both MMA consumers must meet at the same ebarrier; a per-partition
+        // ID would make the pingpong offset a no-op.
+        if (bar->hasAttr(triton::HCU::kConsumerPingpongBarrierAttrName)) {
+          rewriteBarrierOp(bar, kConsumerPingpongBarrierIdx, mmaNumWarps);
+          return;
+        }
         rewriteBarrierOp(bar, barIdx, warpGroupSize);
       });
     }
@@ -279,8 +287,7 @@ static void rewritePartitionRegions(WarpSpecializeOp ws, SmallVector<Block *> &s
     }
 
     // The shared memory is only live for the entry into the region, so put
-    // another barrier here.
-    //createBarrier(b, kPartitionStartBarrierIdx, /*numWarps=*/std::nullopt);
+    // another barrier here. ID 1 is reserved for consumer pingpong instead.
 
     // For MMA partitions, insert an ebarrier with id kAbarrierInvBarrierIdx
     // before the earliest HCUAbarrierInvOp.
@@ -401,7 +408,10 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   }
 
   // Replace the s_barrier in each partition with ebarrier.
-  if (failed(rewriteWarpGroupBarriers(func, wsOps, defaultNumWarps)))
+  unsigned mmaNumWarps =
+      wdraEnabled ? static_cast<unsigned>(waspNumMmaWarps) : defaultNumWarps;
+  if (failed(rewriteWarpGroupBarriers(func, wsOps, defaultNumWarps,
+                                      mmaNumWarps)))
     return failure();
 
   // Attempt to elide captures of trivial computations by hoisting them into the

@@ -130,6 +130,9 @@ class HIPOptions:
     #   1 — enable cluster (+ SchedBarrier before mmac and between A/B loads)
     #   2 — enable cluster + cross-region A/B load analysis (implies 1)
     enable_v_mmac_cluster: int = 0
+    # Offset the two WDRA MMA consumers (BlockPingpong-style) so they do not
+    # lockstep-contend for matrix pipes. No-op unless OnePTwoC / TwoPTwoC.
+    enable_consumer_pingpong: bool = True
 
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
@@ -662,6 +665,8 @@ class HIPBackend(BaseBackend):
                 amd.passes.ttgpuir.add_optimize_epilogue(pm)
             passes.ttgpuir.add_optimize_dot_operands(pm, True)
             amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
+            if options.enable_consumer_pingpong:
+                hcu.passes.ttgpuir.add_consumer_pingpong(pm)
 
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
