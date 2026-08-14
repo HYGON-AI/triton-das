@@ -566,6 +566,21 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
     maybeSetAsyncTaskId(tryWaitOp, pair, numBarrierPairs);
     tryWaitOps.push_back(tryWaitOp);
   }
+  // MLS: s_abarrier_seq on the ready bar so hardware tracks matrix_load
+  // transactions (seq … MLS … ready-arrive). tt.load keeps arrive-only.
+  bool anyMls = llvm::any_of(
+      loads, [](const PipelinedLoad &load) { return load.isMls; });
+  if (anyMls) {
+    for (unsigned pair = 0; pair < numBarrierPairs; ++pair) {
+      ArrayRef<int> pairReady(readyBarIds.data() + pair * numStagesStored,
+                              numStagesStored);
+      b.setInsertionPointAfter(tryWaitOps[pair]);
+      Value curReadyBarId = selectStageBarId(pairReady);
+      auto seqOp = b.createInto<ROCDL::HCUAbarrierSeqOp>(
+          loadPartition, stageCluster, curReadyBarId);
+      maybeSetAsyncTaskId(seqOp, pair, numBarrierPairs);
+    }
+  }
   // All local stores must be placed after every producer acquire.  In
   // TwoPTwoC, anchoring them after only the first wait leaves the task-1
   // stores before their own empty-buffer wait after partition splitting.
@@ -628,18 +643,27 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
         replaceUsesAndPropagateType(b, allocOp, view);
         allocOp->erase();
       }
-      // Treat the async wait (or the MLS op itself) as the end of the "store"
-      // so the ready-barrier arrive is placed after LDS write completion.
-      Operation *completionOp = mlsOp;
-      for (Operation *user : llvm::make_early_inc_range(mlsOp->getUsers())) {
-        if (auto commit = dyn_cast<AsyncCommitGroupOp>(user)) {
-          for (Operation *waitUser : commit->getUsers()) {
-            if (isa<AsyncWaitOp>(waitUser))
-              completionOp = waitUser;
-          }
+      // Seq tracks MLS on the ready bar (transaction_count). Do not wait
+      // vmcnt via async_wait before ready-arrive — that drains MLS before
+      // signalling and defeats seq. Drop the commit/wait so arrive sits
+      // immediately after matrix_load_to_local.
+      SmallVector<Operation *> mlsAsyncOps;
+      for (Operation *user : mlsOp->getUsers()) {
+        auto commit = dyn_cast<AsyncCommitGroupOp>(user);
+        if (!commit)
+          continue;
+        for (Operation *waitUser : commit->getUsers()) {
+          if (isa<AsyncWaitOp>(waitUser))
+            mlsAsyncOps.push_back(waitUser);
         }
+        mlsAsyncOps.push_back(commit);
       }
-      storeOps.push_back(completionOp);
+      for (Operation *op : mlsAsyncOps) {
+        for (Value r : op->getResults())
+          r.dropAllUses();
+        op->erase();
+      }
+      storeOps.push_back(mlsOp);
       continue;
     }
 

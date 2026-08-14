@@ -238,7 +238,8 @@ static bool isLoadLikePartition(ArrayRef<Operation *> ops) {
   for (Operation *op : ops) {
     if (isa<LoadOp, DescriptorLoadOp, LocalStoreOp, tta::MatrixLoadToLocalOp>(
             op) ||
-        isa<ROCDL::HCUAbarrierTryWaitOp, ROCDL::HCUAbarrierArriveOp>(op))
+        isa<ROCDL::HCUAbarrierTryWaitOp, ROCDL::HCUAbarrierArriveOp,
+            ROCDL::HCUAbarrierSeqOp>(op))
       return true;
   }
   return false;
