@@ -23,129 +23,134 @@ def is_hcu_support_mmac_layout():
 regression_run = True
 
 def get_autotune_config():
-    return [
-        # autotune winners for 5120x5120 fp16 matmul (waves_per_eu=1)
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=3),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=3),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=4),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=16, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 512, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=16, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=1),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=2, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=4, num_stages=2),
-        # triton.Config(
-        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
-        #     num_warps=4, num_stages=2),
-    ]
+    # return [
+    #     # autotune winners for 5120x5120 fp16 matmul (waves_per_eu=1)
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=3),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=3),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=4),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=16, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 512, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=16, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=4, num_stages=1),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=4, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=4, num_stages=1),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=4, num_stages=1),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=4, num_stages=1),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+    #         num_warps=4, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #         num_warps=4, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #         num_warps=8, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #         num_warps=4, num_stages=2),
+    #     triton.Config(
+    #         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #         num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 3},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=2, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=4, num_stages=2),
+    #     # triton.Config(
+    #     #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 1, 'waves_per_eu': 4},
+    #     #     num_warps=4, num_stages=2),
+    # ]
 
-    # configs = []
+    configs = []
 
-    # block_sizes = [16, 32, 64, 128, 256, 512]
-    # num_warps_list = [4, 8, 16]
-    # num_stages_list = [1, 2, 3, 4]
+    block_sizes = [16, 32, 64, 128, 256, 512]
+    num_warps_list = [4, 8, 16]
+    num_stages_list = [1, 2]
+    group_sizes_m = [1, 4, 8]
+    use_block_pingpong_list = [False, True]
 
-    # for block_m in block_sizes:
-    #     for block_n in block_sizes:
-    #         for block_k in block_sizes:
-    #             for num_warps in num_warps_list:
-    #                 for num_stages in num_stages_list:
-    #                     configs.append(
-    #                         triton.Config(
-    #                             {
-    #                                 'BLOCK_SIZE_M': block_m,
-    #                                 'BLOCK_SIZE_N': block_n,
-    #                                 'BLOCK_SIZE_K': block_k,
-    #                                 'GROUP_SIZE_M': 1,
-    #                                 'waves_per_eu': 1,
-    #                             },
-    #                             num_warps=num_warps,
-    #                             num_stages=num_stages
-    #                         )
-    #                     )
+    for block_m in block_sizes:
+        for block_n in block_sizes:
+            for block_k in block_sizes:
+                for num_warps in num_warps_list:
+                    for num_stages in num_stages_list:
+                        for group_size_m in group_sizes_m:
+                            for use_block_pingpong in use_block_pingpong_list:
+                                configs.append(
+                                    triton.Config(
+                                        {
+                                            'BLOCK_SIZE_M': block_m,
+                                            'BLOCK_SIZE_N': block_n,
+                                            'BLOCK_SIZE_K': block_k,
+                                            'GROUP_SIZE_M': group_size_m,
+                                            'waves_per_eu': 1,
+                                            'use_block_pingpong': use_block_pingpong,
+                                        },
+                                        num_warps=num_warps,
+                                        num_stages=num_stages
+                                    )
+                                )
 
-    # return configs
+    return configs
 
 
 @triton.jit
@@ -299,6 +304,47 @@ def prune_configs(configs, nargs, **kwargs):
         if _config["BLOCK_SIZE_M"] > args["M"] or _config["BLOCK_SIZE_K"] > args["K"] or _config["BLOCK_SIZE_N"] > args["N"]:
             return True
 
+        # Large square GEMMs do not benefit from tiny output tiles, while
+        # compiling them dominates autotune time. Keep this shape-based so
+        # narrow MoE and small-K FA cases retain their useful small tiles.
+        large_square_problem = min(args["M"], args["N"], args["K"]) >= 2048
+        if large_square_problem and (
+                _config["BLOCK_SIZE_M"] < 128
+                or _config["BLOCK_SIZE_N"] < 128):
+            return True
+
+        # Block ping-pong scheduling and grouped M traversal are only useful
+        # for sufficiently large output tiles. Keep the default combination
+        # for smaller tiles to avoid redundant/unsupported tuning candidates.
+        large_output_tile = (_config["BLOCK_SIZE_M"] >= 128
+                             and _config["BLOCK_SIZE_N"] >= 128)
+        if not large_output_tile and (
+                _config.get("use_block_pingpong", False)
+                or _config.get("GROUP_SIZE_M", 1) != 1):
+            return True
+        use_block_pingpong = _config.get("use_block_pingpong", False)
+        if use_block_pingpong:
+            if args.get("mix_load") != 0b11 or _config.get("num_warps") != 8:
+                return True
+
+            # Keep the autotune space consistent with BlockPingpong.cpp's
+            # matcher. Native FP8 MMAC consumes K=32 per instruction, and PP
+            # splits the source dot into two halves, so FP8 requires BK64.
+            block_m = _config["BLOCK_SIZE_M"]
+            block_n = _config["BLOCK_SIZE_N"]
+            block_k = _config["BLOCK_SIZE_K"]
+            if bitwidth not in (8, 16):
+                return True
+            if bitwidth == 8 and block_k != 64:
+                return True
+            if (block_m < 128 or block_n < 128
+                    or block_m % 128 != 0 or block_n % 128 != 0
+                    or block_m * block_n > 256 * 256):
+                return True
+            two_slot_bits = 2 * block_k * (block_m + block_n) * bitwidth
+            if two_slot_bits > 64 * 1024 * 8:
+                return True
+
         # Determine threshold based on bitwidth
         if bitwidth == 8:
             threshold = 64
@@ -346,7 +392,7 @@ def prune_configs(configs, nargs, **kwargs):
 @triton.jit
 def matmul_kernel(
         # Pointers to matrices
-        a_ptr, b_ptr, c_ptr,
+        a_ptr, b_ptr, a_scale_ptr, b_scale_ptr, c_ptr,
         # Matrix dimensions
         M, N, K,
         # The stride variables represent how much to increase the ptr by when moving by 1
@@ -369,6 +415,9 @@ def matmul_kernel(
         boundary_check: tl.constexpr,   # force boundary check ?
         use_mask: tl.constexpr,         # use mask (tl.where)?
         dtype_bits: tl.constexpr,       # data type bitwidth (8 or 16)
+        INPUT_IS_INT8: tl.constexpr,
+        USE_CHANNELWISE_SCALE: tl.constexpr,
+        USE_MOE_INT8_ACCUMULATION: tl.constexpr,
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr,
         BLOCK_SIZE_N: tl.constexpr,
@@ -436,7 +485,7 @@ def matmul_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    if OUTPUT_DTYPE == "int32":
+    if INPUT_IS_INT8 and not USE_MOE_INT8_ACCUMULATION:
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
     else:
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -471,7 +520,11 @@ def matmul_kernel(
         boundary_check_b : tl.constexpr = ()
 
     mask_m = None
-    if not block_m_diviable:
+    if (not block_m_diviable) or USE_CHANNELWISE_SCALE:
+        # Per-token quantized MoE keeps a token-validity predicate on A even
+        # when the synthetic dense shape is tile-divisible.  Preserve that
+        # loop-invariant mask in scaled mode so AMD Pipeline and BlockPingpong
+        # see the same load contract as fused_moe_kernel.
         mask_m = offs_am[:, None] < M
 
     mask_n = None
@@ -479,7 +532,11 @@ def matmul_kernel(
         mask_n = offs_bn[None, :] < N
 
     # 定义是否需要 mask 的 constexpr 标志
-    need_mask_a: tl.constexpr = (not block_m_diviable) or (not block_k_diviable)
+    need_mask_a: tl.constexpr = (
+        (not block_m_diviable)
+        or (not block_k_diviable)
+        or USE_CHANNELWISE_SCALE
+    )
     need_mask_b: tl.constexpr = (not block_n_diviable) or (not block_k_diviable)
 
     # ENote 1: this iters can make prologue of tt.load can still gen coalescing of load for buffer_load disable case, due to we "tlassume(K > 0)".
@@ -551,14 +608,40 @@ def matmul_kernel(
                 b = tl.load(b_ptrs)
 
         # We accumulate along the K dimension.
-        if OUTPUT_DTYPE == "int32":
-            accumulator = tl.dot(a, b, accumulator, out_dtype=tl.int32)
+        if INPUT_IS_INT8:
+            if USE_MOE_INT8_ACCUMULATION:
+                # Match fused_moe_kernel: each K block produces an INT32 dot
+                # tile, converts it to FP32, then adds it to the long-lived
+                # FP32 accumulator.  This intentionally models the extra live
+                # range and conversion pressure seen by the real MoE kernel.
+                accumulator += tl.dot(a, b).to(tl.float32)
+            else:
+                accumulator = tl.dot(a, b, accumulator, out_dtype=tl.int32)
         else:
             accumulator = tl.dot(a, b, accumulator)
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+    if USE_CHANNELWISE_SCALE:
+        # Scales are independent of K.  Load them after the reduction so they
+        # do not stay live across the pipelined dot loop and consume VGPRs.
+        a_scale = tl.load(
+            a_scale_ptr + offs_am,
+            mask=offs_am < M,
+            other=0.0,
+        ).to(tl.float32)
+        b_scale = tl.load(
+            b_scale_ptr + offs_bn,
+            mask=offs_bn < N,
+            other=0.0,
+        ).to(tl.float32)
+        accumulator = (
+            accumulator.to(tl.float32)
+            * a_scale[:, None]
+            * b_scale[None, :]
+        )
+
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
     if ACTIVATION == "leaky_relu":
@@ -567,6 +650,10 @@ def matmul_kernel(
     # 根据OUTPUT_DTYPE参数确定输出类型
     if OUTPUT_DTYPE == "int32":
         c = accumulator
+    elif OUTPUT_DTYPE == "bfloat16":
+        c = accumulator.to(tl.bfloat16)
+    elif OUTPUT_DTYPE == "float32":
+        c = accumulator.to(tl.float32)
     else:  # OUTPUT_DTYPE == "float16"
         c = accumulator.to(tl.float16)
 
@@ -603,7 +690,9 @@ def leaky_relu(x):
 # and (1) checks any shape constraint; (2) allocates the output; (3) launches the above kernel.
 
 def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boundary_check=False,
-                       use_mask=False, activation="", config=None, output_dtype=None):
+                       use_mask=False, activation="", config=None, output_dtype=None,
+                       use_channelwise_scale=False, a_scale=None, b_scale=None,
+                       use_moe_int8_accumulation=False):
     """
     智能矩阵乘法函数，支持通过shape变化实现列主序+contiguous
 
@@ -614,6 +703,11 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
     - b_layout: 'row' 或 'col'，指示B的期望布局
     - activation: 激活函数
     - output_dtype: 输出数据类型，如果为None则根据输入数据类型自动选择
+    - use_channelwise_scale: 是否模拟 W8A8 MoE 的 per-token/per-channel scale
+    - a_scale: A 的 per-token scale，shape 为 [M] 或 [M, 1]
+    - b_scale: B 的 per-output-channel scale，shape 为 [N] 或 [N, 1]
+    - use_moe_int8_accumulation: 是否模拟 fused_moe_kernel 每个 K block
+      将 INT32 dot 转成 FP32 后再累加；False 保留 scaled GEMM 的 INT32 长累加
 
     布局约定:
     - a_layout='row': a应该是[M, K]形状（行主序）
@@ -649,12 +743,39 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
     assert K_a == K_b, f"K dimension mismatch: A has K={K_a}, B has K={K_b}"
     K = K_a
 
+    if use_channelwise_scale:
+        assert a.dtype == b.dtype, "scaled matmul requires matching input dtypes"
+        assert a.dtype == torch.int8 or a.dtype in (
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+        ), "channel-wise scale is only supported for INT8/FP8 inputs"
+        assert a_scale is not None and b_scale is not None, (
+            "a_scale and b_scale are required when use_channelwise_scale=True"
+        )
+        a_scale = a_scale.reshape(-1)
+        b_scale = b_scale.reshape(-1)
+        assert a_scale.shape == (M,), f"a_scale must contain M={M} values"
+        assert b_scale.shape == (N,), f"b_scale must contain N={N} values"
+        assert a_scale.is_floating_point() and b_scale.is_floating_point()
+        assert a_scale.is_contiguous() and b_scale.is_contiguous()
+        assert a_scale.device == a.device and b_scale.device == b.device
+    else:
+        # Pointer arguments remain stable across both variants.  They are
+        # compile-time dead when USE_CHANNELWISE_SCALE=False.
+        a_scale = a
+        b_scale = b
+
     # 确定输出数据类型
     if output_dtype is None:
-        if a.dtype == torch.int8:
+        if a.dtype == torch.int8 and not use_channelwise_scale:
             output_dtype = torch.int32
         else:
             output_dtype = torch.float16
+
+    if use_channelwise_scale:
+        assert output_dtype in (torch.float16, torch.bfloat16, torch.float32), (
+            "scaled INT8/FP8 matmul requires a floating-point output"
+        )
 
     # 分配输出张量
     c = torch.empty((M, N), device=a.device, dtype=output_dtype)
@@ -665,6 +786,10 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
     # 确定输出数据类型字符串
     if output_dtype == torch.int32:
         output_dtype_str = "int32"
+    elif output_dtype == torch.bfloat16:
+        output_dtype_str = "bfloat16"
+    elif output_dtype == torch.float32:
+        output_dtype_str = "float32"
     else:
         output_dtype_str = "float16"
 
@@ -674,12 +799,17 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
     except Exception:
         dtype_bits = torch.iinfo(a.dtype).bits
 
+    if use_moe_int8_accumulation:
+        assert a.dtype == torch.int8, (
+            "MoE INT8 accumulation modeling requires INT8 inputs"
+        )
+
     # # 为 benchmark / 测试提供一个简单的默认配置
     if config is None:
         config = {}
 
     compiled_kernel=matmul_kernel[grid](
-        a, b, c,  #
+        a, b, a_scale, b_scale, c,  #
         M, N, K,  #
         stride_am, stride_ak,  #
         stride_bk, stride_bn,  #
@@ -690,6 +820,9 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00, boun
         boundary_check = boundary_check,
         use_mask = use_mask,
         dtype_bits = dtype_bits,
+        INPUT_IS_INT8 = a.dtype == torch.int8,
+        USE_CHANNELWISE_SCALE = use_channelwise_scale,
+        USE_MOE_INT8_ACCUMULATION = use_moe_int8_accumulation,
         ACTIVATION=activation,  #
         OUTPUT_DTYPE=output_dtype_str,  #
         **config,
@@ -779,19 +912,40 @@ def compare_matmul_outputs(triton_output, expected_output, dtype, label="Triton 
     return True
 
 
-def run_layout_combination_test(a, b, a_layout, b_layout, mix_load, boundary_check, use_mask, case_name="", config=None):
+def create_channelwise_scales(M, N, device):
+    """Create deterministic, non-unit per-token/per-channel W8A8 scales."""
+    a_scale = torch.linspace(0.005, 0.02, M, device=device, dtype=torch.float32)
+    b_scale = torch.linspace(0.006, 0.018, N, device=device, dtype=torch.float32)
+    return a_scale, b_scale
+
+
+def run_layout_combination_test(a, b, a_layout, b_layout, mix_load, boundary_check, use_mask,
+                                case_name="", config=None, use_channelwise_scale=False,
+                                use_moe_int8_accumulation=False,
+                                output_dtype=None):
     """测试单个布局组合（新方法）"""
     print(f"\n=== {case_name} ===")
     print(f"A shape: {a.shape}, stride: {a.stride()}, contiguous: {a.is_contiguous()}, layout: {a_layout}, dtype: {a.dtype}")
     print(f"B shape: {b.shape}, stride: {b.stride()}, contiguous: {b.is_contiguous()}, layout: {b_layout}, dtype: {b.dtype}")
 
+    M = a.shape[0] if a_layout == 'row' else a.shape[1]
+    N = b.shape[1] if b_layout == 'row' else b.shape[0]
+    if use_channelwise_scale:
+        a_scale, b_scale = create_channelwise_scales(M, N, a.device)
+    else:
+        a_scale = b_scale = None
+
     # 使用新的matmul_with_layout函数
-    if a.dtype == torch.int8:
+    if a.dtype == torch.int8 and not use_channelwise_scale:
         triton_output = matmul_with_layout(a, b, a_layout, b_layout, mix_load, boundary_check, use_mask,
                                            activation="", config=config, output_dtype=torch.int32)
     else:
         triton_output = matmul_with_layout(a, b, a_layout, b_layout, mix_load, boundary_check, use_mask,
-                                           activation="", config=config)
+                                           activation="", config=config,
+                                           output_dtype=output_dtype,
+                                           use_channelwise_scale=use_channelwise_scale,
+                                           a_scale=a_scale, b_scale=b_scale,
+                                           use_moe_int8_accumulation=use_moe_int8_accumulation)
 
     # 为了与torch.matmul比较，需要创建等价的张量
     if a_layout == 'row':
@@ -817,6 +971,13 @@ def run_layout_combination_test(a, b, a_layout, b_layout, mix_load, boundary_che
     else:
         # 对于float16输入，保持float16
         torch_output = torch.matmul(a_torch.cpu(), b_torch.cpu()).cuda()
+
+    if use_channelwise_scale:
+        torch_output = (
+            torch_output.float()
+            * a_scale[:, None]
+            * b_scale[None, :]
+        ).to(triton_output.dtype)
 
     # 比较结果
     return compare_matmul_outputs(triton_output, torch_output, a.dtype, label="Triton and Torch")
@@ -984,6 +1145,77 @@ def test_mls_comprehensive(dtype, config_list, layout_combination,
                     config=config_list)
     assert result2, f"Fail: dtype={dtype}, M={M}xK={K}xN={N}, A({layout_combination[0]})×B({layout_combination[1]}), config={config_list}"
     print(f"✅ Pass: dtype={dtype}, M={M}xK={K}xN={N}, A({layout_combination[0]})×B({layout_combination[1]}), config={config_list}")
+
+
+@pytest.mark.parametrize("dtype,use_moe_int8_accumulation", [
+    (torch.int8, False),
+    (torch.int8, True),
+    (torch.float8_e4m3fn, False),
+])
+@pytest.mark.parametrize("b_layout", ["col", "row"])
+def test_mls_channelwise_scaled_bit8(dtype, use_moe_int8_accumulation, b_layout):
+    """Cover the scale-bearing Bit8 row-col and row-row PP input shape."""
+    if not is_hcu_support_mls():
+        pytest.skip("skip: not support mls")
+
+    M, N, K = 256, 256, 512
+    a, b = create_test_matrices(M, K, N, "row", b_layout, dtype)
+    config = {
+        "BLOCK_SIZE_M": 256,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "optimize_epilogue": False,
+        "use_block_pingpong": True,
+    }
+    assert run_layout_combination_test(
+        a,
+        b,
+        "row",
+        b_layout,
+        0b11,
+        False,
+        False,
+        case_name=f"channel-wise scaled {dtype} row-{b_layout}",
+        config=config,
+        use_channelwise_scale=True,
+        use_moe_int8_accumulation=use_moe_int8_accumulation,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("b_layout", ["col", "row"])
+def test_mls_bit16_block_pingpong(dtype, b_layout):
+    """Keep FP16/BF16 on the common Bit16 BlockPingpong schedule."""
+    if not is_hcu_support_mls():
+        pytest.skip("skip: not support mls")
+
+    M, N, K = 128, 128, 256
+    a, b = create_test_matrices(M, K, N, "row", b_layout, dtype)
+    config = {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "optimize_epilogue": False,
+        "use_block_pingpong": True,
+    }
+    assert run_layout_combination_test(
+        a,
+        b,
+        "row",
+        b_layout,
+        0b11,
+        False,
+        False,
+        case_name=f"Bit16 {dtype} row-{b_layout}",
+        config=config,
+        output_dtype=dtype,
+    )
 
 
 def create_test_matrix_for_load_store(M, K, a_layout, dtype):
@@ -1306,14 +1538,45 @@ matrix_mls_test_sizes = [
 #     (8192, 8192, 128-4),
 #     (16384, 16384, 128-4),
 # ]
-def ref_program(A, B):
+_hipblaslt_workspace = None
+_hipblaslt_handle = None
+
+
+def _get_hipblaslt():
+    """Lazy-init the hipBLASLt handle used by the native FP8 baseline."""
+    global _hipblaslt_workspace, _hipblaslt_handle
+    if _hipblaslt_handle is None:
+        # This is only a Python binding: HipblasLt dlopens libhipblaslt.so and
+        # calls hipblasLtMatmul directly.  No Triton kernel is compiled or run.
+        # torch.mm has no FP8 implementation on HCU and torch._scaled_mm cannot
+        # find a valid solution on gfx938, so this is the native BLASLt path.
+        from triton._C.libtriton import amd as vendor
+        _hipblaslt_workspace = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device="cuda")
+        _hipblaslt_handle = vendor.hipblas.HipblasLt(_hipblaslt_workspace)
+    return _hipblaslt_handle
+
+
+def ref_program(A, B, out=None):
     """
     Compute the matrix product of A and the transpose of B.
 
     A and B are expected to be 2-D tensors where A has shape (M, K) and B has shape (N, K).
     The result is a tensor with shape (M, N) equal to A @ B.T, using the inputs' dtypes.
     """
-    return A @ B.T
+    return torch.mm(A, B.T, out=out)
+
+
+def ref_program_fp8(A, B, out=None, out_dtype=torch.float16):
+    """FP8 GEMM via hipBLASLt (no FP16 cast). A:(M,K), B:(N,K) -> C:(M,N)."""
+    A = A if A.is_contiguous() else A.contiguous()
+    B = B if B.is_contiguous() else B.contiguous()
+    M, K = A.shape
+    N = B.shape[0]
+    if out is None:
+        out = torch.empty((M, N), device=A.device, dtype=out_dtype)
+    _get_hipblaslt().matmul(A, B, out)
+    return out
 
 
 def get_logical_ab_for_ref(a, b, a_layout, b_layout):
@@ -1322,27 +1585,25 @@ def get_logical_ab_for_ref(a, b, a_layout, b_layout):
     return A, B
 
 
-def run_ref_program(a, b, a_layout, b_layout, dtype):
+def run_ref_program(a, b, a_layout, b_layout, dtype, out=None):
     A, B = get_logical_ab_for_ref(a, b, a_layout, b_layout)
-    if dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
-        A = A.to(torch.float16)
-        B = B.to(torch.float16)
-        return ref_program(A, B)
-    return ref_program(A, B)
+    if dtype == torch.float8_e4m3fn:
+        # Native FP8 hipBLASLt (no FP16 cast). Bench defaults to e4m3fn;
+        # e5m2 is omitted (same peak, and HipblasLt dtype str expects e5m2fn).
+        return ref_program_fp8(A, B, out=out)
+    return ref_program(A, B, out=out)
 
 
 def verify_triton_vs_ref(triton_output, a, b, a_layout, b_layout, dtype, label=""):
     ref_output = run_ref_program(a, b, a_layout, b_layout, dtype)
-    if dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
-        ref_output = ref_output.to(torch.float16)
     return compare_matmul_outputs(
         triton_output, ref_output, dtype,
         label=f"Triton vs ref {label}".rstrip(),
     )
 
 
-matrix_load_line_vals = ["ref"] + (["mls","buffer_load"] if is_hcu_support_mls() else ["buffer_load"])
-matrix_load_line_names = ["REF(tflops)"] + (["MLS(tflops)", "BUF_LOAD(tflops)"] if is_hcu_support_mls() else ["BUF_LOAD(tflops)"])
+matrix_load_line_vals = ["blas"] + (["mls","buffer_load"] if is_hcu_support_mls() else ["buffer_load"])
+matrix_load_line_names = ["BLAS/hipBLASLt(tflops)"] + (["MLS(tflops)", "BUF_LOAD(tflops)"] if is_hcu_support_mls() else ["BUF_LOAD(tflops)"])
 matrix_load_line_styles = [("blue", "-")] + ([("green", "-"), ("orange", "-")] if is_hcu_support_mls() else [("orange", "-")])
 benchmark_matmul_mls_configs = []
 fp8_inputs_types = [False, True] if is_hcu_support_mls() else [False]
@@ -1365,12 +1626,13 @@ for fp8_inputs in fp8_inputs_types:
 
 @triton.testing.perf_report(benchmark_matmul_mls_configs)
 def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layout):
-    dtype = torch.float8_e5m2 if fp8_inputs else torch.float16
+    # e4m3 / e5m2 吞吐相当；hipBLASLt 对 OCP FP8 默认走 e4m3fn
+    dtype = torch.float8_e4m3fn if fp8_inputs else torch.float16
     if matrix_load_mode == "mls":
         matrix_load_mode_value = 0b00
     elif matrix_load_mode == "buffer_load":
         matrix_load_mode_value = 0b11
-    elif matrix_load_mode == "ref":
+    elif matrix_load_mode == "blas":
         matrix_load_mode_value = None
     else:
         raise ValueError(f"未知的 matrix_load_mode: {matrix_load_mode}")
@@ -1389,11 +1651,18 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
             activation="",
         )
 
-    if matrix_load_mode == "ref":
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: run_ref_program(a, b, a_layout, b_layout, dtype),
-            quantiles=quantiles,
-        )
+    if matrix_load_mode == "blas":
+        # Pre-materialize operands and output so BLAS timing is GEMM-only.
+        A, B = get_logical_ab_for_ref(a, b, a_layout, b_layout)
+        out = torch.empty((M, N), device=a.device, dtype=torch.float16)
+        if dtype == torch.float8_e4m3fn:
+            A = A.contiguous()
+            B = B.contiguous()
+            _get_hipblaslt()  # warm handle/workspace outside timed region
+            bench_fn = lambda: ref_program_fp8(A, B, out=out)
+        else:
+            bench_fn = lambda: ref_program(A, B, out=out)
+        ms, min_ms, max_ms = triton.testing.do_bench(bench_fn, quantiles=quantiles)
     else:
         triton_output = _matmul_mls()
         verify_triton_vs_ref(
@@ -1405,35 +1674,76 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-# Performance:
-# NMZ: TRITON_BUFFER_CACHE_SWIZZLE=1:
-# matmul-load-performance-row-col-fp16:
-#          M        N        K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0   4096.0   4096.0   4096.0            270.890410            216.643996                 203.167954
-# 1   5120.0   5120.0   5120.0            265.022106            200.840628                 209.244486
-# 2   8192.0   8192.0   8192.0            280.843148            171.046173                 204.955461
-# 3  16384.0  16384.0  16384.0            220.005396            155.280768                 191.895972
-# matmul-load-performance-row-row-fp16:
-#          M        N        K  REF(tflops) (TFLOPS)  MLS(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0   4096.0   4096.0   4096.0            295.186747            230.416696                 193.032235
-# 1   5120.0   5120.0   5120.0            314.297782            257.773921                 199.740874
-# 2   8192.0   8192.0   8192.0            246.147677            277.699474                 201.914413
-# 3  16384.0  16384.0  16384.0            218.747429            221.737069                 206.809381
+# Final BlockPingpong snapshot (2026-08-19,
+# TRITON_BUFFER_CACHE_SWIZZLE=1). Bit16 is TFLOPS; channel-wise scale GEMM is
+# TOPS. REF/MLS are historical reference columns; BMZ does not support FP8.
 #
-#------------------------------------------------------------------------------
-# BMZ: TRITON_BUFFER_CACHE_SWIZZLE=1:
-# matmul-load-performance-row-col-fp16:
-#          M        N        K  REF(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0   4096.0   4096.0   4096.0            322.323995                 267.016917
-# 1   5120.0   5120.0   5120.0            371.341653                 333.675729
-# 2   8192.0   8192.0   8192.0            380.801855                 306.209241
-# 3  16384.0  16384.0  16384.0            297.914112                 238.599453
-# matmul-load-performance-row-row-fp16:
-#          M        N        K  REF(tflops) (TFLOPS)  BUF_LOAD(tflops) (TFLOPS)
-# 0   4096.0   4096.0   4096.0            341.683947                 244.658216
-# 1   5120.0   5120.0   5120.0            415.895916                 266.220760
-# 2   8192.0   8192.0   8192.0            325.299494                 271.742246
-# 3  16384.0  16384.0  16384.0            275.724413                 267.532832
+# Bit16 GEMM
+# | Machine | Type | Layout  | MxNxK          | REF     | MLS     | pre nonPP | post nonPP | tip PP  | post/pre | PP/post |
+# |---------|------|---------|----------------|---------|---------|-----------|------------|---------|----------|---------|
+# | NMZ | FP16 | row-col | 4096^3         | 270.890 | 216.644 | 209.204 | 209.204 | 246.870 |  +0.00% | +18.00% |
+# | NMZ | FP16 | row-col | 5120^3         | 265.211 | 200.841 | 208.542 | 208.542 | 260.553 |  +0.00% | +24.94% |
+# | NMZ | FP16 | row-col | 8192^3         | 280.225 | 171.046 | 204.754 | 204.754 | 275.738 |  +0.00% | +34.67% |
+# | NMZ | FP16 | row-col | 16384^3        | 218.951 | 155.281 | 191.312 | 191.312 | 193.120 |  +0.00% |  +0.95% |
+# | NMZ | FP16 | row-row | 4096^3         | 295.390 | 230.417 | 193.032 | 213.440 | 233.110 | +10.57% |  +9.22% |
+# | NMZ | FP16 | row-row | 5120^3         | 314.239 | 257.774 | 199.741 | 228.693 | 247.337 | +14.49% |  +8.15% |
+# | NMZ | FP16 | row-row | 8192^3         | 245.963 | 277.699 | 201.914 | 226.188 | 262.267 | +12.02% | +15.95% |
+# | NMZ | FP16 | row-row | 16384^3        | 218.800 | 221.737 | 206.809 | 229.864 | 280.397 | +11.15% | +21.98% |
+# | NMZ | FP16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 244.581 |        - |        - |
+# | NMZ | BF16 | row-col | 4096x4096x4064 |       - |       - | 211.146 | 211.175 | 242.525 |  +0.01% | +14.85% |
+# | NMZ | FP16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 232.629 |        - |        - |
+# | NMZ | BF16 | row-row | 4096x4096x4064 |       - |       - | 184.875 | 212.888 | 230.357 | +15.15% |  +8.21% |
+# | BMZ | FP16 | row-col | 4096^3         | 322.930 |       - | 221.262 | 221.253 | 277.426 |  -0.00% | +25.39% |
+# | BMZ | FP16 | row-col | 5120^3         | 371.383 |       - | 271.305 | 271.275 | 328.345 |  -0.01% | +21.04% |
+# | BMZ | FP16 | row-col | 8192^3         | 381.404 |       - | 275.800 | 275.734 | 357.098 |  -0.02% | +29.51% |
+# | BMZ | FP16 | row-col | 16384^3        | 298.484 |       - | 279.571 | 277.670 | 202.853 |  -0.68% | -26.94% |
+# | BMZ | FP16 | row-row | 4096^3         | 341.684 |       - | 207.576 | 233.544 | 263.963 | +12.51% | +13.02% |
+# | BMZ | FP16 | row-row | 5120^3         | 415.999 |       - | 239.373 | 274.894 | 332.706 | +14.84% | +21.03% |
+# | BMZ | FP16 | row-row | 8192^3         | 325.376 |       - | 242.479 | 290.825 | 346.620 | +19.94% | +19.19% |
+# | BMZ | FP16 | row-row | 16384^3        | 275.414 |       - | 250.327 | 277.965 | 346.883 | +11.04% | +24.79% |
+# | BMZ | FP16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 265.146 |        - |        - |
+# | BMZ | BF16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 260.888 |        - |        - |
+# | BMZ | FP16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 260.519 |        - |        - |
+# | BMZ | BF16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 255.459 |        - |        - |
+#
+# Channel-wise scale GEMM (A scale [M], B scale [N], FP16 output, BK=64)
+# | Machine | Type | Layout  | MxNxK          | pre nonPP | post/current nonPP | tip PP  | post/pre | PP/post |
+# |---------|------|---------|----------------|-----------|--------------------|---------|----------|---------|
+# | NMZ | FP8  | row-col | 4096^3         | 405.686 | 405.725 | 448.945 |  +0.01% | +10.65% |
+# | NMZ | FP8  | row-col | 5120^3         | 417.604 | 417.747 | 485.424 |  +0.03% | +16.20% |
+# | NMZ | FP8  | row-col | 8192^3         | 436.989 | 437.032 | 539.615 |  +0.01% | +23.47% |
+# | NMZ | FP8  | row-col | 16384^3        | 477.404 | 477.600 | 405.250 |  +0.04% | -15.15% |
+# | NMZ | FP8  | row-row | 4096^3         | 346.346 | 395.568 | 439.220 | +14.21% | +11.04% |
+# | NMZ | FP8  | row-row | 5120^3         | 373.201 | 427.356 | 480.788 | +14.51% | +12.50% |
+# | NMZ | FP8  | row-row | 8192^3         | 393.103 | 432.161 | 530.075 |  +9.94% | +22.66% |
+# | NMZ | FP8  | row-row | 16384^3        | 411.009 | 491.909 | 588.840 | +19.68% | +19.71% |
+# | NMZ | FP8  | row-col | 4096x4096x4064 | 378.337 | 378.342 | 347.262 |  +0.00% |  -8.21% |
+# | NMZ | FP8  | row-row | 4096x4096x4064 | 332.410 | 368.291 | 414.914 | +10.79% | +12.66% |
+# | NMZ | INT8 | row-col | 4096^3         | 403.381 | 402.641 | 443.487 |  -0.18% | +10.14% |
+# | NMZ | INT8 | row-col | 5120^3         | 414.784 | 414.801 | 482.164 |  +0.00% | +16.24% |
+# | NMZ | INT8 | row-col | 8192^3         | 435.252 | 435.206 | 536.498 |  -0.01% | +23.27% |
+# | NMZ | INT8 | row-col | 16384^3        | 476.294 | 476.294 | 406.657 |  +0.00% | -14.62% |
+# | NMZ | INT8 | row-row | 4096^3         | 344.243 | 391.968 | 437.183 | +13.86% | +11.54% |
+# | NMZ | INT8 | row-row | 5120^3         | 370.996 | 424.277 | 477.862 | +14.36% | +12.63% |
+# | NMZ | INT8 | row-row | 8192^3         | 391.503 | 430.102 | 527.157 |  +9.86% | +22.57% |
+# | NMZ | INT8 | row-row | 16384^3        | 409.738 | 490.606 | 588.186 | +19.74% | +19.89% |
+# | NMZ | INT8 | row-col | 4096x4096x4064 | 375.027 | 374.970 | 344.830 |  -0.02% |  -8.04% |
+# | NMZ | INT8 | row-row | 4096x4096x4064 | 329.790 | 365.209 | 411.086 | +10.74% | +12.56% |
+# | BMZ | INT8 | row-col | 4096^3         |       - | 349.175 | 479.981 |        - | +37.46% |
+# | BMZ | INT8 | row-col | 5120^3         |       - | 393.548 | 523.494 |        - | +33.02% |
+# | BMZ | INT8 | row-col | 8192^3         |       - | 469.472 | 667.789 |        - | +42.24% |
+# | BMZ | INT8 | row-col | 16384^3        |       - | 546.512 | 488.961 |        - | -10.53% |
+# | BMZ | INT8 | row-row | 4096^3         |       - | 427.134 | 474.193 |        - | +11.02% |
+# | BMZ | INT8 | row-row | 5120^3         |       - | 473.501 | 573.054 |        - | +21.02% |
+# | BMZ | INT8 | row-row | 8192^3         |       - | 540.676 | 663.887 |        - | +22.79% |
+# | BMZ | INT8 | row-row | 16384^3        |       - | 556.117 | 640.992 |        - | +15.26% |
+# | BMZ | INT8 | row-col | 4096x4096x4064 |       - | 337.369 | 365.678 |        - |  +8.39% |
+# | BMZ | INT8 | row-row | 4096x4096x4064 |       - | 392.356 | 399.880 |        - |  +1.92% |
+#
+# Safe-review recheck on NMZ (2026-08-19): BF16 row-col 4096x4096x4064
+# M256_N256_K32_G4_w8_s2 = 241.950 TFLOPS, 203 VGPR, 0 spill; INT8
+# channel-wise row-col 4096^3 M256_N256_K64_G4_w8_s2 = 443.547 TOPS,
+# 225 VGPR, 0 spill. Both have 0 mismatch and applied PP/static buffers.
 
 # if __name__ == "__main__":
 #     benchmark_matmul_mls.run(show_plots=True, print_data=True)

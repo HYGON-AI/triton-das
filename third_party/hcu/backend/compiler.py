@@ -23,11 +23,6 @@ def get_min_dot_size(target: GPUTarget):
     return lambda lhs_type, rhs_type: (1, 1, 1)
 
 
-def is_pingpong_schedule_enabled(arch, use_async_copy):
-    return (arch == "gfx942" or (arch == "gfx950" and use_async_copy is True)
-            ) if knobs.amd.use_block_pingpong is None else knobs.amd.use_block_pingpong
-
-
 def is_in_thread_transpose_enabled(arch):
     return (arch == "gfx942") if knobs.amd.use_in_thread_transpose is None else knobs.amd.use_in_thread_transpose
 
@@ -111,6 +106,17 @@ class HIPOptions:
     # Extend options for HCU, used for buffer ops with cache swizzle enable or disalbe.
     # mls ignore this and enable default due to better performance.
     buffer_cache_swizzle: bool = False
+
+    # Enable the HCU-only BufferLoad BlockPingpong schedule. The HCU matcher
+    # accepts only measured 8-warp GEMM tiles with legal BK halves, vectorized
+    # A/B loads and two LDS generations fitting in 64 KiB. Async copy and WASP
+    # must be disabled. Prepare gives each matched loop its internal three-stage
+    # pipeline, independently of the caller's num_stages value; reduction
+    # dataflow later selects a split-BK four-phase or whole-BK two-phase body.
+    # Keep GROUP_SIZE_M in the kernel autotune space: it controls CTA traversal
+    # and cache locality, and its best value depends on the problem shape rather
+    # than on the BlockPingpong compiler schedule.
+    use_block_pingpong: bool = False
 
     # wasp options
     wasp_enabled: bool = False
@@ -232,6 +238,10 @@ class HIPBackend(BaseBackend):
 
         if "buffer_cache_swizzle" not in opts:
             args["buffer_cache_swizzle"] = knobs.amd.buffer_cache_swizzle
+
+        if ("use_block_pingpong" not in opts
+                and knobs.amd.use_block_pingpong is not None):
+            args["use_block_pingpong"] = knobs.amd.use_block_pingpong
 
         if args.get("wasp_enabled"):
             # WASP owns LDS multi-buffering via LoadMMASpecialization; only
@@ -620,11 +630,18 @@ class HIPBackend(BaseBackend):
         if not options.wasp_enabled:
             hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, use_async_copy)
 
-        use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
+        use_block_pingpong = (options.use_block_pingpong and not use_async_copy
+                              and not options.wasp_enabled)
+        # BlockPingpong relies on the buffer-op cache swizzle to distribute
+        # neighboring workgroups across cache slices. Keep an explicit user
+        # request effective as well, but force it on whenever PP is active.
+        buffer_cache_swizzle = options.buffer_cache_swizzle or use_block_pingpong
+        if use_block_pingpong:
+            hcu.passes.ttgpuir.add_prepare_block_pingpong(pm)
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
 
         if not options.wasp_enabled:
-            amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, use_block_pingpong)
+            amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, False)
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
@@ -640,8 +657,10 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.add_in_thread_transpose(pm)
             passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_reorder_instructions(pm)
-        if use_block_pingpong and options.num_stages > 1:
-            amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
+
+        if use_block_pingpong:
+            # amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
+            hcu.passes.ttgpuir.add_block_pingpong(pm)
 
         if options.wasp_enabled:
             # Under WASP, num_stages is the LDS buffer depth (2 or 4), not AMD
@@ -668,7 +687,7 @@ class HIPBackend(BaseBackend):
                 knobs.amd.buffer_ops_analyze_small_tensor_range,
                 knobs.amd.emit_buffer_ops_offset_assert,
                 knobs.amd.buffer_ops_use_range_analysis,
-                options.buffer_cache_swizzle,
+                buffer_cache_swizzle,
             )
 
         amd.passes.ttgpuir.add_fold_true_cmpi(pm)
@@ -740,6 +759,8 @@ class HIPBackend(BaseBackend):
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
+        if options.use_block_pingpong:
+            hcu.passes.ttgpuir.add_pack_block_pingpong_bit8(pm)
         passes.common.add_symbol_dce(pm)
 
         if options.wasp_enabled:

@@ -27,6 +27,7 @@ add_triton_library(TritonHCUTransforms
   AccelerateHCUMatmul.cpp
   ApplyFuncHintsAndClean.cpp
   ConsumerPingpong.cpp
+  BlockPingpong.cpp
   MlsEncodingInsertion.cpp
   MlsStreamPipeline.cpp
   MlsLowering.cpp

@@ -24,6 +24,19 @@ namespace ttg = mlir::triton::gpu;
 using mlir::triton::AMD::AttrBypassLDS;
 
 namespace mlir {
+
+namespace {
+
+// HCU BlockPingpong annotates a loop between ScheduleLoops and Pipeline when it
+// needs a schedule that the generic distance-based heuristic cannot infer.
+// AMD's default behavior is unchanged when these HCU-only attributes are
+// absent.
+constexpr StringLiteral kHCULocalStoreStageAttr =
+    "ttg.pipeline.hcu_local_store_stage";
+constexpr StringLiteral kHCUNumBuffersAttr = "ttg.pipeline.hcu_num_buffers";
+
+} // namespace
+
 struct StreamCopyChainOps {
   tt::LoadOp loadOp;
   ttg::MemDescIndexOp subviewOp;
@@ -418,6 +431,7 @@ void remapClusters(tt::CoarseSchedule &schedule, ClusterMap clusterMap,
 //            can cause invalid schedules to be produced.
 LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
                            int &numBuffers, bool useAsyncCopy, bool waitAtTail,
+                           scf::ForOp forOp,
                            Clusters &clusters, tt::CoarseSchedule &schedule) {
   LDBG("Init SingleDotSchedule");
   int lastStage = numStages - 1;
@@ -426,6 +440,9 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
   stages[SCHED_LOCAL_LOAD] = lastStage;
   stages[SCHED_COMPUTE] = lastStage;
   stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
+
+  if (auto attr = forOp->getAttrOfType<IntegerAttr>(kHCULocalStoreStageAttr))
+    stages[SCHED_LOCAL_STORE] = attr.getInt();
 
   bool pairedGlobalLoadLocalStore = stages[SCHED_LOCAL_STORE] == 0;
   stages[SCHED_LOCAL_STORE] += maxDist;
@@ -456,6 +473,8 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
   if (useAsyncCopy) {
     numBuffers += 1;
   }
+  if (auto attr = forOp->getAttrOfType<IntegerAttr>(kHCUNumBuffersAttr))
+    numBuffers = attr.getInt();
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
@@ -598,7 +617,7 @@ void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
 
   int numBuffers = 1;
   if (failed(initSchedule(maxDist, stages, numStages, numBuffers, useAsyncCopy,
-                          waitAtTail, clusters, schedule)))
+                          waitAtTail, forOp, clusters, schedule)))
     return;
 
   // Convert the loads into shared memory allocations and loads from them.

@@ -7,7 +7,9 @@
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
+#include "mlir/Transforms/Passes.h"
 #include "passes.h"
+#include "triton/Dialect/Triton/Transforms/Passes.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -19,6 +21,16 @@
 namespace py = pybind11;
 
 namespace {
+
+void addBlockPingpongPipeline(mlir::PassManager &pm) {
+  // Schedule split-BK M0-D0-M1-D1 or whole-BK M-D, turn slot parity into a
+  // compile-time property with late 2K unrolling, then expose the two LDS slots
+  // as independent buffers.
+  pm.addPass(mlir::createTritonHCUBlockPingpong());
+  pm.addPass(mlir::triton::createTritonLoopUnroll());
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createTritonHCUFinalizeBlockPingpong());
+}
 
 void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   using namespace mlir::triton;
@@ -41,6 +53,11 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_3("add_mls_stream_pipeline",
                             mlir::createTritonHCUMlsStreamPipeline, int, int,
                             bool);
+  ADD_PASS_WRAPPER_0("add_prepare_block_pingpong",
+                     mlir::createTritonHCUPrepareBlockPingpong);
+  m.def("add_block_pingpong", addBlockPingpongPipeline);
+  ADD_PASS_WRAPPER_0("add_pack_block_pingpong_bit8",
+                     mlir::createTritonHCUPackBlockPingpongBit8);
   ADD_PASS_WRAPPER_0("add_mls_encoding_insertion",
                      mlir::createTritonHCUMlsEncodingInsertion);
   ADD_PASS_WRAPPER_0("add_mls_lowering_pass",

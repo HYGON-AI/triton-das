@@ -80,6 +80,64 @@ def TritonHCUMlsStreamPipeline : Pass<"tritonhcu-mls-stream-pipeline", "mlir::Mo
   ];
 }
 
+def TritonHCUPrepareBlockPingpong
+    : Pass<"tritonhcu-prepare-block-pingpong", "mlir::ModuleOp"> {
+  let summary = "Prepare HCU buffer-load loops for BlockPingpong";
+  let description = [{
+    Match structurally supported HCU BufferLoad-only BlockPingpong GEMM tiles
+    and annotate each loop with the fixed three-stage AMD pipeline schedule and
+    two LDS buffers. This pass does not reorder instructions.
+  }];
+  let dependentDialects = [
+    "mlir::triton::amdgpu::TritonAMDGPUDialect"
+  ];
+}
+
+def TritonHCUBlockPingpong
+    : Pass<"tritonhcu-block-pingpong", "mlir::ModuleOp"> {
+  let summary = "Schedule HCU BufferLoad loops as BlockPingpong phases";
+  let description = [{
+    Reorder an HCU-marked, AMD-pipelined BufferLoad GEMM loop into the
+    split-BK M0-D0-M1-D1 or whole-BK M-D phase sequence, add asymmetric wave
+    synchronization and priority boundaries, and request late 2K loop
+    unrolling.
+  }];
+  let dependentDialects = [
+    "mlir::gpu::GPUDialect",
+    "mlir::ROCDL::ROCDLDialect",
+    "mlir::triton::amdgpu::TritonAMDGPUDialect"
+  ];
+}
+
+def TritonHCUFinalizeBlockPingpong
+    : Pass<"tritonhcu-finalize-block-pingpong", "mlir::ModuleOp"> {
+  let summary = "Expose static HCU BlockPingpong LDS buffers";
+  let description = [{
+    Run after late 2K loop unrolling and canonicalization. The two cloned BK
+    steps make LDS slot parity static, allowing this pass to replace each
+    combined two-slot allocation with independent slot0 and slot1 allocations.
+    This exposes non-aliasing current/next buffers to allocation and membar
+    analysis without re-running the BlockPingpong phase scheduler.
+  }];
+  let dependentDialects = [
+    "mlir::triton::amdgpu::TritonAMDGPUDialect"
+  ];
+}
+
+def TritonHCUPackBlockPingpongBit8
+    : Pass<"tritonhcu-pack-block-pingpong-bit8", "mlir::ModuleOp"> {
+  let summary = "Keep 8-bit BlockPingpong loop-carried values packed in i32";
+  let description = [{
+    Run after TritonGPU/control-flow lowering to the LLVM dialect.  For an
+    enabled BlockPingpong compilation, replace loop-header aggregates made
+    entirely of i8 values with i32 aggregates at CFG edges, and expose LDS
+    stores as vectors of i32.  This prevents LLVM optimization from forming
+    byte-vector PHIs and later scalarizing/repacking them in the AMDGPU
+    backend.  Non-8-bit values are left untouched.
+  }];
+  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 def TritonHCUMlsEncodingInsertion: Pass<"tritonhcu-mls-encoding-insertion", "mlir::ModuleOp"> {
   let summary = "Insert MlsEncoding to the matrix_load instruction";
   let dependentDialects = [];
