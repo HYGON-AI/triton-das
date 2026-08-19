@@ -1535,6 +1535,18 @@ void init_triton_ir(py::module &&m) {
                                            indices, boundaryCheck, cacheModifier, evictionPolicy,
                                            isVolatile);
            })
+      .def("create_matrix_store",
+           [](TritonOpBuilder &self, Value &base, Value &value,
+              std::vector<Value> &shape, std::vector<Value> &strides,
+              std::vector<int32_t> &tensorShape, std::vector<Value> &indices,
+              std::vector<int32_t> &boundaryCheck, CacheModifier cacheModifier,
+              EvictionPolicy evictionPolicy) -> void {
+             self.create<MatrixStoreOp>(
+                 base, value, shape, strides,
+                 DenseI32ArrayAttr::get(self.getBuilder().getContext(),
+                                        tensorShape),
+                 indices, boundaryCheck, cacheModifier, evictionPolicy);
+           })
       .def("create_tensor_pointer_load",
            [](TritonOpBuilder &self, Value &ptr,
               std::vector<int32_t> &boundaryCheck,

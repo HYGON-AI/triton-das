@@ -112,6 +112,50 @@ public:
 
 
 /*
+ * lowering:
+ *     matrix_store %value, %base
+ *
+ * MMAC C layout 3 is stored directly from VGPRs:
+ *     amdg.matrix_store_from_reg %value, %base
+ **/
+class MlsMatrixStoreLowering : public OpRewritePattern<tt::MatrixStoreOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tt::MatrixStoreOp storeOp,
+                                PatternRewriter &rewriter) const override {
+    auto mlsAttr = storeOp->getAttrOfType<tta::MlsStoreEncodingAttr>(
+        tta::MlsStoreEncodingAttr::getMnemonic());
+    if (!mlsAttr)
+      return failure();
+
+    auto value = storeOp.getValue();
+    auto valueTy = cast<RankedTensorType>(value.getType());
+    auto loc = storeOp.getLoc();
+    rewriter.setInsertionPoint(storeOp);
+
+    auto mfmaEnc = dyn_cast<ttg::AMDMfmaEncodingAttr>(valueTy.getEncoding());
+    if (!valueTy.getElementType().isF16() || !mfmaEnc ||
+        mfmaEnc.getElementBitWidth() != 32 ||
+        mfmaEnc.getMmacLayout() != ttg::MmacLayout::TRANSPOSE ||
+        mlsAttr.getInterleaveKind() !=
+            static_cast<unsigned>(tt::HCU::MlsInterleaveKind::Interleave2))
+      return failure();
+
+    auto matrixStoreFromRegOp = rewriter.create<tta::MatrixStoreFromRegOp>(
+        loc, storeOp.getBase(), value, storeOp.getShape(),
+        storeOp.getStrides(), storeOp.getTensorShape(), storeOp.getIndices(),
+        storeOp.getBoundaryCheck(), storeOp.getCache(), storeOp.getEvict());
+    matrixStoreFromRegOp->setAttr(tta::MlsStoreEncodingAttr::getMnemonic(),
+                                  mlsAttr);
+
+    rewriter.eraseOp(storeOp);
+    return success();
+  }
+};
+
+
+/*
  * print(cvt(dot encoding, blocked))) -> print(dot encoding)
  * this can save lds use when debug and try not affect the behavior(code gen) of the kernel.
  **/
@@ -194,6 +238,7 @@ public:
     ModuleOp mod = getOperation();
     mlir::RewritePatternSet patterns(context);
     patterns.add<MlsMatrixLoadLowering,
+                 MlsMatrixStoreLowering,
                  MlsConvertOpCanonicalization,
                  MlsPrintOpCanonicalization>( context);
     if (applyPatternsGreedily(mod, std::move(patterns)).failed())

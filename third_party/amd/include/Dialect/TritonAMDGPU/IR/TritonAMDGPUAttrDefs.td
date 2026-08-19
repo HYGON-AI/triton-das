@@ -97,4 +97,33 @@ def TritonAMDGPU_MlsEncoding : TritonAMDGPU_Attr<"MlsEncoding"> {
                        "`warpsPerCTA` `=` `[` $warpsPerCTA `]`";
 }
 
+def TritonAMDGPU_MlsStoreEncoding : TritonAMDGPU_Attr<"MlsStoreEncoding"> {
+  let cppNamespace = "::mlir::triton::amdgpu";
+  let mnemonic = "MlsStoreEncoding";
+  let summary = "MLS register-to-global matrix-store encoding attribute.";
+  let description = [{
+    Describes an MLS C-matrix store using M/N terminology. Unlike
+    MlsEncoding, this attribute has no dot operand index or K-major state.
+      storeTile      : matrix-store tile shape [M, N].
+      elemBitWidth   : output element width.
+      interleaveKind : register interleave used by the store.
+      version        : MLS ISA version.
+      order          : tensor order, fastest-changing axis first.
+      warpsPerCTA    : MMAC-C warp distribution across M/N.
+  }];
+
+  let parameters = (ins ArrayRefParameter<"unsigned">:$storeTile,
+                        "unsigned":$elemBitWidth,
+                        "unsigned":$interleaveKind,
+                        "unsigned":$version,
+                        ArrayRefParameter<"unsigned">:$order,
+                        ArrayRefParameter<"unsigned">:$warpsPerCTA);
+  let assemblyFormat = "`storeTile` `=` `[` $storeTile `]` `,` "
+                       "`elemBitWidth` `=` $elemBitWidth `,` "
+                       "`interleaveKind` `=` $interleaveKind `,` "
+                       "`version` `=` $version `,` "
+                       "`order` `=` `[` $order `]` `,` "
+                       "`warpsPerCTA` `=` `[` $warpsPerCTA `]`";
+}
+
 #endif

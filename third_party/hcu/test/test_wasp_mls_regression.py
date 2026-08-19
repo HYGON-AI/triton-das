@@ -1,15 +1,19 @@
 """
 HCU WASP / WASP+WDRA regression matrix: GEMM & FA × MLS & non-MLS.
 
-Default scenarios (12):
+Default scenarios:
   GEMM  × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
   # GEMM  × {load, mls} × {wdra 8+8}                       # temporarily disabled
   GEMM  × {load, mls} × {wdra 4+8} × num_stages=4
+  GEMM  × mls_store × {wasp 4+4, wdra 4+8, wdra4+8/ns4}  # mmac_layout_force=3
   FA    × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
 
 Known limitation: gemm/load/wdra8+8 uses K=512; see the comment near
 WDRA88_LOAD_GEMM_SHAPE below. wdra8+8 does not support num_stages=4
 (abarrier ID limit).
+
+MLS-store GEMM cases use tl.matrix_store for C with mmac_layout_force=3
+(TRANSPOSE) so MFMA-C → store packing stays aligned.
 
 Optional nowrap (no WASP/WDRA) via --mode nowrap:
   uses plain num_warps (not wasp_num_*), warp_specialize=False on GEMM.
@@ -30,6 +34,7 @@ Usage (from triton-staging root):
   python .../test_wasp_mls_regression.py --mode wdra88  # 8+8 TwoPTwoC (GEMM)
   python .../test_wasp_mls_regression.py --only gemm --mode wdra --num-stages 4
   python .../test_wasp_mls_regression.py --only gemm --mls --mode nowrap
+  python .../test_wasp_mls_regression.py --only gemm --mls-store
   python .../test_wasp_mls_regression.py --compile-only
 """
 
@@ -68,6 +73,10 @@ def _load_sibling(mod_name: str, filename: str):
 # Shared configs
 # ---------------------------------------------------------------------------
 
+# MmacLayout::TRANSPOSE — aligns MFMA-C with MLS matrix_store packing.
+MLS_STORE_MMAC_LAYOUT = 3
+
+
 def gemm_config(
     *,
     wasp: bool,
@@ -75,6 +84,10 @@ def gemm_config(
     load_warps: Optional[int] = None,
     mma_warps: Optional[int] = None,
     num_stages: int = 2,
+    mmac_layout_force: Optional[int] = None,
+    block_m: Optional[int] = None,
+    block_n: Optional[int] = None,
+    block_k: Optional[int] = None,
 ) -> dict:
     """Launch/options for GEMM.
 
@@ -92,17 +105,22 @@ def gemm_config(
     if mma_warps is None:
         mma_warps = 8 if wdra else 4
     # WDRA MLS may retain both full and sliced LDS; keep tiles smaller.
-    block = 64 if wdra else 128
+    default_block = 64 if wdra else 128
+    bm = block_m if block_m is not None else default_block
+    bn = block_n if block_n is not None else default_block
+    bk = block_k if block_k is not None else default_block
     cfg = {
-        "BLOCK_SIZE_M": block,
-        "BLOCK_SIZE_N": block,
-        "BLOCK_SIZE_K": block,
+        "BLOCK_SIZE_M": bm,
+        "BLOCK_SIZE_N": bn,
+        "BLOCK_SIZE_K": bk,
         "GROUP_SIZE_M": 1,
         "WARP_SPECIALIZE": wasp,
         "wasp_enabled": wasp,
         "wdra_enabled": wdra,
         "num_stages": num_stages,
     }
+    if mmac_layout_force is not None:
+        cfg["mmac_layout_force"] = mmac_layout_force
     if wasp:
         cfg.update(
             {
@@ -190,7 +208,7 @@ def is_hcu_support_mls() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# GEMM kernels (tt.load / matrix_load)
+# GEMM kernels (tt.load / matrix_load / matrix_store)
 # ---------------------------------------------------------------------------
 
 @triton.jit
@@ -305,10 +323,80 @@ def gemm_mls_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
+@triton.jit
+def gemm_mls_store_kernel(
+    a_ptr, b_ptr, c_ptr,
+    M, N, K,
+    stride_am, stride_ak,
+    stride_bk, stride_bn,
+    stride_cm, stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    WARP_SPECIALIZE: tl.constexpr,
+):
+    """MLS load A/B + MLS store C (mmac_layout_force=3 expected at launch)."""
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
+    tl.assume(M > 0)
+    tl.assume(N > 0)
+    tl.assume(K > 0)
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    mls_offs_am = pid_m * BLOCK_SIZE_M
+    mls_offs_bn = pid_n * BLOCK_SIZE_N
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), warp_specialize=WARP_SPECIALIZE):
+        mls_offs_k = k * BLOCK_SIZE_K
+        a = tl.matrix_load(
+            a_ptr,
+            shape=[M, K],
+            strides=[stride_am, stride_ak],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+            offsets=[mls_offs_am, mls_offs_k],
+        )
+        b = tl.matrix_load(
+            b_ptr,
+            shape=[K, N],
+            strides=[stride_bk, stride_bn],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+            offsets=[mls_offs_k, mls_offs_bn],
+        )
+        accumulator = tl.dot(a, b, accumulator)
+    c = accumulator.to(tl.float16)
+
+    tl.matrix_store(
+        c_ptr,
+        c,
+        shape=[M, N],
+        strides=[stride_cm, stride_cn],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        offsets=[mls_offs_am, mls_offs_bn],
+    )
+
+
 def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
              load_warps: Optional[int] = None, mma_warps: Optional[int] = None,
              num_stages: int = 2, compile_only: bool = False,
-             shape=(128, 128, 4096), fixed_ab: bool = False) -> None:
+             shape=(128, 128, 4096), fixed_ab: bool = False,
+             use_matrix_store: bool = False,
+             mmac_layout_force: Optional[int] = None,
+             block_m: Optional[int] = None,
+             block_n: Optional[int] = None,
+             block_k: Optional[int] = None) -> None:
     M, N, K = shape
     torch.manual_seed(0)
     if fixed_ab:
@@ -322,11 +410,27 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
         b = torch.randn((N, K), device="cpu", dtype=torch.float16).transpose(1, 0)
     a_dev, b_dev = a.to("cuda"), b.to("cuda")
     c = torch.empty((M, N), device="cuda", dtype=torch.float16)
+    if use_matrix_store:
+        use_mls = True
+        if mmac_layout_force is None:
+            mmac_layout_force = MLS_STORE_MMAC_LAYOUT
+        if block_m is None:
+            block_m = MLS_STORE_BLOCK_M
+        if block_n is None:
+            block_n = MLS_STORE_BLOCK_N
+        if block_k is None:
+            block_k = MLS_STORE_BLOCK_K
     config = gemm_config(
         wasp=wasp, wdra=wdra, load_warps=load_warps, mma_warps=mma_warps,
-        num_stages=num_stages,
+        num_stages=num_stages, mmac_layout_force=mmac_layout_force,
+        block_m=block_m, block_n=block_n, block_k=block_k,
     )
-    kernel = gemm_mls_kernel if use_mls else gemm_load_kernel
+    if use_matrix_store:
+        kernel = gemm_mls_store_kernel
+    elif use_mls:
+        kernel = gemm_mls_kernel
+    else:
+        kernel = gemm_load_kernel
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
@@ -377,6 +481,12 @@ KNOWN_XFAIL: set[str] = set()
 # Default GEMM problem size.
 DEFAULT_GEMM_SHAPE = (128, 128, 4096)
 
+# MLS-store epilogue probe: larger MN tile, skinny K.
+MLS_STORE_GEMM_SHAPE = (256, 256, 4096)
+MLS_STORE_BLOCK_M = 256
+MLS_STORE_BLOCK_N = 256
+MLS_STORE_BLOCK_K = 64
+
 # TwoPTwoC (WDRA 8+8) slices A for M-split but leaves B shared. The tt.load
 # pipeline currently clones that shared B producer into both Load partitions.
 # Both then local_store to the same B LDS allocation while their MMA consumers
@@ -400,6 +510,7 @@ class Case:
     run: Callable[[bool], None]
     shape: Optional[tuple] = None  # GEMM only; None => DEFAULT_GEMM_SHAPE
     num_stages: int = 2
+    use_matrix_store: bool = False
 
     @property
     def xfail(self) -> bool:
@@ -425,7 +536,8 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
     Mode tuple: (wasp, wdra, load_warps, mma_warps, num_stages).
     GEMM also covers TwoPTwoC wdra 8+8; its tt.load case uses the known-green
     K=512 workaround. FA stays on 4+4 / 4+8 for now. Extra GEMM coverage:
-    wdra4+8 with num_stages=4 (TwoPTwoC cannot use stages=4).
+    wdra4+8 with num_stages=4 (TwoPTwoC cannot use stages=4), and mls_store
+    epilogue cases with mmac_layout_force=3.
     """
     cases: List[Case] = []
     # (wasp, wdra, load_warps, mma_warps, num_stages)
@@ -469,6 +581,29 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
                     load_warps=load_w, mma_warps=mma_w, run=runner, shape=shape,
                     num_stages=nstages,
                 ))
+
+    # GEMM MLS-store epilogue: matrix_load A/B + matrix_store C, layout=3.
+    # Shape/block: M=N=256, K=4096, BM=BN=256, BK=64.
+    for wasp, wdra, load_w, mma_w, nstages in modes:
+        if wdra and load_w >= 8 and nstages == 4:
+            continue
+        name = f"gemm/mls_store/{_mode_tag(wasp, wdra, load_w, mma_w, nstages)}"
+        shape = MLS_STORE_GEMM_SHAPE
+        runner = lambda co, wp=wasp, w=wdra, lw=load_w, mw=mma_w, ns=nstages, sh=shape: run_gemm(
+            use_mls=True, use_matrix_store=True,
+            mmac_layout_force=MLS_STORE_MMAC_LAYOUT,
+            wasp=wp, wdra=w, load_warps=lw or None,
+            mma_warps=mw or None, num_stages=ns, compile_only=co,
+            shape=sh,
+            block_m=MLS_STORE_BLOCK_M,
+            block_n=MLS_STORE_BLOCK_N,
+            block_k=MLS_STORE_BLOCK_K,
+        )
+        cases.append(Case(
+            name=name, kind="gemm", use_mls=True, wasp=wasp, wdra=wdra,
+            load_warps=load_w, mma_warps=mma_w, run=runner, shape=shape,
+            num_stages=nstages, use_matrix_store=True,
+        ))
     return cases
 
 
@@ -478,8 +613,10 @@ def filter_cases(cases: List[Case], args: argparse.Namespace) -> List[Case]:
         out = [c for c in out if c.kind == "gemm"]
     elif args.only == "fa":
         out = [c for c in out if c.kind == "fa"]
-    if args.mls is True:
-        out = [c for c in out if c.use_mls]
+    if getattr(args, "mls_store", None) is True:
+        out = [c for c in out if c.use_matrix_store]
+    elif args.mls is True:
+        out = [c for c in out if c.use_mls and not c.use_matrix_store]
     elif args.mls is False:
         out = [c for c in out if not c.use_mls]
     if args.mode == "wasp":
@@ -515,9 +652,12 @@ def main() -> int:
     )
     g = parser.add_mutually_exclusive_group()
     g.add_argument("--mls", dest="mls", action="store_true", default=None,
-                   help="only MLS cases")
+                   help="only MLS-load cases (excludes mls_store)")
     g.add_argument("--no-mls", dest="mls", action="store_false",
                    help="only non-MLS (tt.load) cases")
+    g.add_argument("--mls-store", dest="mls_store", action="store_true",
+                   default=None,
+                   help="only GEMM mls_store epilogue cases (mmac_layout_force=3)")
     parser.add_argument("--compile-only", action="store_true", default=False)
     parser.add_argument("--continue-on-fail", action="store_true", default=False,
                         help="run all cases even if one fails")
@@ -560,6 +700,9 @@ def main() -> int:
             if args.fixed_ab:
                 run_gemm(
                     use_mls=c.use_mls,
+                    use_matrix_store=c.use_matrix_store,
+                    mmac_layout_force=(MLS_STORE_MMAC_LAYOUT
+                                       if c.use_matrix_store else None),
                     wasp=c.wasp,
                     wdra=c.wdra,
                     load_warps=c.load_warps or None,

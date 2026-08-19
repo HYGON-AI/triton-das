@@ -180,6 +180,14 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
       }
     },
 
+    // matrix_load_64x16_b16: AN/BT, interleave 2 for fp16 VGPR matrix-store
+    {{64, 64, false, 16, MlsElemBitTyKind::None, MlsInterleaveKind::Interleave2, 2},
+      {{64, 16, ROCDL::hcu_matrix_load_64X16_b16::getOperationName(), {0, 1024, 2048, 3072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+        {32, 16, ROCDL::hcu_ds_read_matrix_format::getOperationName(),
+                MLS_DS_FLAGS_PACK(2, 2, 1, 1), {0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 0, 0, 0, 0, 0, 0, 0, 0}}
+      }
+    },
+
     // b8:
     // matrix_load_64x16_b8: AT/BN(transpose = 1), interleave 0,  mnk required elems tile: [16, 16, 64] -> load tile: [16, 16, 64] -> lds tile [16, 16, 64]
     {{16, 64, true, 8, MlsElemBitTyKind::None, MlsInterleaveKind::InterleaveNone, 2},
@@ -449,6 +457,8 @@ FailureOr<MlsInsn> MlsInsn::selectOrGetMlsInsn(unsigned nonKTile,
     oAttr.dsInsn.dsByteOffsets= iAttr.dsInfo.dsByteOffsets;
   }
 
+  oAttr.msInsn = {};
+
   // Note: current matrix_load tile seems only exist [1, 1], [xxx, 1], [1, xxx] and no [xxx, xxx] case
   // so cur instrOrder set to tensor order now.
   assert(oAttr.mlInsn.instrsPerWarp[0] == 1 || oAttr.mlInsn.instrsPerWarp[1] == 1);
@@ -458,6 +468,31 @@ FailureOr<MlsInsn> MlsInsn::selectOrGetMlsInsn(unsigned nonKTile,
   assert(dsInstsPerWarp <= MLS_INST_DS_CNT_MAX && mlInstsPerWarp <= MLS_INST_DS_CNT_MAX);
 
   return MlsInsn(oAttr);
+}
+
+FailureOr<MlsInsn> MlsInsn::selectOrGetMatrixStoreInsn(
+    unsigned mTile, unsigned nTile, unsigned elemBitWidth,
+    unsigned mlsVersion, MlsInterleaveKind interleaveKind) {
+  // VGPR matrix-store support is currently available only for the verified
+  // fp16 32x16 form used by MMAC C layout 3 with interleave 2.
+  if (interleaveKind != MlsInterleaveKind::Interleave2 ||
+      elemBitWidth != 16 || mTile != 32 || nTile != 16 ||
+      (mlsVersion != 2 && mlsVersion != 3))
+    return failure();
+
+  MlsInsnAttr attr{};
+  attr.opIdx = 0;
+  attr.mlsTile = {mTile, nTile};
+  attr.kMajor = false;
+  attr.elemBitWidth = elemBitWidth;
+  attr.elemBitTyKind = MlsElemBitTyKind::None;
+  attr.interleaveKind = interleaveKind;
+  attr.mlsVersion = mlsVersion;
+  attr.msInsn.instrShape = {32, 16};
+  attr.msInsn.instrsPerWarp = {mTile / 32, nTile / 16};
+  attr.msInsn.instrOrder = {0, 1};
+  attr.msInsn.insn = "rocdl.matrix.store.32x16.b16";
+  return MlsInsn(attr);
 }
 
 

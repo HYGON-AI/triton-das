@@ -743,6 +743,37 @@ def MatrixLoadToLocalOp : TT_AMDGPU_Op<"matrix_load_to_local", [AttrSizedOperand
   }];
 }
 
+def MatrixStoreFromRegOp : TT_AMDGPU_Op<"matrix_store_from_reg", [AttrSizedOperandSegments]> {
+  let summary = "matrix store from VGPR registers to global memory";
+  let description = [{
+    Store an fp16 MMAC C layout-3 tensor from VGPRs to global memory via HCU
+    `matrix_store_*` (VGPR→GMEM).
+  }];
+
+  let arguments = (ins
+    Arg<TT_Ptr, "Global memory scalar base pointer to store to", [MemWrite<GlobalMemory>]>:$base,
+    TT_Tensor:$value,
+    Variadic<I32>:$shape,
+    Variadic<I64>:$strides,
+    DenseI32ArrayAttr:$tensorShape,
+    Variadic<I32>:$indices,
+    DefaultValuedAttr<DenseI32ArrayAttr, "::llvm::ArrayRef<int32_t>{}">:$boundaryCheck,
+    DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache,
+    DefaultValuedAttr<TT_EvictionPolicyAttr, "triton::EvictionPolicy::NORMAL">:$evict
+  );
+
+  let assemblyFormat = [{
+    $value `,` $base `,` `shape` `=` `[` $shape `]` `,` `strides` `=` `[` $strides `]` `,`
+    `tensorShape` `=` $tensorShape `,` `indices` `=` `[` $indices `]`
+    oilist(
+      `boundaryCheck` `=` $boundaryCheck |
+      `cacheModifier` `=` $cache |
+      `evictionPolicy` `=` $evict
+    )
+    attr-dict `:` type($value) `,` type($base)
+  }];
+}
+
 
 //===----------------------------------------------------------------------===//
 // AsyncTDMCopyGlobalToLocalOp

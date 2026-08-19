@@ -2188,6 +2188,27 @@ def matrix_load(base: tensor,
 
 
 @builtin
+def matrix_store(base: tensor,
+                 value: tensor,
+                 shape: List[tensor],
+                 strides: List[tensor],
+                 block_shape: List[constexpr],
+                 offsets: Sequence[constexpr | tensor],
+                 boundary_check=(),
+                 cache_modifier="",
+                 eviction_policy="",
+                 _semantic=None):
+    """Store a block of data via HCU matrix_store.
+
+    Currently this supports fp16 output produced from an fp32 MMAC C layout-3
+    accumulator and stores it directly from VGPRs. A supported matrix-store
+    tile can replace multiple scalar or buffer stores.
+    """
+    return _semantic.matrix_store(base, value, shape, strides, block_shape, offsets,
+                                  boundary_check, cache_modifier, eviction_policy)
+
+
+@builtin
 def load_tensor_descriptor(desc: tensor_descriptor_base, offsets: Sequence[constexpr | tensor],
                            _semantic=None) -> tensor:
     """Load a block of data from a tensor descriptor."""

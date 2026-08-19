@@ -1157,7 +1157,8 @@ static bool getSliceToPartition(Value root,
     if (currentDim == DataPartitionScheme::noOpPartitionDim)
       continue;
     if (op->hasTrait<OpTrait::Elementwise>() ||
-        isa<StoreOp, DescriptorStoreOp, AtomicRMWOp>(op)) {
+        isa<StoreOp, DescriptorStoreOp, AtomicRMWOp,
+            tta::MatrixStoreFromRegOp>(op)) {
       for (OpOperand &operand : op->getOpOperands()) {
         if (!getBackwardSliceToPartition(operand.get(), partitionScheme,
                                          currentDim))
@@ -1919,6 +1920,53 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
         sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     }
     newOp = cloneAndSetResultType(op);
+  } else if (isa<tta::MatrixStoreFromRegOp>(op)) {
+    // MLS matrix_store uses block-level scalar indices (pid * BLOCK_*), not
+    // MakeRange. After M/N-splitting the value tile, bump indices[dim] for
+    // consumer offset>0 so the two halves land at distinct GMEM bases
+    // (same idea as DescriptorStore / MatrixLoad TwoPTwoC). Also shrink
+    // tensorShape to the sliced tile.
+    for (Value operand : op->getOperands())
+      sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
+
+    auto matrixStore = cast<tta::MatrixStoreFromRegOp>(op);
+    SmallVector<int32_t> tensorShape(matrixStore.getTensorShape().begin(),
+                                     matrixStore.getTensorShape().end());
+    ValueRange indices = matrixStore.getIndices();
+
+    int sliceSize = 0;
+    if (dim != DataPartitionScheme::noOpPartitionDim) {
+      assert(dim < tensorShape.size() &&
+             "matrix_store partition dim exceeds tensorShape rank");
+      assert(tensorShape[dim] % static_cast<int>(numOfPartitions) == 0 &&
+             "matrix_store tensorShape not divisible by WDRA partitions");
+      sliceSize = tensorShape[dim] / static_cast<int>(numOfPartitions);
+      tensorShape[dim] = sliceSize;
+
+      if (offset != 0) {
+        assert(static_cast<unsigned>(dim) < indices.size() &&
+               "matrix_store missing index for partition dim");
+        Value idx = indices[dim];
+        Value mapped = mappings.lookupOrNull(idx);
+        if (!mapped)
+          mapped = idx;
+        builder.setInsertionPoint(op);
+        Value offVal = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+            op->getLoc(), offset * sliceSize, 32);
+        Value newIdx = builder.createWithAsyncTaskIds<arith::AddIOp>(
+            op->getLoc(), mapped, offVal);
+        // Remap only for this store clone — do not replace other uses of the
+        // block offset (e.g. producers) in this partition's mapping.
+        mappings.map(idx, newIdx);
+        reverseMappings.map(newIdx, idx);
+      }
+    }
+
+    newOp = cloneAndSetResultType(op);
+    if (dim != DataPartitionScheme::noOpPartitionDim) {
+      newOp->setAttr("tensorShape",
+                     builder.getDenseI32ArrayAttr(tensorShape));
+    }
   } else if (isa<DescriptorLoadOp, DescriptorStoreOp>(op)) {
     SmallVector<int64_t> shape;
     Value coordVal;

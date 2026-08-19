@@ -52,6 +52,10 @@ SmallVector<unsigned> getMatrixLoadTensorOrder(triton::MatrixLoadOp matrixOp, in
   }
 }
 
+ttg::AMDMfmaEncodingAttr findSourceMfmaEncoding(Value value);
+bool requiresBInterleave2(triton::MatrixStoreOp storeOp);
+bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot);
+
 // Chooses a proper MLS instruction
 FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
                                         triton::MatrixLoadOp matrixOp, bool kMajor,
@@ -106,6 +110,11 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   }
 
   auto altKind = MlsInterleaveKind::InterleaveNone;
+  // For an N-major B operand feeding an fp32 MMAC-layout-3 accumulator that is
+  // stored as fp16 directly from VGPRs, factor-2 interleave places adjacent N
+  // values in consecutive VGPRs and avoids a cross-lane pack in the epilogue.
+  if (opIdx == 1 && !kMajor && feedsInterleavedFp16MatrixStore(dot))
+    altKind = MlsInterleaveKind::Interleave2;
 
   // Try candidate MLS elems tiles first (same strategy as
   // chooseMfmaInstructionWithMLS): pick the largest valid candidate.
@@ -166,6 +175,87 @@ warpsPerCTAMatrixLoad(ArrayRef<int64_t> shape, ArrayRef<unsigned> shapePerWarp, 
   warpsPerCTA[order[rank - 1]] = numWarps / prevWarps;
 
   return warpsPerCTA;
+}
+
+/// Walk convert_layout / trunc / unary elementwise to find the GEMM MFMA-C
+/// encoding that produced `value` (if any).
+ttg::AMDMfmaEncodingAttr findSourceMfmaEncoding(Value value) {
+  Value cur = value;
+  for (int depth = 0; depth < 16 && cur; ++depth) {
+    auto ty = dyn_cast<RankedTensorType>(cur.getType());
+    if (!ty)
+      break;
+    if (auto mfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(ty.getEncoding()))
+      return mfma;
+    Operation *def = cur.getDefiningOp();
+    if (!def)
+      break;
+    if (auto cvt = dyn_cast<ttg::ConvertLayoutOp>(def)) {
+      cur = cvt.getSrc();
+      continue;
+    }
+    if (isa<arith::TruncFOp, arith::ExtFOp, tt::FpToFpOp>(def) &&
+        def->getNumOperands() == 1) {
+      cur = def->getOperand(0);
+      continue;
+    }
+    if (def->hasTrait<OpTrait::Elementwise>() && def->getNumOperands() == 1) {
+      cur = def->getOperand(0);
+      continue;
+    }
+    break;
+  }
+  return {};
+}
+
+bool requiresBInterleave2(triton::MatrixStoreOp storeOp) {
+  auto valueTy = dyn_cast<RankedTensorType>(storeOp.getValue().getType());
+  if (!valueTy || !valueTy.getElementType().isF16())
+    return false;
+
+  // VGPR matrix-store packing is currently defined for output produced by
+  // fp32 MMAC C layout 3 (LTS=1, LIT=0). Output strides can be runtime values,
+  // so the decision must not depend on recognizing a constant unit stride.
+  auto mfma = findSourceMfmaEncoding(storeOp.getValue());
+  return mfma && mfma.getElementBitWidth() == 32 &&
+         mfma.getMmacLayout() == ttg::MmacLayout::TRANSPOSE;
+}
+
+bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot) {
+  auto resultTy = dyn_cast<RankedTensorType>(dot->getResult(0).getType());
+  if (!resultTy || !resultTy.getElementType().isF32())
+    return false;
+  auto mfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(resultTy.getEncoding());
+  if (!mfma || mfma.getMmacLayout() != ttg::MmacLayout::TRANSPOSE)
+    return false;
+
+  SetVector<Operation *> slice;
+  getForwardSlice(dot->getResult(0), &slice);
+  std::deque<Operation *> worklist(slice.begin(), slice.end());
+  while (!worklist.empty()) {
+    Operation *op = worklist.front();
+    worklist.pop_front();
+    if (auto store = dyn_cast<triton::MatrixStoreOp>(op)) {
+      if (requiresBInterleave2(store))
+        return true;
+      continue;
+    }
+    auto yield = dyn_cast<scf::YieldOp>(op);
+    if (!yield)
+      continue;
+    for (auto [index, operand] : llvm::enumerate(yield.getOperands())) {
+      Operation *def = operand.getDefiningOp();
+      if (def != dot.getOperation() && (!def || !slice.contains(def)))
+        continue;
+      Value loopResult = yield->getParentOp()->getResult(index);
+      SetVector<Operation *> outerSlice;
+      getForwardSlice(loopResult, &outerSlice);
+      for (Operation *outerOp : outerSlice)
+        if (slice.insert(outerOp))
+          worklist.push_back(outerOp);
+    }
+  }
+  return false;
 }
 
 Value convertAndCastTensor(OpBuilder &builder, Value value,
@@ -387,6 +477,63 @@ public:
   }
 };
 
+/// Attach the supported fp16 32x16 VGPR-store encoding to MMAC C layout 3.
+struct MlsStoreEncodingInsertion
+    : public OpRewritePattern<triton::MatrixStoreOp> {
+  int mlsVersion;
+
+public:
+  MlsStoreEncodingInsertion(MLIRContext *context, int mlsVersion)
+      : OpRewritePattern(context, 1), mlsVersion(mlsVersion) {}
+
+  LogicalResult matchAndRewrite(triton::MatrixStoreOp storeOp,
+                                PatternRewriter &rewriter) const override {
+    if (storeOp->hasAttr(
+            triton::amdgpu::MlsStoreEncodingAttr::getMnemonic()))
+      return failure();
+
+    auto value = storeOp.getValue();
+    auto valueType = cast<RankedTensorType>(value.getType());
+    if (valueType.getRank() != 2 || !valueType.getElementType().isF16() ||
+        !requiresBInterleave2(storeOp))
+      return failure();
+
+    constexpr unsigned mTile = 32;
+    constexpr unsigned nTile = 16;
+    constexpr unsigned bitwidth = 16;
+    constexpr auto altKind = MlsInterleaveKind::Interleave2;
+    if (valueType.getShape()[0] % mTile != 0 ||
+        valueType.getShape()[1] % nTile != 0)
+      return failure();
+
+    auto mlsInsn = MlsInsn::selectOrGetMatrixStoreInsn(
+        mTile, nTile, bitwidth, mlsVersion, altKind);
+    if (failed(mlsInsn))
+      return failure();
+
+    auto srcMfma = findSourceMfmaEncoding(value);
+    assert(srcMfma && "requiresBInterleave2 must find an MFMA source");
+    Value convertedValue = valueType.getEncoding() == Attribute(srcMfma)
+                               ? value
+                               : convertAndCastTensor(rewriter, value, srcMfma);
+    SmallVector<unsigned> order = {0, 1};
+    SmallVector<unsigned> warpsPerCTA(srcMfma.getWarpsPerCTA().begin(),
+                                      srcMfma.getWarpsPerCTA().end());
+
+    auto mlsEncoding = triton::amdgpu::MlsStoreEncodingAttr::get(
+        storeOp.getContext(), SmallVector<unsigned>{mTile, nTile}, bitwidth,
+        static_cast<unsigned>(altKind), mlsInsn->getMlsVersion(), order,
+        warpsPerCTA);
+
+    rewriter.modifyOpInPlace(storeOp, [&]() {
+      storeOp.getValueMutable().assign(convertedValue);
+      storeOp->setAttr(triton::amdgpu::MlsStoreEncodingAttr::getMnemonic(),
+                       mlsEncoding);
+    });
+    return success();
+  }
+};
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -413,7 +560,8 @@ public:
     auto features = mlir::triton::HCU::deduceHCUISAFeature(*arch);
     auto mlsVersion = getMlsVersionFromFeatures(features);
     mlir::RewritePatternSet patterns(context);
-    patterns.add<MlsEncodingInsertion>(context, mlsVersion);
+    patterns.add<MlsEncodingInsertion, MlsStoreEncodingInsertion>(context,
+                                                                  mlsVersion);
     if (mlir::applyPatternsGreedily(mod, std::move(patterns)).failed())
       signalPassFailure();
   }

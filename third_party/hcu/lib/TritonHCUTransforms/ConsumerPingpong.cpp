@@ -34,6 +34,14 @@ static void insertClusterBarrier(OpBuilder &b, Location loc) {
   bar->setAttr(hcu::kConsumerPingpongBarrierAttrName, b.getUnitAttr());
 }
 
+static void insertConditionalClusterBarrier(OpBuilder &b, Location loc,
+                                            Value condition) {
+  auto ifOp = scf::IfOp::create(b, loc, condition, /*withElseRegion=*/false);
+  OpBuilder::InsertionGuard guard(b);
+  b.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  insertClusterBarrier(b, loc);
+}
+
 static bool isPingpongBarrier(Operation *op) {
   return op && isa<ROCDL::SBarrierOp>(op) &&
          op->hasAttr(hcu::kConsumerPingpongBarrierAttrName);
@@ -63,9 +71,13 @@ static LogicalResult pingpongConsumerLoop(scf::ForOp forOp, bool isTail,
 
   // MMA_tail waits here so its first in-loop barrier meets MMA_main's first
   // cluster barrier — same trick as BlockPingpong::addAsymmetricSyncToLoop.
+  // Guard it for an empty loop, where MMA_main has no matching barrier.
   if (isTail) {
     b.setInsertionPoint(forOp);
-    insertClusterBarrier(b, forOp.getLoc());
+    Value nonEmpty = arith::CmpIOp::create(
+        b, forOp.getLoc(), arith::CmpIPredicate::slt, forOp.getLowerBound(),
+        forOp.getUpperBound());
+    insertConditionalClusterBarrier(b, forOp.getLoc(), nonEmpty);
   }
 
   b.setInsertionPoint(dot);
@@ -74,11 +86,18 @@ static LogicalResult pingpongConsumerLoop(scf::ForOp forOp, bool isTail,
 
   b.setInsertionPointAfter(dot);
   ROCDL::SetPrioOp::create(b, loc, /*priority=*/0);
-  insertClusterBarrier(b, loc);
-
-  if (isMain) {
-    b.setInsertionPointAfter(forOp);
-    insertClusterBarrier(b, forOp.getLoc());
+  if (isTail) {
+    // Do not rendezvous after the last dot. Previously that barrier matched a
+    // main-consumer barrier placed immediately after the loop, forcing both
+    // consumers to meet before their independent C stores. For non-final
+    // iterations it still matches MMA_main's next pre-dot barrier.
+    Value nextIv = arith::AddIOp::create(b, loc, forOp.getInductionVar(),
+                                        forOp.getStep());
+    Value hasNext = arith::CmpIOp::create(
+        b, loc, arith::CmpIPredicate::slt, nextIv, forOp.getUpperBound());
+    insertConditionalClusterBarrier(b, loc, hasNext);
+  } else {
+    insertClusterBarrier(b, loc);
   }
 
   LDBG("staggered consumer loop (tail=" << isTail << ", main=" << isMain

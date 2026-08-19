@@ -1163,6 +1163,53 @@ class TritonSemantic(Generic[TensorTy]):
 
         return result
 
+    def matrix_store(self,
+                     base: TensorTy,
+                     value: TensorTy,
+                     shape: List[TensorTy],
+                     strides: List[TensorTy],
+                     block_shape: List[tl.constexpr],
+                     offsets: Sequence[tl.constexpr | TensorTy],
+                     boundary_check: Tuple,
+                     cache_modifier: str,
+                     eviction_policy: str) -> None:
+
+        cache_modifier = self._str_to_load_cache_modifier(cache_modifier)
+        eviction_policy = self._str_to_eviction_policy(eviction_policy)
+
+        ndim = len(shape)
+        if ndim != 2:
+            raise ValueError(f"Expected 2 dimensions but got {ndim}")
+        if len(strides) != ndim:
+            raise ValueError(f"Expected {ndim} strides but got {len(strides)}")
+        if len(block_shape) != ndim:
+            raise ValueError(
+                f"Expected block_shape to have {ndim} dimensions but got {len(block_shape)}")
+
+        shape = [self.make_scalar(x, tl.int32) for x in shape]
+        strides = [self.make_scalar(x, tl.int64) for x in strides]
+        block_shape = tl._unwrap_shape(block_shape)
+        offsets = self._convert_to_ir_values(offsets, require_i64=False)
+
+        value = self.to_tensor(value)
+        if list(value.type.shape) != list(block_shape):
+            raise ValueError(
+                f"matrix_store value shape {value.type.shape} != block_shape {block_shape}")
+
+        if boundary_check:
+            if hasattr(boundary_check, "__iter__") and not isinstance(boundary_check, (str, bytes)):
+                boundary_check = tuple(
+                    elem for elem in boundary_check
+                    if elem is not None
+                    and not (isinstance(elem, tl.constexpr) and elem.value is None)
+                )
+        boundary_check = self._canonicalize_boundary_check(boundary_check, block_shape)
+
+        self.builder.create_matrix_store(
+            base.handle, value.handle, [s.handle for s in shape],
+            [s.handle for s in strides], block_shape, offsets, boundary_check,
+            cache_modifier, eviction_policy)
+
     def descriptor_load(self, desc: tl.tensor_descriptor_base, offsets, cache_modifier: str,
                         eviction_policy: str) -> TensorTy:
         assert isinstance(desc, tl.tensor_descriptor_base)

@@ -253,6 +253,40 @@ def TT_MatrixLoadOp : TT_Op<"matrix_load", [AttrSizedOperandSegments]> {
     }];
 }
 
+def TT_MatrixStoreOp : TT_Op<"matrix_store", [AttrSizedOperandSegments]> {
+    let summary = "Store a matrix to global memory via HCU matrix_store";
+
+    let description = [{
+      Store `value` to global memory through the HCU matrix_store path.
+      Currently this supports fp16 output produced from an fp32 MMAC C
+      layout-3 accumulator and stores it directly from VGPRs. Prefer this over
+      many scalar/buffer stores to cut store instruction count and FIFO pressure.
+    }];
+
+    let arguments = (ins
+      Arg<TT_Ptr, "Global memory scalar base pointer to store to", [MemWrite<GlobalMemory>]>:$base,
+      TT_Tensor:$value,
+      Variadic<I32>:$shape,
+      Variadic<I64>:$strides,
+      DenseI32ArrayAttr:$tensorShape,
+      Variadic<I32>:$indices,
+      DefaultValuedAttr<DenseI32ArrayAttr, "::llvm::ArrayRef<int32_t>{}">:$boundaryCheck,
+      DefaultValuedAttr<TT_CacheModifierAttr, "::mlir::triton::CacheModifier::NONE">:$cache,
+      DefaultValuedAttr<TT_EvictionPolicyAttr, "::mlir::triton::EvictionPolicy::NORMAL">:$evict
+    );
+
+    let assemblyFormat = [{
+      $value `,` $base `,` `shape` `=` `[` $shape `]` `,` `strides` `=` `[` $strides `]` `,`
+      `tensorShape` `=` $tensorShape `,` `indices` `=` `[` $indices `]`
+      oilist(
+        `boundaryCheck` `=` $boundaryCheck |
+        `cacheModifier` `=` $cache |
+        `evictionPolicy` `=` $evict
+      )
+      attr-dict `:` type($value) `,` type($base)
+    }];
+}
+
 //
 // Load/Store Ops
 //

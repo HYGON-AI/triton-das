@@ -187,10 +187,18 @@ struct MlsInsnAttr {
     unsigned flags;
     std::array<unsigned, MLS_INST_DS_CNT_MAX> dsByteOffsets;
   } dsInsn;
+
+  struct MsInsn {
+    std::array<unsigned, 2> instrShape;
+    std::array<unsigned, 2> instrsPerWarp;
+    std::array<unsigned, 2> instrOrder;
+    llvm::StringRef insn;
+  } msInsn;
 };
 
 using MatrixLoadInsnAttr   = MlsInsnAttr::Mlnsn;
 using DsReadMatrixInsnAttr = MlsInsnAttr::DsInsn;
+using MatrixStoreInsnAttr  = MlsInsnAttr::MsInsn;
 
 class MlsInsn {
 private:
@@ -215,6 +223,10 @@ public:
                                                bool kMajor,
                                                unsigned mlsVersion,
                                                MlsInterleaveKind altKind = MlsInterleaveKind::InterleaveNone);
+  static FailureOr<MlsInsn>
+  selectOrGetMatrixStoreInsn(unsigned mTile, unsigned nTile,
+                             unsigned elemBitWidth, unsigned mlsVersion,
+                             MlsInterleaveKind interleaveKind);
   MlsInsn(const MlsInsnAttr &attr) : attr(attr) {}
 
   unsigned getOpIdx() const { return attr.opIdx; }
@@ -265,6 +277,8 @@ public:
   const MatrixLoadInsnAttr &getMatrixLoadInsnAttr() const { return attr.mlInsn; }
 
   const DsReadMatrixInsnAttr &getDsReadMatrixInsnAttr() const { return attr.dsInsn; }
+
+  const MatrixStoreInsnAttr &getMatrixStoreInsnAttr() const { return attr.msInsn; }
 };
 
 } // namespace mlir::triton::HCU
