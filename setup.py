@@ -28,6 +28,12 @@ from dataclasses import dataclass
 
 import pybind11
 
+from Cython.Build import cythonize
+from setuptools import Extension as CyExtension
+from setuptools.command.build_ext import build_ext as CyBuildExt
+from setuptools.dist import Distribution
+import glob
+
 try:
     from setuptools.command.bdist_wheel import bdist_wheel
 except ImportError:
@@ -622,6 +628,42 @@ def download_and_copy_dependencies():
 
 
 backends = [*BackendInstaller.copy(["nvidia", "amd", "hcu"]), *BackendInstaller.copy_externals()]
+
+
+def build_pyx_extensions(backend):
+    """Compile *.pyx files found in backend.backend_dir in-place."""
+    pyx_files = glob.glob(os.path.join(backend.backend_dir, "*.pyx"))
+    if not pyx_files:
+        return
+
+    ext_modules = [
+        CyExtension(
+            name=os.path.splitext(os.path.basename(f))[0],
+            sources=[f],
+            language="c++",
+            include_dirs=[backend.backend_dir],
+        )
+        for f in pyx_files
+    ]
+    ext_modules = cythonize(
+        ext_modules,
+        compiler_directives={"language_level": "3"},
+        build_dir=os.path.join(backend.backend_dir, "_cython_build"),
+    )
+
+    dist = Distribution({"ext_modules": ext_modules})
+    dist.package_dir = {"": backend.backend_dir}
+    cmd = CyBuildExt(dist)
+    cmd.inplace = True
+    cmd.build_lib = backend.backend_dir
+    cmd.build_temp = os.path.join(backend.backend_dir, "_cython_build_temp")
+    cmd.ensure_finalized()
+    cmd.run()
+
+
+for backend in backends:
+    if backend.name == "hcu":
+        build_pyx_extensions(backend)
 
 
 def get_package_dirs():

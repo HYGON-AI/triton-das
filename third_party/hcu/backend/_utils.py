@@ -103,3 +103,19 @@ def _get_rocm_version():
 def get_runtime_label():
     assert torch.version.hip is not None
     return f"rocm_{_get_rocm_version()}"
+
+
+def create_tuple(k):
+    s = k[1:-1]
+    entries = s.split(", ")
+    ret = []
+    for e in entries:
+        if e[0] == "'" or e[0] == '"':
+            ret.append(e[1:-1])
+        else:
+            try:
+                ret.append(eval(e))
+            except ValueError:
+                ret.append(eval(str(e)))
+    ret_t = tuple(ret)
+    return ret_t

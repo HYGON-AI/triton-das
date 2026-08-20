@@ -11,7 +11,7 @@ import triton
 import inspect
 from collections import defaultdict
 
-from ._utils import triton_version_float, get_cache_dir, get_dump_dir, get_override_dir, get_weak_fn_hash, get_triton_label, get_gpu_label
+from ._utils import triton_version_float, get_cache_dir, get_dump_dir, get_override_dir, get_weak_fn_hash, get_triton_label, get_gpu_label, create_tuple
 
 from pathlib import Path
 from collections import defaultdict, namedtuple
@@ -164,15 +164,7 @@ class Hcutuner(Autotuner):
             del kwargs['warmup']
             return self.warmup(*args, **kwargs)
 
-        old_threshold = os.getenv("TRITON_AUTO_DNS_THRESHOLD", None)
-        # temporarily disable auto do-not-specialize to avoid affecting the tuning result
-        os.environ["TRITON_AUTO_DNS_THRESHOLD"] = "0"
-
         ret = super().run(*args, **kwargs)
-
-        # restore the original threshold
-        if old_threshold:
-            os.environ["TRITON_AUTO_DNS_THRESHOLD"] = old_threshold
 
         # got new config
         if (hasattr(self, 'configs_timings') and self.configs_timings) or len(self.configs) == 1:
@@ -260,7 +252,7 @@ class Hcutuner(Autotuner):
         data = cache_manager.get("config.json")
         if data:
             for k, v in data['configs'].items():
-                kt = _create_tuple(k)
+                kt = create_tuple(k)
                 kv = _create_config_args(v)
                 config = triton.Config(**kv)
                 self.cache[kt] = config
@@ -538,19 +530,6 @@ def _get_cache_hash(fn, param_hash, key_hash, configs_hash):
     """
     key = f"{get_triton_label()}-{get_weak_fn_hash(fn)}-{param_hash}-{key_hash}-{configs_hash}"
     return get_string_hash(key)
-
-
-def _create_tuple(k):
-    s = k[1:-1]
-    entries = s.split(", ")
-    ret = []
-    for e in entries:
-        if e[0] == "'" or e[0] == '"':
-            ret.append(e[1:-1])
-        else:
-            ret.append(eval(e))
-    ret_t = tuple(ret)
-    return ret_t
 
 
 __int_config_args__ = ["num_warps", "num_stages", "num_ctas"]

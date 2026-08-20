@@ -5,7 +5,6 @@ import torch
 import triton
 import logging
 import hashlib
-import functools
 from pathlib import Path
 from collections import namedtuple, defaultdict
 from typing import Callable, Iterable, Optional, Union
@@ -18,14 +17,14 @@ from triton.runtime.jit import T
 
 from triton._C.libtriton import get_cache_invalidating_env_vars
 from triton._utils import find_paths_if, get_iterable_path
-from ._utils import triton_version_float, get_cache_dir, get_gpu_label, get_weak_fn_hash, get_triton_label, get_runtime_label
+from ._utils import triton_version_float, get_cache_dir, get_gpu_label, get_weak_fn_hash, get_triton_label, get_runtime_label, create_tuple
+
+from ._cy_utils import binder as _cy_binder
 
 if triton_version_float >= 3.3:
     from triton import knobs
 
 logger = logging.getLogger("triton.fast.jit")
-
-DEFAULT_DNS_THRESHOLD = 6
 
 
 def get_saved_kernel_cache_dir():
@@ -61,7 +60,7 @@ def get_list_hash(l):
 
 
 def get_current_auto_dns_threshold():
-    return int(os.getenv("TRITON_AUTO_DNS_THRESHOLD", DEFAULT_DNS_THRESHOLD))
+    return int(os.getenv("TRITON_AUTO_DNS_THRESHOLD", 0))
 
 
 def get_saved_kernel_cache_hash(fn):
@@ -75,55 +74,12 @@ def get_saved_kernel_cache_hash(fn):
     return get_string_hash(key)[:12]
 
 
-class AutoSpecializeTracker:
-    def __init__(self, auto_dns_threshold = DEFAULT_DNS_THRESHOLD):
-        self.value_history = defaultdict(set)
-        self.flagged = set()
-
-    def observe(self, fn_name, arg_name, value, threshold):
-        if  threshold <= 0:
-            return False
-        if arg_name in self.flagged:
-            return False
-        self.value_history[(fn_name, arg_name)].add(value)
-        if len(self.value_history[(fn_name, arg_name)]) >= threshold:
-            self.flagged.add(arg_name)
-            return True
-        return False
-
-
 class FastJITFunction(_JITFunction):
     saved_kernel_cache = None
+    _json_cache = None # for dump json
     kernel_cache = {}
 
-    def get_key(self, *args, **kwargs):
-        nargs = {k: v for k, v in zip(self.arg_names, args) if k not in self._dns_set}
-        _kwargs = {k: v for k, v in kwargs.items() if k not in self._dns_set}
-        bound_args = {**nargs, **_kwargs}
-
-        if self.key:
-            if callable(self.key):
-                key = self.key(bound_args)
-            else:
-                key = []
-                for k in self.key:
-                    if k in bound_args:
-                        v = bound_args[k]
-                        if hasattr(v, "dtype"):
-                            key.append(str(v.dtype))
-                        else:
-                            key.append(v)
-        else:
-            key = []
-            for name in self.arg_names:
-                if name in bound_args:
-                    v = bound_args.pop(name)
-                    key.append(str(v.dtype) if hasattr(v, "dtype") else v)
-            key.extend([f"{k}={bound_args[k]}" for k in sorted(bound_args)])
-
-        return str(tuple(key))
-
-    def fallback(self, *args, grid, warmup, overwrite=False, **kwargs):
+    def fallback(self, *args, grid, warmup, key, overwrite=False, **kwargs):
         res = super().run(*args, grid=grid, warmup=warmup, **kwargs)
 
         # get kernel_path
@@ -131,75 +87,40 @@ class FastJITFunction(_JITFunction):
         kernel_path = os.path.basename(os.path.dirname(str(asm_files[0])))
 
         # save signature:path to files in triton cache dir
-        key = self.get_key(*args, **kwargs)
         path_cache_dir = f"{get_cache_dir()}/saved_kernel"
         os.makedirs(path_cache_dir, exist_ok=True)
         file_path = f"{path_cache_dir}/{self.saved_cache_key}.json"
         if key not in self.saved_kernel_cache or (key in self.saved_kernel_cache and overwrite):
             self.saved_kernel_cache[key] = kernel_path
+            self._json_cache[str(key)] = kernel_path
             with open(file_path, "w") as f:
                 json.dump({
-                    'cache': self.saved_kernel_cache,
+                    'cache': self._json_cache,
                     }, f, indent=4)
 
         return res
 
-    def _maybe_auto_do_not_specialize(self, scalar_candidates, dns_threshold):
-        newly_flagged = []
-        for name, v in scalar_candidates:
-            if self._tracker.observe(self.saved_cache_key, name, v, dns_threshold):
-                newly_flagged.append(name)
-
-        if not newly_flagged:
-            return
-
-        logger.warning(
-            f"{self.saved_cache_key}: Detected high-cardinality args {newly_flagged}, "
-            "adding to do_not_specialize and reinitializing FastJITFunction."
-        )
-        self._dns_set.update(newly_flagged)
-        super().__init__(self.fn, version=self._init_kwargs['version'], do_not_specialize=list(self._dns_set),
-                        do_not_specialize_on_alignment=self._init_kwargs['do_not_specialize_on_alignment'],
-                        debug=self._init_kwargs['debug'], noinline=self._init_kwargs['noinline'],
-                        repr=self._init_kwargs['repr'], launch_metadata=self._init_kwargs['launch_metadata'])
-        self.device_caches = defaultdict(self.create_binder)
-
     def run(self, *args, grid, warmup, **kwargs):
-        if not self.saved_kernel_cache:
-            logger.warning(f"{self.saved_cache_key}: Not found saved kernel in cache, fallback to triton.jit")
-            return self.fallback(*args, grid=grid, warmup=warmup, **kwargs)
+        bound_args, non_constexpr_vals, kernel_key, set_dns = _cy_binder(
+            torch.Tensor, self._param_names, self._param_is_constexpr, self._param_has_default,
+            self._param_defaults, args, kwargs, self._dns_set, self._auto_dns, self._dns_threshold,
+            self._dns_value_history, self._dns_flagged)
 
-        bound_args, non_constexpr_vals = {}, []
-        scalar_candidates = []  # [(name, value), ...]
+        if set_dns:
+            logger.warning(
+                f"{self.saved_cache_key}: Detected high-cardinality args {self._dns_set}, "
+                "adding to do_not_specialize and reinitializing FastJITFunction."
+            )
+            super().__init__(self.fn, version=self._init_kwargs['version'], do_not_specialize=list(self._dns_set),
+                            do_not_specialize_on_alignment=self._init_kwargs['do_not_specialize_on_alignment'],
+                            debug=self._init_kwargs['debug'], noinline=self._init_kwargs['noinline'],
+                            repr=self._init_kwargs['repr'], launch_metadata=self._init_kwargs['launch_metadata'])
+            self.device_caches = defaultdict(self.create_binder)
 
-        dns_threshold = get_current_auto_dns_threshold()
-        auto_dns = dns_threshold > 0
-
-        for p, v in zip(self.params, args):
-            bound_args[p.name] = v
-            if not p.is_constexpr:
-                non_constexpr_vals.append(v)
-                if auto_dns and p.name not in self._dns_set and not hasattr(v, "dtype"):
-                    scalar_candidates.append((p.name, v))
-        for p in self.params[len(args):]:
-            name = p.name
-            v = kwargs[name]
-            bound_args[name] = v
-            if not p.is_constexpr:
-                non_constexpr_vals.append(v)
-                if auto_dns and p.name not in self._dns_set and not hasattr(v, "dtype"):
-                    scalar_candidates.append((p.name, v))
-
-        # may update self._dns_set and reinitialize FastJITFunction if high-cardinality args are detected
-        if scalar_candidates:
-            self._maybe_auto_do_not_specialize(scalar_candidates, dns_threshold)
-
-        # get kernel path
-        kernel_key = self.get_key(*args, **kwargs)
         if kernel_key not in self.saved_kernel_cache:
             logger.warning(f"{self.saved_cache_key}: Not found saved kernel {kernel_key} in cache, "
                            "fallback to triton.jit")
-            return self.fallback(*args, grid=grid, warmup=warmup, **kwargs)
+            return self.fallback(*args, grid=grid, warmup=warmup, key=kernel_key, **kwargs)
         path = self.saved_kernel_cache[kernel_key]
 
         # launch saved kernel
@@ -265,7 +186,7 @@ class FastJITFunction(_JITFunction):
             metadata_path = metadata_group.get(metadata_filename)
             if not metadata_path:
                 logger.warning(f"{self.saved_cache_key}: Not found metadata in {get_cache_dir()}/{path}, fallback to triton.jit")
-                return self.fallback(*args, grid=grid, warmup=warmup, overwrite=True, **kwargs)
+                return self.fallback(*args, grid=grid, warmup=warmup, key=kernel_key, overwrite=True, **kwargs)
             self.kernel_cache[path] = CompiledKernel(src, metadata_group, None)
 
         kernel = self.kernel_cache[path]
@@ -297,7 +218,7 @@ class FastJITFunction(_JITFunction):
         return kernel
 
     def __init__(self, fn, version=None, do_not_specialize=None, do_not_specialize_on_alignment=None, debug=None,
-                 noinline=None, repr=None, launch_metadata=None, key=None):
+                 noinline=None, repr=None, launch_metadata=None):
         super().__init__(fn, version=version, do_not_specialize=do_not_specialize,
                         do_not_specialize_on_alignment=do_not_specialize_on_alignment, debug=debug,
                         noinline=noinline, repr=repr, launch_metadata=launch_metadata)
@@ -309,27 +230,37 @@ class FastJITFunction(_JITFunction):
             noinline=noinline,
             repr=repr,
             launch_metadata=launch_metadata,
-            key=key,
         )
-        self.key = key
         cache_hash = get_saved_kernel_cache_hash(self)
         self.saved_cache_key = f"{fn.__name__}-{cache_hash}"[:245] # under 255 char limits
         self._dns_set = set(do_not_specialize) if do_not_specialize else set()
-        self._tracker = AutoSpecializeTracker()
+        self._dns_value_history = {}
+        self._dns_flagged = set()
+        self._dns_threshold = get_current_auto_dns_threshold()
+        self._auto_dns = self._dns_threshold > 0
+        self._param_names = tuple(p.name for p in self.params)
+        self._param_is_constexpr = bytes(1 if p.is_constexpr else 0 for p in self.params)
+        self._param_defaults = tuple(p.default for p in self.params)
+        self._param_has_default = bytes(1 if p.has_default else 0 for p in self.params)
         # init cache
         fpath = f"{get_saved_kernel_cache_dir()}/{self.saved_cache_key}.json"
         if os.path.isfile(fpath):
             try:
                 with open(fpath) as f:
                     data = json.load(f)
-                    self.saved_kernel_cache = data['cache']
+                    self._json_cache = data['cache']
+                    self.saved_kernel_cache = {}
+                    for k, v in self._json_cache.items():
+                        self.saved_kernel_cache[create_tuple(k)] = v
                 logger.warning(f"{self.saved_cache_key}: Load the saved kernel cache from {fpath}")
             except Exception as e:
                 logger.warning(f"{self.saved_cache_key}: Fail to load cache config {fpath} : {e}")
                 self.saved_kernel_cache = {}
+                self._json_cache = {}
         else:
             logger.warning(f"{self.saved_cache_key}: Metadata {fpath} is not exist!")
             self.saved_kernel_cache = {}
+            self._json_cache = {}
 
 
 # -----------------------------------------------------------------------------
@@ -346,7 +277,6 @@ def jit(
     do_not_specialize_on_alignment: Optional[Iterable[int]] = None,
     debug: Optional[bool] = None,
     noinline: Optional[bool] = None,
-    key: Optional[Iterable[str]] = None,
 ) -> Union[FastJITFunction[T], Callable[[T], FastJITFunction[T]]]:
     """
     Derriving from triton.jit
@@ -363,7 +293,6 @@ def jit(
             noinline=noinline,
             repr=repr,
             launch_metadata=launch_metadata,
-            key=key,
         )
 
     if fn is not None:
