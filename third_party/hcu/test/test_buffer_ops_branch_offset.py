@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Buffer-ops conversion for if/select joined offsets.
 
 Mirrors range-analysis.mlir @ifOp / @select. Under TTGIR these lower to
@@ -6,7 +9,7 @@ nonneg fallback walks both arms. Expect ``buffer_load`` + numerical correctness
 under default JIT + USE_RA=0.
 
 Knob overrides (optional):
-  AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS
+  TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS
 
 Listed in ``regression.sh``.
 
@@ -33,7 +36,7 @@ BLOCK = 1024
 _KNOB_ENVS = (
     "AMDGCN_USE_BUFFER_OPS",
     "AMDGCN_ANALYZE_SMALL_TENSOR_RANGE",
-    "AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS",
+    "TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS",
     "TRITON_ALWAYS_COMPILE",
 )
 
@@ -50,7 +53,7 @@ def _buffer_ops_env(*, analyze: bool = True) -> Iterator[None]:
         os.environ["TRITON_ALWAYS_COMPILE"] = "1"
         os.environ["AMDGCN_ANALYZE_SMALL_TENSOR_RANGE"] = "1" if analyze else "0"
         # Keep caller/product default for RA when already set.
-        os.environ.setdefault("AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS", "0")
+        os.environ.setdefault("TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS", "0")
         yield
     finally:
         for k, v in prev.items():

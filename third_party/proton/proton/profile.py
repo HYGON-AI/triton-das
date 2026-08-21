@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import functools
 import triton
 
@@ -28,13 +32,21 @@ def _get_mode_str(backend: str, mode: Optional[Union[str, BaseMode]]) -> str:
     return str(mode) if mode else ""
 
 
+def _is_hcu_target() -> bool:
+    target = triton.runtime.driver.active.get_current_target()
+    # Keep in sync with HIP_HCU_ARCHS in triton._internal_testing / compiler.py
+    hcu_archs = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
+    return target is not None and target.backend == "hip" and target.arch in hcu_archs
+
+
 def _check_env(backend: str) -> None:
     if backend == "roctracer":
         hip_device_envs = ["HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"]
+        device_label = "HCU devices" if _is_hcu_target() else "AMD GPUs"
         for env in hip_device_envs:
             if getenv(env, None) is not None:
                 raise ValueError(
-                    f"Proton does not work when the environment variable {env} is set on AMD GPUs. Please unset it and use `ROCR_VISIBLE_DEVICES` instead"
+                    f"Proton does not work when the environment variable {env} is set on {device_label}. Please unset it and use `ROCR_VISIBLE_DEVICES` instead"
                 )
 
     # Ensure default envs are set for Proton knobs if not already set by the user.

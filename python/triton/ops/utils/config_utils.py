@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 def str_to_tuple(k):
     s = k[1:-1]
     entries = s.split(", ")

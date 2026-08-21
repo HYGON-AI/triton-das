@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """tl.fdiv vs tl.fdiv_fast semantics tests.
 
 Path map on AMD/HCU:

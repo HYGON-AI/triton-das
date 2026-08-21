@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 r"""
 `triton.backends.hcu.hcutune_cli` is a module that spawns up multiple distributed
 processes for auto-tuning.

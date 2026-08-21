@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Deprecated entrypoint: use test_cvt_scale_pk.py (pytest, chip-gated, asserted).
 
 Kept so old `python smoke_cvt_scale_pk.py` invocations still run the suite.

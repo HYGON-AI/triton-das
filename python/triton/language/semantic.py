@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 from __future__ import annotations  # remove after python 3.11
 import warnings
 
@@ -1628,9 +1632,15 @@ class TritonSemantic(Generic[TensorTy]):
             type_name = "fp8e4b8" if uses_fp8e4b8 else "fp8e5b16"
             if type_name in self.builder.options.deprecated_fp8_dot_operand_dtypes:
                 arch = self.builder.options.arch
-                warnings.warn(
-                    f"{type_name} is AMD gfx942 specific and not supported on {arch} so it's upcasted to fp16 and can cause significant slow down. "
-                    f"Please use OCP fp8 variants on {arch} for performance")
+                hcu_archs = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
+                if arch in hcu_archs:
+                    warnings.warn(
+                        f"{type_name} is not supported on HCU so it's upcasted to fp16 and can cause significant slow down. "
+                        f"Please use OCP fp8 variants on HCU for performance")
+                else:
+                    warnings.warn(
+                        f"{type_name} is AMD gfx942 specific and not supported on {arch} so it's upcasted to fp16 and can cause significant slow down. "
+                        f"Please use OCP fp8 variants on {arch} for performance")
                 lhs = self.cast(lhs, tl.float16)
                 rhs = self.cast(rhs, tl.float16)
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 # fmt: off
 
 
@@ -332,7 +335,7 @@ def test_typeconvert_upcast(src_dtype, dst_dtype, device):
                 launch_exhaustive_populate(getattr(tl, src_dtype), 0, 65536, False, 8, 0x7f, device=device)
             return
         if src_dtype in ('float8e4b8', 'float8e5b16') and (is_hip_cdna2() or is_hip_gfx12()):
-            pytest.skip(f"{src_dtype} is not supported on AMDGPU CDNA2 and RDNA4")
+            pytest.skip(f"{src_dtype} is not supported on CDNA2 and RDNA4")
 
     # dtype : (exponent_bits, mantissa_bits, exponent_bias, max_repr)
     stuff = {
@@ -381,7 +384,7 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
             pytest.skip(f"{dst_dtype} downcast with RTNE rounding tests only supported on NVGPU with compute capability 9.0+")
 
         if dst_dtype in ('float8e5b16', 'float8e4b8') and rounding == 'rtne':
-            pytest.skip(f"{dst_dtype} downcast with RTNE rounding tests only supported on AMDGPU CDNA3")
+            pytest.skip(f"{dst_dtype} downcast with RTNE rounding tests only supported on CDNA3")
 
     if is_hip():
         # Match the HCU backend support matrix:
@@ -392,7 +395,7 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
         if is_float8_dtype_name(dst_dtype) and not is_ocp_float8_dtype_name(dst_dtype) and is_hip_hcu_ocp_fp8():
             pytest.skip(f"{dst_dtype} is not supported on gfx938/gfx946 in the HCU backend")
         if dst_dtype in ('float8e4b8', 'float8e5b16') and (is_hip_cdna2() or is_hip_gfx12()):
-            pytest.skip(f"{dst_dtype} is not supported on AMDGPU CDNA2 and RDNA4")
+            pytest.skip(f"{dst_dtype} is not supported on CDNA2 and RDNA4")
 
     # dtype : (exponent_bits, mantissa_bits, exponent_bias)
     stuff = {

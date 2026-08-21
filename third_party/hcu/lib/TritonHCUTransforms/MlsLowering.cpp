@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"
@@ -64,7 +67,7 @@ public:
     rewriter.setInsertionPoint(matrixOp);
     auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(matrixTy.getContext());
     auto ctaLayout = ttg::getCTALayout(matrixTy.getEncoding());
-    auto mlsSharedEncoding = ttg::AMDMlsSharedEncodingAttr::get(
+    auto mlsSharedEncoding = ttg::HCUMlsSharedEncodingAttr::get(
                                   matrixOp.getContext(), mlsAttr.getOpIdx(), mlsAttr.getMlsTile(),
                                   mlsAttr.getElemBitWidth(),
                                   static_cast<ttg::MlsElemBitTyKind>(mlsAttr.getElemBitTyKind()),

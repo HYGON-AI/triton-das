@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import os
 import re
 import numpy as np

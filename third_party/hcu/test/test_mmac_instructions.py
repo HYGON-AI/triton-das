@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Regression coverage for five gfx946 MMAC instruction variants."""
 
 import re
@@ -116,7 +119,7 @@ def assert_mmac_result(actual: torch.Tensor, expected: torch.Tensor):
 def _assert_instruction(program, instruction: str):
     amdgcn = program.asm["amdgcn"]
     assert re.search(_MMAC_INSTRUCTIONS[instruction], amdgcn), (
-        f"expected {_MMAC_INSTRUCTIONS[instruction]!r} in generated AMDGCN assembly"
+        f"expected {_MMAC_INSTRUCTIONS[instruction]!r} in generated GCN assembly"
     )
 
 

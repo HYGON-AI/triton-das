@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 import math
 import os
 
@@ -7,7 +10,7 @@ import triton
 import triton.language as tl
 
 from triton._internal_testing import is_hip
-from triton.backends.amd.compiler import HIPBackend
+from triton.backends.hcu.compiler import HIPBackend
 import triton.knobs
 
 # Per-matrix byte span: strictly between the old 2GiB cap and the new 4GiB-1 cap.

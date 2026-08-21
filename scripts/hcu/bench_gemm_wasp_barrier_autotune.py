@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Benchmark GEMM across WASP/WDRA modes and barrier / MMAC-cluster knobs.
 
 Autotune knobs (passed as HIPOptions / kernel kwargs):

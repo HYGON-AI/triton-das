@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 from triton.language import core
 
 # Allowed key prefixes. Frontend only checks these; no per-key registry.

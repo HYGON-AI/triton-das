@@ -20,6 +20,8 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 #include "triton/Conversion/TritonDistributedToLLVM/Passes.h"
 #include "triton/Dialect/Distributed/IR/Dialect.h"
 #include "triton/Dialect/SIMT/IR/Dialect.h"
@@ -51,7 +53,7 @@
 #include "triton/Analysis/Membar.h"
 namespace mlir {
 namespace triton {
-#define GEN_PASS_DEF_CONVERTAMDDISTRIBUTEDTOLLVM
+#define GEN_PASS_DEF_CONVERTHCUDISTRIBUTEDTOLLVM
 #include "triton/Conversion/TritonDistributedToLLVM/Passes.h.inc"
 } // namespace triton
 } // namespace mlir
@@ -84,10 +86,10 @@ public:
   }
 };
 
-struct ConvertAMDDistributedToLLVM
-    : public triton::impl::ConvertAMDDistributedToLLVMBase<
-          ConvertAMDDistributedToLLVM> {
-  explicit ConvertAMDDistributedToLLVM(StringRef targetArch, bool ftz) {
+struct ConvertHCUDistributedToLLVM
+    : public triton::impl::ConvertHCUDistributedToLLVMBase<
+          ConvertHCUDistributedToLLVM> {
+  explicit ConvertHCUDistributedToLLVM(StringRef targetArch, bool ftz) {
     this->arch = targetArch.str();
     this->ftz = ftz;
   }
@@ -122,10 +124,10 @@ struct ConvertAMDDistributedToLLVM
 
     RewritePatternSet patterns(context);
     int commonBenefit = patternBenefitPrioritizeOverLLVMConversions;
-    int AMDBenefit = commonBenefit + 1;
+    int HCUBenefit = commonBenefit + 1;
 
     AMD::populateMemoryOpToLLVMPatterns(typeConverter, patterns, targetInfo,
-                                        AMDBenefit);
+                                        HCUBenefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,
                                                  patterns, commonBenefit);
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
@@ -136,12 +138,12 @@ struct ConvertAMDDistributedToLLVM
                                                      targetInfo, commonBenefit);
     mlir::triton::populateSPMDOpToLLVMPattern(typeConverter, patterns,
                                               targetInfo, commonBenefit);
-    AMD::populateSPMDOpToLLVMPattern(typeConverter, patterns, AMDBenefit);
+    AMD::populateSPMDOpToLLVMPattern(typeConverter, patterns, HCUBenefit);
 
     mlir::triton::AMD::populateTritonAMDGPUToLLVMPatterns(typeConverter,
-                                                          patterns, AMDBenefit);
+                                                          patterns, HCUBenefit);
     mlir::triton::AMD::populateUpcastMXFPToLLVMPatterns(typeConverter, patterns,
-                                                        targetInfo, AMDBenefit);
+                                                        targetInfo, HCUBenefit);
 
     // TODO(thomas): this should probably be done in a separate step to not
     // interfere with our own lowering of arith ops. Add arith/math's patterns
@@ -155,7 +157,7 @@ struct ConvertAMDDistributedToLLVM
         mlir::amdgpu::Chipset::parse(this->arch);
     if (failed(maybeChipset)) {
       emitError(UnknownLoc::get(&getContext()),
-                "Invalid AMDGPU chipset name: " + this->arch);
+                "Invalid HCU gfx chipset name: " + this->arch);
       return signalPassFailure();
     }
     // Native lowering patterns
@@ -163,7 +165,7 @@ struct ConvertAMDDistributedToLLVM
         typeConverter, patterns, mlir::gpu::amd::HIP, *maybeChipset);
 
     // Distributed ops
-    mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
+    mlir::triton::HCU::populateDistributedOpToLLVMPatterns(
         typeConverter, patterns, commonBenefit, targetInfo);
 
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns)))) {
@@ -175,7 +177,7 @@ struct ConvertAMDDistributedToLLVM
 } // anonymous namespace
 
 std::unique_ptr<OperationPass<ModuleOp>>
-mlir::triton::createConvertAMDDistributedToLLVMPass(StringRef targetArch,
+mlir::triton::createConvertHCUDistributedToLLVMPass(StringRef targetArch,
                                                     bool ftz) {
-  return std::make_unique<ConvertAMDDistributedToLLVM>(targetArch, ftz);
+  return std::make_unique<ConvertHCUDistributedToLLVM>(targetArch, ftz);
 }

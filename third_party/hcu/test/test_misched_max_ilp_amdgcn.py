@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Check misched / max-ilp clang knobs via pre-generated AMDGCN goldens.
 
 Reads Inputs/hcu-misched-max-ilp-sched-*.amdgcn (compiled offline from
@@ -69,7 +72,7 @@ def analyze_load_schedule(amdgcn: str) -> LoadSchedule:
     """Group consecutive payload loads; break on vmcnt wait or heavy VALU."""
     lines = amdgcn.splitlines()
     loads = [i for i, l in enumerate(lines) if _PAYLOAD_LOAD_RE.search(l)]
-    assert loads, "no buffer_load_dwordx4 payload loads found in amdgcn"
+    assert loads, "no buffer_load_dwordx4 payload loads found in GCN assembly"
 
     clusters: list[int] = []
     cur = 1
@@ -97,13 +100,13 @@ def analyze_load_schedule(amdgcn: str) -> LoadSchedule:
 def test_misched_max_ilp_amdgcn_goldens_effective():
     asms = {name: _read(fn) for name, fn in _GOLDENS.items()}
     for name, asm in asms.items():
-        assert asm.strip(), f"{name}: golden amdgcn is empty"
+        assert asm.strip(), f"{name}: golden GCN assembly is empty"
 
     names = list(asms)
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             assert asms[names[i]] != asms[names[j]], (
-                f"{names[i]} and {names[j]} amdgcn are identical"
+                f"{names[i]} and {names[j]} GCN assembly are identical"
             )
 
     base = analyze_load_schedule(asms["baseline"])
@@ -142,4 +145,4 @@ def test_misched_max_ilp_amdgcn_goldens_effective():
 
 if __name__ == "__main__":
     test_misched_max_ilp_amdgcn_goldens_effective()
-    print("PASS: misched/max-ilp amdgcn golden scheduling checks")
+    print("PASS: misched/max-ilp GCN golden scheduling checks")

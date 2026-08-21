@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Smoke: WDRA 1P2C (4+8) and 2P2C (8+8) for tt.load and MLS."""
 import os
 import re

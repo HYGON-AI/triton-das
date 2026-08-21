@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # isort: off
 # fmt: off
 from dataclasses import dataclass, fields, replace
@@ -22,6 +26,7 @@ from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_m
 from triton_kernels.testing import assert_close, compute_actual_scale
 # target-specific utilities
 from triton_kernels.target_info import is_hip, is_hip_cdna3, is_cuda, is_hip_cdna4
+from triton._internal_testing import is_hip_hcu
 
 # ---------------
 # initialize data
@@ -349,28 +354,33 @@ def _test_op(m, n, k, split_k, do_gather, do_scatter, inner_expt_opt, has_y_gamm
                 pytest.skip("float8 x mx not supported with cuda capability < 10")
 
     elif is_hip():
+        plat = "HCU" if is_hip_hcu() else "AMD GPU"
         if "float8" in act_dtype_str and "mx" in weight_dtype_str and not is_hip_cdna4():
             pytest.skip("float8 x mx only supported on CDNA4")
         if "float8" in act_dtype_str and "mxfloat8" in weight_dtype_str:
-            pytest.skip("NYI: float8 x mxfloat8 not tested on AMD GPU")
+            pytest.skip(f"NYI: float8 x mxfloat8 not tested on {plat}")
         if act_dtype_str.startswith("mx") and weight_dtype_str.startswith("mx"):
-            pytest.skip("NYI: mx x mx not tested on AMD GPU")
+            pytest.skip(f"NYI: mx x mx not tested on {plat}")
         if is_persistent:
-            pytest.skip("NYI: Persistent kernel not supported on AMD GPU")
+            pytest.skip(f"NYI: Persistent kernel not supported on {plat}")
         if split_k is not None and split_k > 1:
-            pytest.skip("splitK hasn't been fully tested on AMD GPU.")
+            pytest.skip(f"splitK hasn't been fully tested on {plat}.")
 
     if "float8_e4m3fnuz" in (weight_dtype_str, act_dtype_str) and not is_hip_cdna3():
-        pytest.skip("float8_e4m3fnuz only tested on AMD CDNA3 Platform")
+        pytest.skip("float8_e4m3fnuz not supported on this HCU arch" if is_hip_hcu() else
+                    "float8_e4m3fnuz only tested on AMD CDNA3 Platform")
 
     if hbm_swizzling:
         if is_hip():
             if not is_hip_cdna4():
-                pytest.skip("Scale preshuffling on AMD GPU has not been emulated on non-CDNA4 arch yet.")
+                pytest.skip("Scale preshuffling has not been emulated on this HCU arch yet."
+                            if is_hip_hcu() else
+                            "Scale preshuffling on AMD GPU has not been emulated on non-CDNA4 arch yet.")
             if "mx" not in weight_dtype_str:
                 pytest.skip("Non-scale swizzling not supported on CDNA4 yet")
             if n % 32 != 0 or k % (32 * 8) != 0:
-                pytest.skip(f"Shape {m}x{n}x{k} is not supported for scale swizzling on AMD GPU")
+                pytest.skip(f"Shape {m}x{n}x{k} is not supported for scale swizzling on "
+                            f"{'HCU' if is_hip_hcu() else 'AMD GPU'}")
         if torch.cuda.get_device_capability()[0] < 9:
             pytest.skip("NYI. Ampere swizzling.")
         if torch.cuda.get_device_capability()[0] < 10:
@@ -658,7 +668,7 @@ def _test_op(m, n, k, split_k, do_gather, do_scatter, inner_expt_opt, has_y_gamm
 @pytest.mark.parametrize("k", [8, 16, 32, 64, 128])
 def test_small_batch_matmul(m, n, k):
     if is_hip():
-        pytest.skip("Not fully tested on AMD")
+        pytest.skip("Not fully tested on HCU" if is_hip_hcu() else "Not fully tested on AMD")
 
     if m * n * k > 16384:
         pytest.skip()

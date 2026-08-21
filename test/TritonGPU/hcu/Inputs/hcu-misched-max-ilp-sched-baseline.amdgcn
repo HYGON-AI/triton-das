@@ -2119,7 +2119,7 @@ triton_red_fused__to_copy_cat_native_layer_norm_67: ; @triton_red_fused__to_copy
 	.asciz	"/home/xukang/CACHE_DENSE/rp"   ; string offset=27
 .Linfo_string3:
 	.asciz	"triton_red_fused__to_copy_cat_native_layer_norm_67" ; string offset=55
-	.ident	"clang version 17.0.0 (http://10.4.0.1/dcutoolkit/driverruntime/llvm-project.git ff5bf917a679c83afe927af051a20b86fef7b07d)"
+	.ident	"clang version 17.0.0"
 	.section	".note.GNU-stack","",@progbits
 	.addrsig
 	.amdgpu_metadata

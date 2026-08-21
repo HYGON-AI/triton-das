@@ -3,7 +3,6 @@ stages:
   - publish
 
 variables:
-  LLVM_REPO: "http://42.228.13.241:10068/dcutoolkit/deeplearing/llvm-triton.git"
   FILE_SERVER_IP: "10.16.1.27"
   FILE_SERVER_USER: "fileowner"
   PIP_INDEX_URL: "http://10.16.1.201:9929/nightly/dtk2604/+simple/"
@@ -46,13 +45,15 @@ build:triton-wheel:
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
     - git merge origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --no-edit
     - pip install -r python/requirements.txt -r python/test-requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-    - pip install torch==${TORCH_VERSION} cismi amdsmi auditwheel patchelf==0.17.2.4
+    - pip install torch==${TORCH_VERSION} cismi auditwheel patchelf==0.17.2.4
     - pip install numpy==1.24.3
+    - pip install https://pypi.sourcefind.cn/open/deps/+f/5fd/7a5650ea3aa98/hcusmi-1.0.0+a788f784-py3-none-any.whl
     - yum install -y expect rsync
   script:
     - export FILE_SERVER_PWD_DECODED=$(echo -n "${FILE_SERVER_PWD}" | base64 -d)
+    - test -n "${HCU_LLVM_TRITON_GIT_URL}" || (echo "HCU_LLVM_TRITON_GIT_URL is not set" && exit 1)
     - bash scripts/hcu/gen_triton_wheel.sh
-        --llvm_repo "${LLVM_REPO}"
+        --llvm_repo "http://gitlab-ci-token:${CI_JOB_TOKEN}@${HCU_LLVM_TRITON_GIT_URL}"
         --file_server_ip "${FILE_SERVER_IP}"
         --file_server_user "${FILE_SERVER_USER}"
         --file_server_pwd "${FILE_SERVER_PWD_DECODED}"
@@ -106,8 +107,9 @@ publish:
     - pip install torch==${TORCH_VERSION} ciupload auditwheel patchelf==0.17.2.4
   script:
     - export FILE_SERVER_PWD_DECODED=$(echo -n "${FILE_SERVER_PWD}" | base64 -d)
+    - test -n "${HCU_LLVM_TRITON_GIT_URL}" || (echo "HCU_LLVM_TRITON_GIT_URL is not set" && exit 1)
     - bash scripts/hcu/gen_triton_wheel.sh
-        --llvm_repo "${LLVM_REPO}"
+        --llvm_repo "http://gitlab-ci-token:${CI_JOB_TOKEN}@${HCU_LLVM_TRITON_GIT_URL}"
         --file_server_ip "${FILE_SERVER_IP}"
         --file_server_user "${FILE_SERVER_USER}"
         --file_server_pwd "${FILE_SERVER_PWD_DECODED}"

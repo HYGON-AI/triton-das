@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # ruff: noqa: F821,F841
 import contextlib
 import itertools
@@ -2865,7 +2869,7 @@ def test_optimize_thread_locality(op, BLOCK_N, N, num_pid_n, device):
 def test_no_rematerialization_op():
 
     if torch.version.hip:
-        pytest.skip("test not supported on AMD")
+        pytest.skip("test not supported on HCU" if is_hip_hcu() else "test not supported on AMD")
 
     @triton.jit
     def kernel(
@@ -3255,7 +3259,9 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
             if in_dtype in ("float8e5", "float8e4nv") and not (is_hip_cdna4() or is_hip_gfx12()):
                 pytest.skip(f"{in_dtype} only supported on CDNA4 and gfx12")
             if in_dtype in ("float8e5b16", "float8e4b8") and (not is_hip_cdna3() or is_hip_hcu()):
-                pytest.skip(f"{in_dtype} only supported on AMD CDNA3 (not HCU)")
+                if is_hip_hcu():
+                    pytest.skip(f"{in_dtype} not supported on HCU")
+                pytest.skip(f"{in_dtype} only supported on AMD CDNA3")
             if is_hip_hcu() and input_precision in ("bf16x3", "bf16x6"):
                 pytest.skip(f"{input_precision} not supported on HCU (no hardware MMAC path)")
             if not ((input_precision in ("bf16x3", "bf16x6")) or (input_precision == "ieee") or
@@ -5524,7 +5530,8 @@ def test_num_threads(device):
 def test_globaltimer(device):
     check_cuda_or_hip(device)
     if is_hip():
-        pytest.skip("test_globaltimer is flaky on AMD GPUs")
+        pytest.skip("test_globaltimer is flaky on HCU" if is_hip_hcu() else
+                    "test_globaltimer is flaky on AMD GPUs")
 
     @triton.jit
     def kernel(Out1, Out2, func: tl.constexpr):
@@ -5696,7 +5703,9 @@ def test_dot_max_num_imprecise_acc(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, in_type_s
     elif is_hip():
         num_stages = 2
         if in_type_str in ("float8e5b16", "float8e4b8") and (not is_hip_cdna3() or is_hip_hcu()):
-            pytest.skip(f"{in_type_str} only supported on AMD CDNA3 (not HCU)")
+            if is_hip_hcu():
+                pytest.skip(f"{in_type_str} not supported on HCU")
+            pytest.skip(f"{in_type_str} only supported on AMD CDNA3")
         if in_type_str in ("float8e5", "float8e4nv") and not (is_hip_cdna4() or is_hip_gfx12()):
             pytest.skip(f"{in_type_str} only supported on CDNA4 or gfx12")
 

@@ -38,7 +38,7 @@ def ConvertTritonDistributedToLLVM : Pass<"convert-triton-distributed-to-llvm", 
 }
 
 
-// AMD Backend
+// HCU Backend
 def ConvertLibDeviceToLLVM : Pass<"convert-lib-device-to-llvm", "mlir::ModuleOp"> {
     let summary = "Convert Lib Device (User Defined Ops) to LLVM";
     let constructor = "mlir::triton::createConvertLibDeviceToLLVMPass(/*ftz=*/true)";
@@ -51,14 +51,14 @@ def ConvertLibDeviceToLLVM : Pass<"convert-lib-device-to-llvm", "mlir::ModuleOp"
     ];
 }
 
-def ConvertAMDDistributedToLLVM : Pass<"convert-amd-distributed-to-llvm", "mlir::ModuleOp"> {
+def ConvertHCUDistributedToLLVM : Pass<"convert-hcu-distributed-to-llvm", "mlir::ModuleOp"> {
     let summary = "Convert TritonDistributed to LLVM";
     let description = [{
-        The `convert-amd-distributed-to-llvm` pass performs lowering of
-        the distributed op for AMD backend.
+        The `convert-hcu-distributed-to-llvm` pass performs lowering of
+        the distributed op for HCU backend.
     }];
 
-    let constructor = "mlir::triton::createConvertAMDDistributedToLLVMPass(\"\", /*ftz=*/true)";
+    let constructor = "mlir::triton::createConvertHCUDistributedToLLVMPass(\"\", /*ftz=*/true)";
 
     let dependentDialects = ["mlir::arith::ArithDialect",
                              "mlir::math::MathDialect",

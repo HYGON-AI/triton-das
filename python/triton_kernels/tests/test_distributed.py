@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import contextlib
 import os
 import socket
@@ -11,6 +15,7 @@ from triton_kernels.reduce import reduce
 from triton_kernels.topk import topk
 from triton_kernels.matmul_ogs import matmul_ogs, RoutingData, GatherIndx, ScatterIndx
 from triton_kernels.target_info import is_hip
+from triton._internal_testing import is_hip_hcu
 from triton_kernels.tensor import make_ragged_tensor_metadata, remap_ragged_tensor_metadata
 import pytest
 
@@ -245,7 +250,8 @@ def _run_expert_sharding(rank, world_size, *, n_tokens, d_model, n_expts_tot, n_
 @pytest.mark.parametrize("affinity_mode", ["uniform", "random"])
 def test_expert_sharding(distributed_launcher, n_tokens, d_model, n_expts_tot, n_expts_act, affinity_mode):
     if is_hip():
-        pytest.skip("Distributed test is not supported on AMD GPU")
+        pytest.skip("Distributed test is not supported on HCU" if is_hip_hcu() else
+                    "Distributed test is not supported on AMD GPU")
     if n_tokens < distributed_launcher.world_size:
         raise ValueError("n_tokens must be >= number of gpus")
     if n_tokens % distributed_launcher.world_size != 0:

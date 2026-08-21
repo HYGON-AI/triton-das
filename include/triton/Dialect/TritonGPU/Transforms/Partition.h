@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #ifndef TRITON_TRITONGPU_TRANSFORM_PIPELINE_PARTITION_H_
 #define TRITON_TRITONGPU_TRANSFORM_PIPELINE_PARTITION_H_
 

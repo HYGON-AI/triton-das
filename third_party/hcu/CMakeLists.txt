@@ -1,4 +1,7 @@
-# HCU backend — Hygon DCU-specific passes, lowering, and pybind11 module.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
+# HCU backend — Hygon HCU-specific passes, lowering, and pybind11 module.
 # Depends on AMD shared libraries (TritonAMDGPUToLLVM, TritonAMDGPUTransforms, etc.).
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)

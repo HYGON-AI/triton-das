@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
 #include <cstdint>
@@ -223,7 +227,7 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
     return llvm::to_vector(sharedLayout.getOrder());
   }
   if (auto sharedLayout =
-          mlir::dyn_cast<AMDMlsSharedEncodingAttr>(layout)) {
+          mlir::dyn_cast<HCUMlsSharedEncodingAttr>(layout)) {
     return llvm::to_vector(sharedLayout.getOrder());
   }
 
@@ -339,7 +343,7 @@ SmallVector<int64_t> getAllocationShapePerCTA(Attribute layout,
       auto packedAxis = getOrder(sharedMMALayout, shapeLogical)[0];
       shape[packedAxis] *= 2;
     }
-  } else if (auto paddedEnc = dyn_cast<AMDMlsSharedEncodingAttr>(layout)) {
+  } else if (auto paddedEnc = dyn_cast<HCUMlsSharedEncodingAttr>(layout)) {
     shape = getMlsExpandedShape(paddedEnc, shapeLogical, MlsTileKind::Shared);
   }
   return getShapePerCTA(layout, shape);
@@ -388,7 +392,7 @@ SmallVector<int64_t> getMlsExpandedShape(Attribute layout,
   if (tileKind == MlsTileKind::Global)
     return retShape;
 
-  if (auto sharedLayout = dyn_cast<AMDMlsSharedEncodingAttr>(layout)) {
+  if (auto sharedLayout = dyn_cast<HCUMlsSharedEncodingAttr>(layout)) {
     assert(tileKind == MlsTileKind::Elems || tileKind == MlsTileKind::Shared);
     auto elemBitTyKind = sharedLayout.getElemBitTyKind();
     auto view = tileKind == MlsTileKind::Shared ? MlsFlowView::Shared

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "TritonHCU/Passes.h"
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
@@ -118,7 +121,7 @@ struct LoadInfo {
   int distToUse = 0;
   Operation *use = nullptr;
 
-  ttg::AMDMlsSharedEncodingAttr mlsEncoding = nullptr;
+  ttg::HCUMlsSharedEncodingAttr mlsEncoding = nullptr;
   bool isMatrixLoad = false;
 
   LoadInfo() = default;
@@ -126,7 +129,7 @@ struct LoadInfo {
            int distToUse, Operation *use)
       : sharedEncoding(sharedEncoding), distToUse(distToUse),
         use(use) {}
-  LoadInfo(ttg::AMDMlsSharedEncodingAttr mlsEncoding,
+  LoadInfo(ttg::HCUMlsSharedEncodingAttr mlsEncoding,
            int distToUse, Operation *use)
       : mlsEncoding(mlsEncoding), distToUse(distToUse),
         use(use), isMatrixLoad(true) {}
@@ -337,13 +340,13 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
   return attr;
 }
 
-std::optional<ttg::AMDMlsSharedEncodingAttr>
+std::optional<ttg::HCUMlsSharedEncodingAttr>
 getMlsEncIfAllUsersAreDotEnc(Value val) {
   auto matrixOp = cast<tt::MatrixLoadOp>(val.getDefiningOp());
   auto matrixTy = cast<RankedTensorType>(matrixOp.getType());
   auto mlsAttr = matrixOp->getAttrOfType<tta::MlsEncodingAttr>(tta::MlsEncodingAttr::getMnemonic());
   auto ctaLayout = ttg::getCTALayout(matrixTy.getEncoding());
-  auto attr = ttg::AMDMlsSharedEncodingAttr::get(
+  auto attr = ttg::HCUMlsSharedEncodingAttr::get(
                             matrixOp.getContext(), mlsAttr.getOpIdx(), mlsAttr.getMlsTile(),
                             mlsAttr.getElemBitWidth(),
                             static_cast<ttg::MlsElemBitTyKind>(mlsAttr.getElemBitTyKind()),

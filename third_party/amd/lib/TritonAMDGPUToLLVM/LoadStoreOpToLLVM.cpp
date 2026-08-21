@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "AsyncUtility.h"
 #include "AtomicRMWOpsEmitter.h"
 #include "BufferOpsEmitter.h"
@@ -2073,7 +2077,6 @@ struct AsyncWaitOpConversion
       unsigned otherCnts = ~0xC00F; // C00F has bits 15:14 and 3:0 set
 
       // HCU extend: bit 7 to enable backend hcu-update-wait-by-reverse-search optimize.
-      // see http://172.20.48.13/browse/DCUSW-3577 to know more details.
       unsigned enableOptWaitCntBits = 0x1 << 7;
       unsigned waitValue = lowBits | highBits | otherCnts | enableOptWaitCntBits;
 

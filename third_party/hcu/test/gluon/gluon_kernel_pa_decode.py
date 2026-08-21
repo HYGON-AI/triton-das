@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
 
 from functools import lru_cache
 import torch
@@ -163,7 +164,7 @@ def paged_attention_decode_v2_gluon_large_block_dot_kernel(
     - Causal masking for autoregressive generation
 
     The kernel processes sequences in partitions and computes attention scores
-    using matrix multiplication operations optimized for AMD CDNA3 architecture.
+    using matrix multiplication operations optimized for HCU architecture.
 
     Args:
         Various pointers to tensors and configuration parameters as described above.
@@ -270,7 +271,7 @@ def paged_attention_decode_v2_gluon_large_block_dot_kernel(
         order=[2, 1, 0],
     )
 
-    # QK matrix multiplication layout using AMD MFMA instructions
+    # QK matrix multiplication layout using HCU MFMA instructions
     qk_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
@@ -356,7 +357,7 @@ def paged_attention_decode_v2_gluon_large_block_dot_kernel(
             0, KV_COMPUTE_BLOCK_SIZE, layout=gl.SliceLayout(0, blocked_value_layout)
         )
 
-    # PV matrix multiplication layout using AMD MFMA instructions
+    # PV matrix multiplication layout using HCU MFMA instructions
     pv_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
@@ -865,7 +866,7 @@ def paged_attention_decode_sliding_window(
     ONE_SHOT: gl.constexpr = False,
 ):
     """
-    Paged Attention Decode Kernel with FP8/BF16 support for AMD GPUs.
+    Paged Attention Decode Kernel with FP8/BF16 support for HCU GPUs.
 
     This kernel implements the attention mechanism for decoding in transformer models
     with support for paged KV caches and FP8 quantization. It handles causal masking,
@@ -888,7 +889,7 @@ def paged_attention_decode_sliding_window(
         Compile-time constants for kernel configuration
 
     Note:
-        This kernel uses AMD CDNA3 MFMA instructions for efficient matrix operations
+        This kernel uses HCU MFMA instructions for efficient matrix operations
         and supports both FP8 and BF16 data types with various quantization modes.
     """
     # ==================== VALIDATION CHECKS ====================
@@ -992,7 +993,7 @@ def paged_attention_decode_sliding_window(
         blocked_key_layout_fp8 if KV_16B_ELEMENT_COUNT == 16 else blocked_key_layout_f16
     )
 
-    # QK Matrix multiplication layout using AMD MFMA instructions
+    # QK Matrix multiplication layout using HCU MFMA instructions
     qk_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
@@ -1106,7 +1107,7 @@ def paged_attention_decode_sliding_window(
             layout=gl.SliceLayout(0, gl.SliceLayout(1, blocked_value_layout)),
         )
 
-    # PV Matrix multiplication layout using AMD MFMA instructions
+    # PV Matrix multiplication layout using HCU MFMA instructions
     pv_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
@@ -1748,7 +1749,7 @@ def paged_attention_decode_v2_gluon_dot_kernel(
     CDNA_VERSION: gl.constexpr = 3,
 ):
     """
-    Paged Attention Decode Kernel with FP8/BF16 support for AMD GPUs.
+    Paged Attention Decode Kernel with FP8/BF16 support for HCU GPUs.
 
     This kernel implements the attention mechanism for decoding in transformer models
     with support for paged KV caches and FP8 quantization. It handles causal masking,
@@ -1771,7 +1772,7 @@ def paged_attention_decode_v2_gluon_dot_kernel(
         Compile-time constants for kernel configuration
 
     Note:
-        This kernel uses AMD CDNA3 MFMA instructions for efficient matrix operations
+        This kernel uses HCU MFMA instructions for efficient matrix operations
         and supports both FP8 and BF16 data types with various quantization modes.
     """
     # ==================== VALIDATION CHECKS ====================
@@ -1885,7 +1886,7 @@ def paged_attention_decode_v2_gluon_dot_kernel(
     )
 
     DOT_QK_K_WIDTH: gl.constexpr = KV_16B_ELEMENT_COUNT
-    # QK Matrix multiplication layout using AMD MFMA instructions
+    # QK Matrix multiplication layout using HCU MFMA instructions
     qk_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
@@ -1999,7 +2000,7 @@ def paged_attention_decode_v2_gluon_dot_kernel(
             layout=gl.SliceLayout(0, gl.SliceLayout(1, blocked_value_layout)),
         )
 
-    # PV Matrix multiplication layout using AMD MFMA instructions
+    # PV Matrix multiplication layout using HCU MFMA instructions
     pv_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,

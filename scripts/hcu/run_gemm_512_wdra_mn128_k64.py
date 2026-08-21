@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Run fixed 512³ non-MLS WDRA GEMM with BLOCK_M=N=128, BLOCK_K=64.
 
 Best MN/K combo from the 512 WDRA 12-wave block sweep (≈19.02 TOPS on PMD).

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Support/DebugStringHelper.h"
@@ -331,7 +335,7 @@ struct CanonicalizeConvertFromConvert
     // cvt(local_load) -> local_load.
     if (auto sharedLoad = dyn_cast<LocalLoadOp>(arg)) {
       // HCU: local_load with mls encoding can only specify dst to dot operand encoding.
-      if (isa<AMDMlsSharedEncodingAttr>(sharedLoad.getSrc().getType().getEncoding()) &&
+      if (isa<HCUMlsSharedEncodingAttr>(sharedLoad.getSrc().getType().getEncoding()) &&
           !isa<DotOperandEncodingAttr>(op.getType().getEncoding()))
         return failure();
 
@@ -885,7 +889,7 @@ LogicalResult MemDescSubsliceOp::verify() {
   // MLS LDS is addressed by ds_read_matrix tile coords, not an affine linear
   // layout. Skip swizzle-split LL checks; MlsOpToLLVM applies logical offsets
   // against allocShape.
-  if (isa<AMDMlsSharedEncodingAttr>(srcEnc)) {
+  if (isa<HCUMlsSharedEncodingAttr>(srcEnc)) {
     if (srcEnc != dstEnc) {
       return emitError("MLS memdesc_subslice must preserve mls_shared encoding");
     }

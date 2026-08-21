@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 r"""
 `hcuify.py` is a script that convert AMDGPU backend to HCU backend.
 
@@ -459,11 +462,10 @@ def process_target_tree_dry_run(src_root: Path, dst_root: Path):
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Copy source tree to destination, then replace file contents and rename "
-            "directories/files recursively: AMDGPU->HCUGPU, amdgpu->hcugpu, "
-            "AMD->HCU, amd->hcu; keep amdgcn unchanged. "
-            "In file contents, llvm::... chains and selected ttg encoding attrs "
-            "are preserved; for mlir::..., only the token immediately following "
+            "Copy source tree to destination, then rewrite identifiers and rename "
+            "files/directories for the HCU backend. LLVM amdgcn tokens are left "
+            "unchanged. In file contents, llvm::... chains and selected ttg encoding "
+            "attrs are preserved; for mlir::..., only the token immediately following "
             "mlir:: is preserved."
         )
     )

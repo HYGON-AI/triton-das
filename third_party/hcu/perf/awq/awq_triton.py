@@ -1,4 +1,8 @@
+# Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+# Derived from vLLM @ cb080f32 (vllm/model_executor/layers/quantization/awq_triton.py)
+
 import os
 import json
 import logging

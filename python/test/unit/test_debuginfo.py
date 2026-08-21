@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import os
 
 import pytest
@@ -56,7 +60,7 @@ def test_triton_debuginfo_on(lineInfoKey, diLocalVarKey, hasDbgInfo, device, mon
 
     # HCU compiles llir via external clang, which rejects LLVM #dbg_value records.
     if is_hip() and hasDbgInfo:
-        pytest.skip("HIP/HCU clang llir->amdgcn does not accept #dbg_value")
+        pytest.skip("HIP/HCU clang llir->gcn does not accept #dbg_value")
 
     size = 98432
     torch.manual_seed(0)

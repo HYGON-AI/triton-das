@@ -20,6 +20,8 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 #include "mlir/Transforms/Passes.h"
 #include "triton/Conversion/TritonDistributedToLLVM/Passes.h"
 #include "triton/Conversion/TritonDistributedToTritonGPU/Passes.h"
@@ -34,12 +36,12 @@
 
 namespace py = pybind11;
 
-void init_triton_distributed_passes_ttgpuir_for_amd(py::module &&m) {
+void init_triton_distributed_passes_ttgpuir_for_hcu(py::module &&m) {
   using namespace mlir::triton;
   ADD_PASS_WRAPPER_1("add_lib_device_to_llvmir",
                      createConvertLibDeviceToLLVMPass, bool);
   ADD_PASS_WRAPPER_2("add_distributed_to_llvm",
-                     createConvertAMDDistributedToLLVMPass, const std::string &,
+                     createConvertHCUDistributedToLLVMPass, const std::string &,
                      bool);
 }
 
@@ -53,5 +55,5 @@ void init_triton_distributed_passes_ttir(py::module &&m) {
 void init_triton_distributed_passes(py::module &&m) {
   init_triton_distributed_passes_ttir(m.def_submodule("ttir"));
   auto ttgpuir = m.def_submodule("ttgpuir");
-  init_triton_distributed_passes_ttgpuir_for_amd(ttgpuir.def_submodule("amd"));
+  init_triton_distributed_passes_ttgpuir_for_hcu(ttgpuir.def_submodule("hcu"));
 }

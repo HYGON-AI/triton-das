@@ -1,9 +1,12 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """Buffer-ops correctness / mode suite (#830, Case5, convert smoke).
 
 Default product knobs:
 
   AMDGCN_USE_BUFFER_OPS=1
-  AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS=0  # nonneg
+  TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS=0  # nonneg
   AMDGCN_ANALYZE_SMALL_TENSOR_RANGE=0     # pointer_range fast path allowed
 
 Override those env vars before pytest to exercise nonneg vs RA.
@@ -22,7 +25,7 @@ Listed in ``regression.sh``.
 Run:
 
   pytest third_party/hcu/test/test_buffer_ops_mode_suite.py -s
-  AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS=1 pytest ... -k case5
+  TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS=1 pytest ... -k case5
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ BLOCK = 1024
 _KNOB_ENVS = (
     "AMDGCN_USE_BUFFER_OPS",
     "AMDGCN_ANALYZE_SMALL_TENSOR_RANGE",
-    "AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS",
+    "TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS",
     "TRITON_ALWAYS_COMPILE",
 )
 
@@ -54,7 +57,7 @@ def _env_truthy(name: str, default: str = "0") -> bool:
 
 
 def _use_ra() -> bool:
-    return _env_truthy("AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS", "0")
+    return _env_truthy("TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS", "0")
 
 
 def _analyze_global() -> bool:
@@ -74,7 +77,7 @@ def _buffer_ops_env(
         os.environ["AMDGCN_ANALYZE_SMALL_TENSOR_RANGE"] = (
             "1" if (analyze if analyze is not None else _analyze_global()) else "0"
         )
-        os.environ["AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS"] = (
+        os.environ["TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS"] = (
             "1" if (use_ra if use_ra is not None else _use_ra()) else "0"
         )
         yield
@@ -292,7 +295,7 @@ def test_case5_byte_offset_wrap():
     if not _use_ra():
         pytest.xfail(
             "Case5 silent i32 byte-wrap under nonneg; "
-            "set AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS=1 for correct behavior"
+            "set TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS=1 for correct behavior"
         )
 
     with _buffer_ops_env(analyze=False):

@@ -1,8 +1,12 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import os
 import pytest
 import shutil
 import triton
-from triton._internal_testing import is_hip
+from triton._internal_testing import is_hip, is_hip_hcu
 
 from pathlib import Path
 
@@ -234,7 +238,7 @@ def test_set_knob_directly(fresh_knobs, monkeypatch):
 
 @pytest.mark.skipif(
     is_hip(),
-    reason="PTXAS is not installed on AMD",
+    reason="PTXAS is not installed on HCU" if is_hip_hcu() else "PTXAS is not installed on AMD",
 )
 def test_nvidia_tool(fresh_knobs, tmp_path, monkeypatch):
     triton_root = Path(fresh_knobs.__file__).parent

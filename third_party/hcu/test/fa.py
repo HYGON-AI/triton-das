@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """
 Fused Attention
 ===============
@@ -361,7 +364,7 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     qk_scale *= q_scale * k_scale
     acc_scale = p_scale * v_scale
     
-    # load q: it will stay in SRAM throughout on NV GPUs but in VGPRs on AMD GPUs
+    # load q: it will stay in SRAM throughout on NV GPUs but in VGPRs on HCU GPUs
     #分割数据块Q，每个线程块分配的数据块大小为[BLOCK_M,BLOCK_DMODEL]
     # USE_MLS: Q also uses matrix_load (opIdx=0 / mls_shared), matching K/V.
     if USE_MLS:

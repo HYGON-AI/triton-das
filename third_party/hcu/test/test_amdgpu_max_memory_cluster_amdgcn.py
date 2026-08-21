@@ -1,4 +1,7 @@
-"""Check amdgpu_max_memory_cluster_dwords via pre-generated AMDGCN goldens.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
+"""Check max_memory_cluster_dwords via pre-generated AMDGCN goldens.
 
 Reads Inputs/hcu-max-mem-cluster-*.amdgcn (compiled offline from
 hcu-max-mem-cluster.ll). A larger dword budget should yield longer, fewer
@@ -74,7 +77,7 @@ class ClusterSchedule:
 def analyze_cluster_schedule(amdgcn: str) -> ClusterSchedule:
     lines = amdgcn.splitlines()
     loads = [i for i, l in enumerate(lines) if _PAYLOAD_LOAD_RE.search(l)]
-    assert loads, "no buffer_load_dwordx4 payload loads found in amdgcn"
+    assert loads, "no buffer_load_dwordx4 payload loads found in GCN assembly"
 
     sizes: list[int] = []
     cur = 1
@@ -95,10 +98,10 @@ def analyze_cluster_schedule(amdgcn: str) -> ClusterSchedule:
     )
 
 
-def test_amdgpu_max_memory_cluster_dwords_amdgcn():
+def test_max_memory_cluster_dwords_amdgcn():
     asms = [(budget, _read(fn)) for budget, fn in _GOLDENS]
     for budget, asm in asms:
-        assert asm.strip(), f"budget {budget}: golden amdgcn is empty"
+        assert asm.strip(), f"budget {budget}: golden GCN assembly is empty"
 
     scheds = [(budget, analyze_cluster_schedule(asm)) for budget, asm in asms]
     for budget, sched in scheds:
@@ -108,7 +111,7 @@ def test_amdgpu_max_memory_cluster_dwords_amdgcn():
     assert len(set(n_loads.values())) == 1, f"payload load count changed across budgets: {n_loads}"
 
     for (lo, lo_asm), (hi, hi_asm) in zip(asms, asms[1:]):
-        assert lo_asm != hi_asm, f"budget {lo} vs {hi} amdgcn identical (knob is a no-op)"
+        assert lo_asm != hi_asm, f"budget {lo} vs {hi} GCN assembly identical (knob is a no-op)"
 
     for (lo, lo_s), (hi, hi_s) in zip(scheds, scheds[1:]):
         assert lo_s.max_cluster < hi_s.max_cluster, (
@@ -126,5 +129,5 @@ def test_amdgpu_max_memory_cluster_dwords_amdgcn():
 
 
 if __name__ == "__main__":
-    test_amdgpu_max_memory_cluster_dwords_amdgcn()
-    print("PASS: amdgpu_max_memory_cluster_dwords amdgcn golden checks")
+    test_max_memory_cluster_dwords_amdgcn()
+    print("PASS: max_memory_cluster_dwords GCN golden checks")

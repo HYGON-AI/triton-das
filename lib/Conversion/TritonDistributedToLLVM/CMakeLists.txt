@@ -1,7 +1,11 @@
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 add_triton_library(TritonDistributedToLLVM
-    AMD/LibDeviceToLLVM.cpp
-    AMD/DistributedOpToLLVM.cpp
-    AMD/ConvertAMDDistributedToLLVM.cpp
+    HCU/LibDeviceToLLVM.cpp
+    HCU/DistributedOpToLLVM.cpp
+    HCU/ConvertHCUDistributedToLLVM.cpp
 
     DEPENDS
     TritonDistributedToLLVMConversionPassIncGen

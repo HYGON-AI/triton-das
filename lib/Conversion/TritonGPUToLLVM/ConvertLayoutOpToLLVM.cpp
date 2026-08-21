@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Support/LogicalResult.h"
 #include "triton/Analysis/Utility.h"

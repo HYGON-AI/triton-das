@@ -1,4 +1,3 @@
-
 | **`Documentation`** | **`Nightly Wheels`** |
 |-------------------- | -------------------- |
 | [![Documentation](https://github.com/triton-lang/triton/actions/workflows/documentation.yml/badge.svg)](https://triton-lang.org/) | [![Wheels](https://github.com/triton-lang/triton/actions/workflows/wheels.yml/badge.svg)](https://github.com/triton-lang/triton/actions/workflows/wheels.yml) |
@@ -41,6 +40,10 @@ pip install triton
 Binary wheels are available for CPython 3.10-3.14.
 
 # Install from source
+
+**Hygon HCU / DTK users:** follow **[README.HCU.md](./README.HCU.md)**.
+
+The commands below are the Upstream default install flow.
 
 ```shell
 git clone https://github.com/triton-lang/triton.git
@@ -315,3 +318,11 @@ the [triton-dev-containers repository](https://github.com/redhat-et/triton-dev-c
 
 For detailed instructions on how to use the dev containers, please see
 the [dev container user guide](https://github.com/redhat-et/triton-dev-containers/blob/main/.devcontainer/devcontainer.md).
+
+# License and attribution (Hygon HCU fork)
+
+This repository is based on [Triton](https://github.com/triton-lang/triton) upstream branch `release/3.6.x`, Commit [`85400f80bf859a34ad7a746ffda877faf80312ab`](https://github.com/triton-lang/triton/commit/85400f80bf859a34ad7a746ffda877faf80312ab).
+
+It is released under the **MIT** License; see [LICENSE](./LICENSE). Third-party notices: [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+
+Modified by Hygon Information Technology Co., Ltd.

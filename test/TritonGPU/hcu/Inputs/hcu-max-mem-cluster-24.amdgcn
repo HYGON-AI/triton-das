@@ -244,7 +244,7 @@ same_base_cluster_kernel:               ; @same_base_cluster_kernel
 ; COMPUTE_PGM_RSRC2:TGID_Y_EN: 0
 ; COMPUTE_PGM_RSRC2:TGID_Z_EN: 0
 ; COMPUTE_PGM_RSRC2:TIDIG_COMP_CNT: 0
-	.ident	"clang version 17.0.0 (http://10.4.0.1/dcutoolkit/driverruntime/llvm-project.git ff5bf917a679c83afe927af051a20b86fef7b07d)"
+	.ident	"clang version 17.0.0"
 	.section	".note.GNU-stack","",@progbits
 	.addrsig
 	.amdgpu_metadata

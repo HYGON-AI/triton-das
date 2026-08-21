@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 // This file implements the data partitioning logic used by the Warp
 // Specialization pass for the HCU backend.  The goal is to split
 // computations across the two MMA partitions that the hardware provides.
@@ -345,7 +348,7 @@ static bool getBackwardSliceToPartition(Value v,
 // half-tile MLS write + LocalAlloc; the shared operand stays one full-tile
 // MLS write.
 static bool isMlsSharedEncoding(Attribute encoding) {
-  return isa_and_nonnull<AMDMlsSharedEncodingAttr>(encoding);
+  return isa_and_nonnull<HCUMlsSharedEncodingAttr>(encoding);
 }
 
 static bool isMlsSharedMemDesc(Type type) {
@@ -691,7 +694,7 @@ static void syncMfmaFamilyEncodings(triton::FuncOp funcOp) {
 static MemDescType retypeMlsMemDesc(MemDescType memTy, ArrayRef<int64_t> shape,
                                     unsigned numWarpsForTile) {
   Attribute enc = memTy.getEncoding();
-  if (auto shared = dyn_cast_or_null<AMDMlsSharedEncodingAttr>(enc)) {
+  if (auto shared = dyn_cast_or_null<HCUMlsSharedEncodingAttr>(enc)) {
     SmallVector<int64_t> matrixShape;
     if (shape.size() >= 2)
       matrixShape.assign(shape.end() - 2, shape.end());
@@ -706,7 +709,7 @@ static MemDescType retypeMlsMemDesc(MemDescType memTy, ArrayRef<int64_t> shape,
           shared.getOpIdx(), kMajor, shared.getElemBitWidth(),
           shared.getVersion(), matrixShape, numWarpsForTile, mlsTile);
     }
-    enc = AMDMlsSharedEncodingAttr::get(
+    enc = HCUMlsSharedEncodingAttr::get(
         memTy.getContext(), shared.getOpIdx(), mlsTile,
         shared.getElemBitWidth(), shared.getElemBitTyKind(),
         shared.getAlt2Kind(), shared.getVersion(), shared.getOrder(),

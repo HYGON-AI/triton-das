@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 #include "TritonHCU/Passes.h"
 #include "TritonHCU/WaitCntHCUUtility.h"
 #include "TritonHCU/WdraSplitPlan.h"

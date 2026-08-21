@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """HCU regression: abarrier/ebarrier PC .mlir fixtures -> LLIR lowering."""
 
 import os

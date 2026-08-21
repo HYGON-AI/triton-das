@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, amd, hcu, distributed
 from triton import knobs
@@ -104,7 +107,7 @@ class HIPOptions:
 
     # Memory load/store clustering dword budget (LLVM fn attr).
     # None: omit attr (LLVM default 8). Allowed: 8, 16, 24, 32, 40, 48.
-    amdgpu_max_memory_cluster_dwords: int = None
+    max_memory_cluster_dwords: int = None
 
     # Extend options for HCU, used for buffer ops with cache swizzle enable or disalbe.
     # mls ignore this and enable default due to better performance.
@@ -225,14 +228,14 @@ class HIPBackend(BaseBackend):
                 f"enable_v_mmac_cluster must be 0, 1, or 2; got {cluster}")
         args["enable_v_mmac_cluster"] = cluster
 
-        mem_cluster = args.get("amdgpu_max_memory_cluster_dwords")
+        mem_cluster = args.get("max_memory_cluster_dwords")
         if mem_cluster is not None:
             mem_cluster = int(mem_cluster)
             if mem_cluster not in (8, 16, 24, 32, 40, 48):
                 raise ValueError(
-                    "amdgpu_max_memory_cluster_dwords must be one of "
+                    "max_memory_cluster_dwords must be one of "
                     f"8, 16, 24, 32, 40, 48; got {mem_cluster}")
-            args["amdgpu_max_memory_cluster_dwords"] = mem_cluster
+            args["max_memory_cluster_dwords"] = mem_cluster
 
         # Consume the legacy `instruction_sched_variant` option and map it to
         # `schedule_hint`. If both are present, keep the explicit schedule_hint.
@@ -758,7 +761,7 @@ class HIPBackend(BaseBackend):
         hcu.passes.ttgpuir.add_apply_func_hints_and_clean(pm)
         hcu.passes.ttgpuir.add_to_llvmir(pm, options.arch, __HIP_FTZ)
         # TritonDistributed Extension: distributed -> llvm
-        distributed.passes.ttgpuir.amd.add_distributed_to_llvm(pm, options.arch, __HIP_FTZ)
+        distributed.passes.ttgpuir.hcu.add_distributed_to_llvm(pm, options.arch, __HIP_FTZ)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
@@ -791,7 +794,7 @@ class HIPBackend(BaseBackend):
 
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)
         # TritonDistributed Extension: libdevice -> llvm
-        distributed.passes.ttgpuir.amd.add_lib_device_to_llvmir(pm, __HIP_FTZ)
+        distributed.passes.ttgpuir.hcu.add_lib_device_to_llvmir(pm, __HIP_FTZ)
         pm.run(mod, 'make_llir')
 
         if knobs.compilation.dump_ir_extract_di_local_variables:
@@ -864,10 +867,10 @@ class HIPBackend(BaseBackend):
         # FIXME: Keep legacy HCU behavior from Triton 3.1.x, need check triton-llvm waves_per_eu {0} or {0, 0} why not eliminate
         # fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}, {options.waves_per_eu}")
         fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}")
-        if options.amdgpu_max_memory_cluster_dwords is not None:
+        if options.max_memory_cluster_dwords is not None:
             fns[0].add_fn_attr(
                 "amdgpu-max-memory-cluster-dwords",
-                str(options.amdgpu_max_memory_cluster_dwords),
+                str(options.max_memory_cluster_dwords),
             )
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
@@ -977,16 +980,16 @@ class HIPBackend(BaseBackend):
                 print(log, flush=True)
 
             with open(asm_file, "r") as fd_out:
-                amdgcn = fd_out.read()
+                gcn = fd_out.read()
 
         except subprocess.CalledProcessError as e:
             HIPBackend._archive_failed_compilation(
-                "llir->amdgcn", metadata, [llir_file, asm_file], clang_path, asm_command, e.stderr)
+                "llir->gcn", metadata, [llir_file, asm_file], clang_path, asm_command, e.stderr)
             print(f"Compilation failed: {e.stderr}")
             raise HSACOError(f"Compilation failed: {e.stderr}") from e
         except IOError as e:
             HIPBackend._archive_failed_compilation(
-                "llir->amdgcn", metadata, [llir_file, asm_file], clang_path, asm_command, str(e))
+                "llir->gcn", metadata, [llir_file, asm_file], clang_path, asm_command, str(e))
             print(f"File operation failed: {str(e)}")
             raise HSACOError(f"File operation failed: {str(e)}") from e
         finally:
@@ -995,9 +998,9 @@ class HIPBackend(BaseBackend):
                 if os.path.exists(file):
                     os.remove(file)
         if knobs.amd.dump_amdgcn:
-            print("// -----// AMDGCN Dump //----- //")
-            print(amdgcn)
-        return amdgcn
+            print("// -----// HCU GCN Dump //----- //")
+            print(gcn)
+        return gcn
 
     @staticmethod
     def make_hsaco(src, metadata, options):
@@ -1024,12 +1027,12 @@ class HIPBackend(BaseBackend):
 
         except subprocess.CalledProcessError as e:
             HIPBackend._archive_failed_compilation(
-                "amdgcn->hsaco", metadata, [asm_file, hsaco_file], clang_path, hsaco_command, e.stderr)
+                "gcn->hsaco", metadata, [asm_file, hsaco_file], clang_path, hsaco_command, e.stderr)
             print(f"Compilation failed: {e.stderr}")
             raise HSACOError(f"Compilation failed: {e.stderr}") from e
         except IOError as e:
             HIPBackend._archive_failed_compilation(
-                "amdgcn->hsaco", metadata, [asm_file, hsaco_file], clang_path, hsaco_command, str(e))
+                "gcn->hsaco", metadata, [asm_file, hsaco_file], clang_path, hsaco_command, str(e))
             print(f"File operation failed: {str(e)}")
             raise HSACOError(f"File operation failed: {str(e)}") from e
 

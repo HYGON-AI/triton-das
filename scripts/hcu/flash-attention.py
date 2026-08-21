@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """
 A copy of python/perf-kernels/flash-attention.py customized for tuning on HCUs.
 ===============

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
@@ -29,7 +32,7 @@ using ::mlir::LLVM::delinearize;
 using ::mlir::LLVM::getSharedMemoryObjectFromStruct;
 using ::mlir::triton::amdgpu::MlsEncodingAttr;
 using ::mlir::triton::amdgpu::MlsStoreEncodingAttr;
-using ::mlir::triton::gpu::AMDMlsSharedEncodingAttr;
+using ::mlir::triton::gpu::HCUMlsSharedEncodingAttr;
 
 namespace {
 
@@ -128,7 +131,7 @@ struct MLSMatrixLoadToLocalOpConversion
 
     auto dstTy = cast<MemDescType>(op.getDest().getType());
     auto sharedLayout =
-        dyn_cast<AMDMlsSharedEncodingAttr>(dstTy.getEncoding());
+        dyn_cast<HCUMlsSharedEncodingAttr>(dstTy.getEncoding());
     auto blockLayout = op->getAttrOfType<MlsEncodingAttr>(
         MlsEncodingAttr::getMnemonic());
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
@@ -356,7 +359,7 @@ private:
                                 const MlsInsn &mlsInsn,
                                 const MlsEncodingAttr &blockLayout,
                                 const MatrixLoadInsnAttr &mlInsnAttr,
-                                const AMDMlsSharedEncodingAttr &sharedLayout,
+                                const HCUMlsSharedEncodingAttr &sharedLayout,
                                 ArrayRef<int64_t> tensorShape,
                                 ValueRange llStrides,
                                 bool mlsIsRowMajor,
@@ -438,7 +441,7 @@ private:
                                 const MlsInsn &mlsInsn,
                                 const MlsEncodingAttr &blockLayout,
                                 const MatrixLoadInsnAttr &mlInsnAttr,
-                                const AMDMlsSharedEncodingAttr &sharedLayout,
+                                const HCUMlsSharedEncodingAttr &sharedLayout,
                                 ArrayRef<int64_t> tensorShape,
                                 ValueRange llStrides,
                                 bool mlsIsRowMajor,
@@ -815,7 +818,7 @@ struct MLSMatrixStoreFromRegOpConversion
 
     // Synthetic shared layout so GMEM address helpers match the LDS store path.
     auto ctaLayout = getCTALayout(valueTy.getEncoding());
-    auto sharedLayout = AMDMlsSharedEncodingAttr::get(
+    auto sharedLayout = HCUMlsSharedEncodingAttr::get(
         ctx, blockLayout.getOpIdx(), blockLayout.getMlsTile(),
         blockLayout.getElemBitWidth(),
         static_cast<MlsElemBitTyKind>(blockLayout.getElemBitTyKind()),
@@ -957,7 +960,7 @@ struct MLSMatrixStoreFromRegOpConversion
     }
 
     // Rebuild shared layout against the (possibly warp-local) store layout.
-    sharedLayout = AMDMlsSharedEncodingAttr::get(
+    sharedLayout = HCUMlsSharedEncodingAttr::get(
         ctx, storeLayout.getOpIdx(), storeLayout.getMlsTile(),
         storeLayout.getElemBitWidth(),
         static_cast<MlsElemBitTyKind>(storeLayout.getElemBitTyKind()),
@@ -1278,7 +1281,7 @@ struct MLSLocalAllocOpConversion
     auto resultTy = cast<MemDescType>(op.getType());
     auto typeConverter = getTypeConverter();
     auto sharedLayout =
-        dyn_cast<AMDMlsSharedEncodingAttr>(resultTy.getEncoding());
+        dyn_cast<HCUMlsSharedEncodingAttr>(resultTy.getEncoding());
     if (!sharedLayout)
       return failure();
 
@@ -1331,7 +1334,7 @@ public:
     RankedTensorType dstTy = op.getType();
     Attribute srcLayout = srcTy.getEncoding();
     Attribute dstLayout = dstTy.getEncoding();
-    if (isa<triton::gpu::AMDMlsSharedEncodingAttr>(srcLayout)) {
+    if (isa<triton::gpu::HCUMlsSharedEncodingAttr>(srcLayout)) {
       if (isa<DotOperandEncodingAttr>(dstLayout) &&
           isa<AMDMfmaEncodingAttr>(
               cast<DotOperandEncodingAttr>(dstLayout).getParent())) {
@@ -1407,7 +1410,7 @@ private:
     int kDimIdx2D = opIdx == 0 ? 1 : 0;
     int nonKDimIdx2D = opIdx == 0 ? 0 : 1;
 
-    auto sharedLayout = cast<AMDMlsSharedEncodingAttr>(tensorTy.getEncoding());
+    auto sharedLayout = cast<HCUMlsSharedEncodingAttr>(tensorTy.getEncoding());
     auto shapeE = getMlsExpandedShape(sharedLayout, shape, MlsTileKind::Elems);
     auto shapeS = getMlsExpandedShape(sharedLayout, shape, MlsTileKind::Shared);
 
@@ -1635,7 +1638,7 @@ private:
     auto mfmaLayout = cast<AMDMfmaEncodingAttr>(encoding.getParent());
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
-    auto sharedLayout = cast<AMDMlsSharedEncodingAttr>(tensorTy.getEncoding());
+    auto sharedLayout = cast<HCUMlsSharedEncodingAttr>(tensorTy.getEncoding());
     auto shapeE = getMlsExpandedShape(sharedLayout, shape, MlsTileKind::Elems);
     auto shapeS = getMlsExpandedShape(sharedLayout, shape, MlsTileKind::Shared);
 
@@ -1882,7 +1885,7 @@ private:
 
   llvm::SmallVector<Value>
   computeDsReadMatrixOffsets(ConversionPatternRewriter &rewriter, Location loc,
-                             const AMDMlsSharedEncodingAttr &sharedLayout,
+                             const HCUMlsSharedEncodingAttr &sharedLayout,
                              const DsReadMatrixInsnAttr &dsInsnAttr,
                              Value warpNonKId, int warpsPerBlockNonK,
                              ArrayRef<unsigned> mlsReps, SharedMemoryObject smemObj,

@@ -20,6 +20,8 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 //
 // Created by Maksim Levental (Advanced Micro Devices, Inc) on 3/20/25.
 // Modified by Wenlei Bao, Xuegui zheng and Chenhui Huang (ByteDance Ltd).

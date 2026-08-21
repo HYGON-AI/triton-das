@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #ifndef TRITON_TOOLS_SYS_GETENV_HPP
 #define TRITON_TOOLS_SYS_GETENV_HPP
 
@@ -14,7 +18,7 @@ namespace mlir::triton {
 inline const std::set<std::string> CACHE_INVALIDATING_ENV_VARS = {
     // clang-format off
     "AMDGCN_ANALYZE_SMALL_TENSOR_RANGE",
-    "AMDGCN_BUFFER_OPS_USE_RANGE_ANALYSIS",
+    "TRITON_BUFFER_OPS_USE_RANGE_ANALYSIS",
     "AMDGCN_ENABLE_DUMP",
     "AMDGCN_USE_BUFFER_ATOMICS",
     "AMDGCN_USE_BUFFER_OPS",

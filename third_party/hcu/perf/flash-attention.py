@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """
 Fused Attention
 ===============
@@ -266,8 +269,8 @@ def _attn_fwd(Q, K, V, VT, sm_scale, M, Out,
     # don't work as expected with `exp` in the loop
     #这代码搞让人头晕，这个常数1.44269504分析了半天才明白它代表e的值，是用2的1.44269504次方代表e的值。
     qk_scale = sm_scale * 1.44269504
-    # load q: it will stay in SRAM throughout on NV GPUs but in VGPRs on AMD GPUs
-    #tl.load()导入的数据在AMD的GPU上竟然是放在VGPR上的，有些意外。
+    # load q: it will stay in SRAM throughout on NV GPUs but in VGPRs on HCU GPUs
+    #tl.load()导入的数据在HCU上竟然是放在VGPR上的，有些意外。
     q = tl.load(Q_block_ptr)
     #直接先把scale先融入到Q中，这样后面的计算直接不用写那么繁琐了。
     q = (q * qk_scale).to(q.dtype)

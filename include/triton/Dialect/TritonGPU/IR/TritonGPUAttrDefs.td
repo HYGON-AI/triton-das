@@ -582,8 +582,8 @@ def TTG_MlsTileKindEnum : I32EnumAttr<
     let cppNamespace = "::mlir::triton::gpu";
 }
 
-def AMDMlsSharedEncodingAttr :
-  TritonGPU_Attr<"AMDMlsSharedEncoding", "hcu_mls_shared_encoding",
+def HCUMlsSharedEncodingAttr :
+  TritonGPU_Attr<"HCUMlsSharedEncoding", "hcu_mls_shared_encoding",
                 [SharedEncodingTrait, LayoutEncodingTrait]> {
   let mnemonic = "mls_shared";
   let description = [{

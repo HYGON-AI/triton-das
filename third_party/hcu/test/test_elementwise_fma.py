@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 """End-to-end test for elementwise FMA codegen on HCU/HIP."""
 
 import os
@@ -53,18 +56,18 @@ torch.cuda.synchronize()
             f"stderr:\n{result.stderr}"
         )
 
-        amdgcn_files = sorted(Path(cache_dir).rglob("triton_poi_fused_add_mul_0.amdgcn"))
-        assert amdgcn_files, f"no fused add_mul kernel found under TRITON_CACHE_DIR={cache_dir}"
+        gcn_files = sorted(Path(cache_dir).rglob("triton_poi_fused_add_mul_0.amdgcn"))
+        assert gcn_files, f"no fused add_mul kernel found under TRITON_CACHE_DIR={cache_dir}"
 
         matched = []
-        for path in amdgcn_files:
+        for path in gcn_files:
             text = path.read_text(encoding="utf-8")
             if _FMA_RE.search(text):
                 matched.append(path)
 
         assert matched, (
             "no FMA/FMAC instruction found in generated add_mul kernels\n"
-            f"checked: {[str(p) for p in amdgcn_files]}"
+            f"checked: {[str(p) for p in gcn_files]}"
         )
 
     cache_dir = os.environ.get("TRITON_CACHE_DIR")

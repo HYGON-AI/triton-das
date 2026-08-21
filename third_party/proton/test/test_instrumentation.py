@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import json
 import pathlib
 
@@ -16,6 +20,7 @@ from triton._internal_testing import (
     is_hip,
     is_hip_cdna2,
     is_hip_cdna4,
+    is_hip_hcu,
     supports_tma,
     supports_ws,
 )
@@ -696,7 +701,14 @@ def test_globaltime(tmp_path: pathlib.Path):
         assert ts_diff >= target[0]["dur"]
 
 
-@pytest.mark.skipif(is_hip(), reason="not stable overhead numbers on AMD GPUs")
+_OVERHEAD_SKIP_REASON = (
+    "not stable overhead numbers on HCU devices"
+    if is_hip_hcu()
+    else "not stable overhead numbers on AMD GPUs"
+)
+
+
+@pytest.mark.skipif(is_hip(), reason=_OVERHEAD_SKIP_REASON)
 def test_overhead(tmp_path: pathlib.Path):
     temp_file_cycles = tmp_path / "test_overhead.hatchet"
     temp_file_time = tmp_path / "test_overhead_time.hatchet"

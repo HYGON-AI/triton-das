@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 set(TRITON_HCU1_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../include
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/amd/include

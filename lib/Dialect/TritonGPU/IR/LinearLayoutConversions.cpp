@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include <vector>
 
 #include "triton/Dialect/Triton/IR/Utility.h"
@@ -1247,8 +1251,8 @@ LinearLayout TritonGPUDialect::toLinearLayout(ArrayRef<int64_t> shape,
       result = nvmmaSharedToLinearLayout(shape, shared);
     } else if (auto sbl = dyn_cast<AMDRotatingSharedEncodingAttr>(layout)) {
       result = sharedToLinearLayoutAMDRotating(shape, sbl);
-    } else if (isa<AMDMlsSharedEncodingAttr>(layout)) {
-      assert(0 && "AMDMlsSharedEncodingAttr toLinearLayout is not implemented");
+    } else if (isa<HCUMlsSharedEncodingAttr>(layout)) {
+      assert(0 && "MlsSharedEncodingAttr toLinearLayout is not implemented");
     } else if (auto tensorMemoryEncoding =
                    dyn_cast<TensorMemoryEncodingAttr>(layout)) {
       result = tensorMemoryToLinearLayout(shape, tensorMemoryEncoding);

@@ -20,6 +20,8 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 #ifndef TRITON_DISTRIBUTED_CONVERSION_TRITONDISTRIBUTEDTOLLVM_H
 #define TRITON_DISTRIBUTED_CONVERSION_TRITONDISTRIBUTEDTOLLVM_H
 
@@ -54,14 +56,14 @@ void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                          std::string NVSHMEMLibpath = "");
 } // namespace NVIDIA
 
-namespace AMD {
+namespace HCU {
 void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                          RewritePatternSet &patterns,
                                          PatternBenefit benefit,
-                                         const TargetInfo &targetInfo,
+                                         const AMD::TargetInfo &targetInfo,
                                          std::string ROCSHMEMLibname = "",
                                          std::string ROCSHMEMLibpath = "");
-} // namespace AMD
+} // namespace HCU
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertTritonDistributedToLLVMPass();
@@ -75,7 +77,7 @@ std::unique_ptr<OperationPass<ModuleOp>>
 createConvertLibDeviceToLLVMPass(bool ftz);
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertAMDDistributedToLLVMPass(StringRef targetArch, bool ftz);
+createConvertHCUDistributedToLLVMPass(StringRef targetArch, bool ftz);
 } // namespace triton
 } // namespace mlir
 
