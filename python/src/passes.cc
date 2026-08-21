@@ -21,6 +21,11 @@
 
 namespace py = pybind11;
 
+namespace mlir::triton::gpu {
+std::unique_ptr<::mlir::Pass>
+createTritonGPURemoveLayoutConversionsEnhanced(bool enhance);
+}
+
 void init_triton_analysis(py::module &&m) {
   py::class_<mlir::ModuleAllocation>(m, "allocation", py::module_local())
       .def(py::init<mlir::ModuleOp>());
@@ -81,8 +86,15 @@ void init_triton_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_1("add_f32_dot_tc", createTritonGPUF32DotTC, bool);
   ADD_PASS_OPTION_WRAPPER_1("add_optimize_dot_operands",
                             createTritonGPUOptimizeDotOperands, bool);
-  ADD_PASS_WRAPPER_0("add_remove_layout_conversions",
-                     createTritonGPURemoveLayoutConversions);
+  m.def(
+      "add_remove_layout_conversions",
+      [](mlir::PassManager &pm, bool enhance) {
+        if (enhance)
+          pm.addPass(createTritonGPURemoveLayoutConversionsEnhanced(true));
+        else
+          pm.addPass(createTritonGPURemoveLayoutConversions());
+      },
+      py::arg("pm"), py::arg("enable_rlc_enhance") = false);
   ADD_PASS_WRAPPER_0("add_reduce_data_duplication",
                      createTritonGPUReduceDataDuplication);
   ADD_PASS_WRAPPER_0("add_allocate_warp_groups",
