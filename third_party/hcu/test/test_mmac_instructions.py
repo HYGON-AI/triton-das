@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # SPDX-License-Identifier: MIT
 
-"""Regression coverage for five gfx946 MMAC instruction variants."""
+"""Regression coverage for gfx946 MMAC variants and acc16 fallback."""
 
 import re
 
@@ -13,6 +13,7 @@ from triton._internal_testing import is_hip
 
 
 _MMAC_INSTRUCTIONS = {
+    "f16_acc_f32": r"\bv_mmac_f32_16x16x16_f16\b",
     "f16_f16": r"\bv_mmac_16x16x16_f16\b",
     "f16_bf16": r"\bv_mmac_bf16_16x16x16_f16\b",
     "bf16_f16": r"\bv_mmac_f16_16x16x16_bf16\b",
@@ -20,12 +21,21 @@ _MMAC_INSTRUCTIONS = {
     "f64_f64": r"\bv_mmac_16x16x4_f64\b",
 }
 
+_HCU_ARCHES_WITHOUT_ACC16 = {"gfx928", "gfx936", "gfx938", "gfx92a"}
+
 
 def is_hip_gfx946():
     if not is_hip():
         return False
     target = triton.runtime.driver.active.get_current_target()
     return target is not None and target.arch == "gfx946"
+
+
+def is_hip_hcu_without_acc16():
+    if not is_hip():
+        return False
+    target = triton.runtime.driver.active.get_current_target()
+    return target is not None and target.arch in _HCU_ARCHES_WITHOUT_ACC16
 
 
 @triton.jit
@@ -158,3 +168,49 @@ def test_floating_mmac_instructions(name, input_dtype, output_dtype, block_k, as
     )
     assert_mmac_result(c.cpu(), matmul_ref(a, b, output_dtype))
     _assert_instruction(program, asm_instruction)
+
+
+@pytest.mark.skipif(
+    not is_hip_hcu_without_acc16(),
+    reason="MMAC acc16 fallback test requires an HCU target without acc16 support",
+)
+@pytest.mark.parametrize(
+    "dtype,acc_dtype,fallback_instruction,native_instruction",
+    [
+        (torch.float16, tl.float16, "f16_acc_f32", "f16_f16"),
+    ],
+)
+def test_mmac_acc16_falls_back_to_f32_accumulation(
+    dtype, acc_dtype, fallback_instruction, native_instruction
+):
+    M = 32
+    N = 32
+    K = 32
+    torch.manual_seed(0)
+    a = torch.randn((M, K), device="cuda", dtype=dtype)
+    b = torch.randn((K, N), device="cuda", dtype=dtype)
+    c = torch.empty((M, N), device="cuda", dtype=dtype)
+    grid = (triton.cdiv(M, 16), triton.cdiv(N, 16))
+    program = floating_mmac_kernel[grid](
+        a,
+        b,
+        c,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        K=K,
+        BLOCK_M=16,
+        BLOCK_N=16,
+        BLOCK_K=16,
+        ACC_DTYPE=acc_dtype,
+        num_warps=4,
+    )
+
+    assert_mmac_result(c.cpu(), matmul_ref(a, b, dtype))
+    _assert_instruction(program, fallback_instruction)
+    assert not re.search(_MMAC_INSTRUCTIONS[native_instruction], program.asm["amdgcn"]), (
+        "unexpected native 16-bit accumulation MMAC on a target without acc16 support"
+    )

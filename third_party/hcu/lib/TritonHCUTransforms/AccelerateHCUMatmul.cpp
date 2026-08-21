@@ -1148,9 +1148,11 @@ public:
       mfmaAccType = rewriter.getIntegerType(32);
     else if (oldRetType.getElementType().isF64())
       mfmaAccType = rewriter.getF64Type();
-    else if (oldRetType.getElementType().isF16())
+    else if (oldRetType.getElementType().isF16() &&
+             (features & HCUISAFeature::MMAC_ACC_FP16) != 0)
       mfmaAccType = rewriter.getF16Type();
-    else if (oldRetType.getElementType().isBF16())
+    else if (oldRetType.getElementType().isBF16() &&
+             (features & HCUISAFeature::MMAC_ACC_BF16) != 0)
       mfmaAccType = rewriter.getBF16Type();
     else
       mfmaAccType = rewriter.getF32Type();
