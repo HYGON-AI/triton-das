@@ -56,6 +56,16 @@ ttg::AMDMfmaEncodingAttr findSourceMfmaEncoding(Value value);
 bool requiresBInterleave2(triton::MatrixStoreOp storeOp);
 bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot);
 
+SmallVector<unsigned> getMatrixStoreTensorOrder(triton::MatrixStoreOp storeOp) {
+  auto strides = storeOp.getStrides();
+  assert(strides.size() == 2);
+  if (auto constantOp = strides[1].getDefiningOp<arith::ConstantOp>())
+    if (auto attr = dyn_cast<IntegerAttr>(constantOp.getValue()))
+      if (attr.getValue().isOne())
+        return {1, 0};
+  return {0, 1};
+}
+
 // Chooses a proper MLS instruction
 FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
                                         triton::MatrixLoadOp matrixOp, bool kMajor,
@@ -498,16 +508,20 @@ public:
         !requiresBInterleave2(storeOp))
       return failure();
 
-    constexpr unsigned mTile = 32;
-    constexpr unsigned nTile = 16;
+    // The transposed matrix_store_32x16 instruction covers a logical 16x32
+    // region of the row-major C tensor.
+    constexpr unsigned mTile = 16;
+    constexpr unsigned nTile = 32;
     constexpr unsigned bitwidth = 16;
     constexpr auto altKind = MlsInterleaveKind::Interleave2;
     if (valueType.getShape()[0] % mTile != 0 ||
         valueType.getShape()[1] % nTile != 0)
       return failure();
 
+    SmallVector<unsigned> order = getMatrixStoreTensorOrder(storeOp);
+    bool transpose = order[0] == 1;
     auto mlsInsn = MlsInsn::selectOrGetMatrixStoreInsn(
-        mTile, nTile, bitwidth, mlsVersion, altKind);
+        mTile, nTile, bitwidth, mlsVersion, altKind, transpose);
     if (failed(mlsInsn))
       return failure();
 
@@ -516,7 +530,6 @@ public:
     Value convertedValue = valueType.getEncoding() == Attribute(srcMfma)
                                ? value
                                : convertAndCastTensor(rewriter, value, srcMfma);
-    SmallVector<unsigned> order = {0, 1};
     SmallVector<unsigned> warpsPerCTA(srcMfma.getWarpsPerCTA().begin(),
                                       srcMfma.getWarpsPerCTA().end());
 

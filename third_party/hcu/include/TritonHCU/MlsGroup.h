@@ -226,7 +226,8 @@ public:
   static FailureOr<MlsInsn>
   selectOrGetMatrixStoreInsn(unsigned mTile, unsigned nTile,
                              unsigned elemBitWidth, unsigned mlsVersion,
-                             MlsInterleaveKind interleaveKind);
+                             MlsInterleaveKind interleaveKind,
+                             bool transpose);
   MlsInsn(const MlsInsnAttr &attr) : attr(attr) {}
 
   unsigned getOpIdx() const { return attr.opIdx; }

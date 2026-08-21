@@ -472,25 +472,27 @@ FailureOr<MlsInsn> MlsInsn::selectOrGetMlsInsn(unsigned nonKTile,
 
 FailureOr<MlsInsn> MlsInsn::selectOrGetMatrixStoreInsn(
     unsigned mTile, unsigned nTile, unsigned elemBitWidth,
-    unsigned mlsVersion, MlsInterleaveKind interleaveKind) {
+    unsigned mlsVersion, MlsInterleaveKind interleaveKind, bool transpose) {
   // VGPR matrix-store support is currently available only for the verified
-  // fp16 32x16 form used by MMAC C layout 3 with interleave 2.
+  // transposed fp16 32x16 form. In logical M/N tensor coordinates it covers
+  // 16x32 elements.
   if (interleaveKind != MlsInterleaveKind::Interleave2 ||
-      elemBitWidth != 16 || mTile != 32 || nTile != 16 ||
+      elemBitWidth != 16 || !transpose || mTile != 16 || nTile != 32 ||
       (mlsVersion != 2 && mlsVersion != 3))
     return failure();
 
   MlsInsnAttr attr{};
   attr.opIdx = 0;
   attr.mlsTile = {mTile, nTile};
-  attr.kMajor = false;
+  attr.kMajor = transpose;
   attr.elemBitWidth = elemBitWidth;
   attr.elemBitTyKind = MlsElemBitTyKind::None;
   attr.interleaveKind = interleaveKind;
   attr.mlsVersion = mlsVersion;
-  attr.msInsn.instrShape = {32, 16};
-  attr.msInsn.instrsPerWarp = {mTile / 32, nTile / 16};
-  attr.msInsn.instrOrder = {0, 1};
+  attr.msInsn.instrShape = attr.mlsTile;
+  attr.msInsn.instrsPerWarp = {1, 1};
+  attr.msInsn.instrOrder = transpose ? std::array<unsigned, 2>{1, 0}
+                                     : std::array<unsigned, 2>{0, 1};
   attr.msInsn.insn = "rocdl.matrix.store.32x16.b16";
   return MlsInsn(attr);
 }

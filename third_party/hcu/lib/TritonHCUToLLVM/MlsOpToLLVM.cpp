@@ -785,10 +785,12 @@ struct MLSMatrixStoreFromRegOpConversion
     }
 
     auto storeTile = storeEncoding.getStoreTile();
+    bool transpose = storeEncoding.getOrder()[0] == 1;
     auto mlsInsn = MlsInsn::selectOrGetMatrixStoreInsn(
         storeTile[0], storeTile[1], storeEncoding.getElemBitWidth(),
         storeEncoding.getVersion(), static_cast<MlsInterleaveKind>(
-                                        storeEncoding.getInterleaveKind()));
+                                        storeEncoding.getInterleaveKind()),
+        transpose);
     if (failed(mlsInsn))
       return failure();
     auto msInsnAttr = mlsInsn->getMatrixStoreInsnAttr();
@@ -805,7 +807,8 @@ struct MLSMatrixStoreFromRegOpConversion
     // MlsEncodingAttr. Keep this compatibility representation local to LLVM
     // lowering; the store IR itself uses M/N-only MlsStoreEncodingAttr.
     auto blockLayout = MlsEncodingAttr::get(
-        ctx, /*opIdx=*/0, storeTile, storeEncoding.getElemBitWidth(),
+        ctx, /*opIdx=*/0, mlsInsn->getMlsTile(),
+        storeEncoding.getElemBitWidth(),
         static_cast<unsigned>(MlsElemBitTyKind::None),
         storeEncoding.getInterleaveKind(), storeEncoding.getVersion(),
         storeEncoding.getOrder(), storeEncoding.getWarpsPerCTA());
