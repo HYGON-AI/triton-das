@@ -98,6 +98,9 @@ class HIPOptions:
     #   amdgpu_enable_max_ilp_scheduling_strategy=True → -mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true
     misched_regpressure: bool = True
     amdgpu_enable_max_ilp_scheduling_strategy: bool = False
+    # Select the gfx946 v2 scheduling model. Autotune configs may disable it
+    # to retain the legacy model with newer HCU Clang builds.
+    hcu_use_gfx946_sched_model_v2: bool = True
 
     # Memory load/store clustering dword budget (LLVM fn attr).
     # None: omit attr (LLVM default 8). Allowed: 8, 16, 24, 32, 40, 48.
@@ -515,6 +518,10 @@ class HIPBackend(BaseBackend):
 
         if options.amdgpu_enable_max_ilp_scheduling_strategy:
             options_args.append("-mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true")
+
+        if (options.arch == "gfx946" and
+                not options.hcu_use_gfx946_sched_model_v2):
+            options_args.append("-mllvm=-hcu-use-gfx946-sched-model-v2=false")
 
         clang_args = [
             "-target", amd.TARGET_TRIPLE,
