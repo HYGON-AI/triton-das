@@ -505,6 +505,8 @@ class nvidia_knobs(base_knobs):
 
 
 class amd_knobs(base_knobs):
+    # Experimental FlagTree RemoveLayoutConversions enhancements. Default off.
+    rlc_enhance: env_bool = env_bool("TRITON_HCU_RLC_ENHANCE", False)
     use_buffer_ops: env_bool = env_bool("AMDGCN_USE_BUFFER_OPS", True)
     # Note: This requires use_buffer_ops be true to have any effect
     use_buffer_atomics: env_bool = env_bool("AMDGCN_USE_BUFFER_ATOMICS", True)
