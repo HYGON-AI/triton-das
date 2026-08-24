@@ -17,9 +17,14 @@ class GluonASTSource(ASTSource):
         self.language = Language.GLUON
         self.ext = "ttgir"
 
-    def make_ir(self, target, options, codegen_fns, module_map, context):
-        from triton.compiler.compiler import make_backend
+    def make_ir(self, *args):
+        from triton.compiler.compiler import make_backend, _unpack_make_ir_args
         from triton.compiler.code_generator import ast_to_ttir
+
+        target, options, codegen_fns, module_map, context = _unpack_make_ir_args(args)
+        if target is None:
+            from triton.runtime.driver import driver
+            target = driver.active.get_current_target()
 
         builder = ir.builder(context)
         module = builder.create_module()

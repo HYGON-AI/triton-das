@@ -9,7 +9,7 @@ from ..backends.compiler import Language
 from ..backends.compiler import BaseBackend, GPUTarget
 from .. import __version__, knobs
 from ..runtime.autotuner import OutOfResources
-from ..runtime.cache import get_cache_manager, get_dump_manager, get_override_manager, get_cache_key
+from ..runtime.cache import get_cache_manager, get_dump_manager, get_override_manager, get_cache_key, triton_key
 from ..runtime.driver import driver
 from ..tools.disasm import get_sass
 from pathlib import Path
@@ -51,6 +51,30 @@ def convert_type_repr(x):
     return x
 
 
+
+def _unpack_make_ir_args(args):
+    """Accept both torch2.8 / Triton 3.4 and Triton 3.5+ make_ir call shapes.
+
+    - 4 args: (options, codegen_fns, module_map, context)  — torch 2.8 triton_kernel_wrap
+    - 5 args: (target, options, codegen_fns, module_map, context) — Triton 3.5+/torch 2.9+
+
+    ASTSource.make_ir does not use target; callers that need it (e.g. Gluon) must
+    resolve None via the active driver. Signature is *args-only so
+    inspect.signature(...).parameters length is 1: torch2.8 then takes the 4-arg
+    else-branch, while torch2.10 takes the 5-arg else-branch.
+    """
+    if len(args) == 5:
+        return args
+    if len(args) == 4:
+        options, codegen_fns, module_map, context = args
+        return (None, options, codegen_fns, module_map, context)
+    raise TypeError(
+        "make_ir() expected 4 arguments (options, codegen_fns, module_map, context) "
+        "or 5 arguments (target, options, codegen_fns, module_map, context), "
+        f"got {len(args)}"
+    )
+
+
 class ASTSource:
 
     def __init__(self, fn, signature, constexprs=None, attrs=None) -> None:
@@ -77,7 +101,9 @@ class ASTSource:
         key = f"{self.fn.cache_key}-{str(self.attrs)}-{sorted_sig}-{constants_key}"
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
-    def make_ir(self, target: GPUTarget, options, codegen_fns, module_map, context):
+    def make_ir(self, *args):
+        # Dual protocol for torch2.8 (4-arg, no target) and Triton 3.5+ (5-arg).
+        target, options, codegen_fns, module_map, context = _unpack_make_ir_args(args)
         from .code_generator import ast_to_ttir
         return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
                            module_map=module_map)
@@ -116,7 +142,8 @@ class IRSource:
     def hash(self):
         return hashlib.sha256(self.src.encode("utf-8")).hexdigest()
 
-    def make_ir(self, target: GPUTarget, options, codegen_fns, module_map, context):
+    def make_ir(self, *args):
+        target, options, codegen_fns, module_map, context = _unpack_make_ir_args(args)
         self.module.context = context
         return self.module
 
@@ -411,12 +438,44 @@ def _raise_error(err, *args, **kwargs):
     raise copy.deepcopy(err)
 
 
-class CompiledKernel:
+class _CompiledKernelHookProxy:
+    """Forward CompiledKernel.launch_*_hook to knobs.runtime (torch2.8 Inductor)."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __get__(self, obj, objtype=None):
+        return getattr(knobs.runtime, self.name)
+
+    def __set__(self, obj, value):
+        setattr(knobs.runtime, self.name, value)
+
+
+class _CompiledKernelMeta(type):
+    # Intercept class-level assignment: CompiledKernel.launch_enter_hook = fn
+    def __setattr__(cls, name, value):
+        if name in ("launch_enter_hook", "launch_exit_hook") and not isinstance(value, _CompiledKernelHookProxy):
+            setattr(knobs.runtime, name, value)
+            return
+        type.__setattr__(cls, name, value)
+
+
+class CompiledKernel(metaclass=_CompiledKernelMeta):
+    # torch2.8 heuristics reads binary.__class__.launch_*_hook
+    launch_enter_hook = _CompiledKernelHookProxy("launch_enter_hook")
+    launch_exit_hook = _CompiledKernelHookProxy("launch_exit_hook")
+
 
     def __init__(self, src, metadata_group, hash):
         from collections import namedtuple
         metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
         metadata = json.loads(metadata_path.read_text())
+        # Triton 3.4/3.5 always exposed cluster_dims; torch2.8 Inductor still reads it.
+        # HCU/AMD metadata JSON often omits the field — default to a single cluster.
+        if 'cluster_dims' in metadata:
+            metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
+        else:
+            metadata['cluster_dims'] = (1, 1, 1)
         # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
         target = metadata['target']
         metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])

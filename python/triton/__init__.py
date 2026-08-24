@@ -6,6 +6,7 @@ __version__ = '3.6.0'
 # ---------------------------------------
 # Note: import order is significant here.
 
+
 # submodules
 from .runtime import (
     autotune,
@@ -87,6 +88,10 @@ def next_power_of_2(n: int):
     return n
 
 import os
+
+# Ensure 3.4-style hook assignment works even if runtime was imported indirectly.
+from ._hookchain_compat import install as _install_hookchain_compat
+_install_hookchain_compat()
 
 if os.getenv("TRITON_HCUTUNE", "0") == "1":
     import triton.backends.hcu.autotuner

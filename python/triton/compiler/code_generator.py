@@ -1,5 +1,4 @@
 # Modified by Hygon Information Technology Co., Ltd., 2026.
-
 import ast
 import builtins
 import contextlib
@@ -984,6 +983,15 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_With(self, node):
         # Lower `with` statements by constructing context managers and calling their enter/exit hooks
         # Instantiate each context manager with builder injection
+        if len(node.items) == 1:  # Handle async_task
+            context = node.items[0].context_expr
+            withitemClass = self.visit(context.func)
+            if withitemClass == language.async_task:
+                args = [self.visit(arg) for arg in context.args]
+                with withitemClass(*args, _builder=self.builder):
+                    self.visit_compound_statement(node.body)
+                return
+
         cm_list = []
         for item in node.items:
             call = item.context_expr
@@ -1348,7 +1356,11 @@ class CodeGenerator(ast.NodeVisitor):
                 sig = inspect.signature(fn.__call__)
             else:
                 sig = inspect.signature(fn)
-            if '_semantic' in sig.parameters:
+            # Pass _semantic when the callee declares it (Triton 3.5+ / torch2.10+),
+            # or for @triton_builtin helpers whose @wraps(f) signature still shows
+            # _builder only (torch2.8 remaps _semantic -> _builder at runtime).
+            if ('_semantic' in sig.parameters
+                    or (language.core.is_builtin(fn) and '_builder' in sig.parameters)):
                 extra_kwargs["_semantic"] = self.semantic
             if '_generator' in sig.parameters:
                 extra_kwargs['_generator'] = self

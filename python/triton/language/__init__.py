@@ -3,6 +3,7 @@
 """isort:skip_file"""
 # Import order is significant here.
 
+
 from . import math
 from . import extra
 from .standard import (
@@ -41,6 +42,7 @@ from .core import (
     arange,
     associative_scan,
     assume,
+    async_task,
     atomic_add,
     atomic_and,
     atomic_cas,
@@ -137,6 +139,7 @@ from .random import (
     randn4x,
     uint_to_uniform_float,
 )
+from ..runtime.jit import constexpr_function
 from . import target_info
 
 __all__ = [
@@ -154,6 +157,7 @@ __all__ = [
     "argmin",
     "associative_scan",
     "assume",
+    "async_task",
     "atomic_add",
     "atomic_and",
     "atomic_cas",
@@ -175,6 +179,7 @@ __all__ = [
     "condition",
     "const",
     "constexpr",
+    "constexpr_function",
     "constexpr_type",
     "cos",
     "cumprod",
@@ -286,7 +291,7 @@ __all__ = [
 ]
 
 
-def str_to_ty(name, c):
+def str_to_ty(name, c=None):
     from builtins import tuple
 
     if isinstance(name, tuple):

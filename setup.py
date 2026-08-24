@@ -387,9 +387,27 @@ class CMakeClean(clean):
         self.build_temp = get_cmake_dir()
 
 
+def sync_triton_package_version(base_version: str) -> None:
+    """Keep ``triton.__version__`` in sync with TRITON_VERSION for wheel builds."""
+    init_path = Path(__file__).parent / "python" / "triton" / "__init__.py"
+    content = init_path.read_text(encoding="utf-8")
+    new_content, n = re.subn(
+        r"^__version__\s*=\s*['\"][^'\"]*['\"]",
+        f"__version__ = '{base_version}'",
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n != 1:
+        raise RuntimeError(f"Failed to update __version__ in {init_path}")
+    if new_content != content:
+        init_path.write_text(new_content, encoding="utf-8")
+
+
 class CMakeBuildPy(build_py):
 
     def run(self) -> None:
+        sync_triton_package_version(TRITON_BASE_VERSION)
         self.run_command('build_ext')
         return super().run()
 
@@ -851,10 +869,11 @@ def get_triton_version_suffix():
 
 
 # keep it separate for easy substitution
+TRITON_BASE_VERSION = os.environ.get("TRITON_VERSION", "3.6.0")
 if os.environ.get("RELEASE"):
-    TRITON_VERSION = "3.6.0"
+    TRITON_VERSION = TRITON_BASE_VERSION
 else:
-    TRITON_VERSION = "3.6.0" + get_triton_version_suffix()
+    TRITON_VERSION = TRITON_BASE_VERSION + get_triton_version_suffix()
 
 # Dynamically define supported Python versions and classifiers
 MIN_PYTHON = (3, 10)

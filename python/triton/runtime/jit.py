@@ -363,6 +363,25 @@ def separate_xcd_metadata(kwargs, arg_names):
     if "xcd_metadata" in arg_names:
         return None
     return kwargs.pop("xcd_metadata", None)
+def specialize_impl(arg, is_const=False, specialize_value=True, align=True, specialize_extra=None):
+    """Torch 2.8 / Triton 3.4 Inductor-compatible specialize entry.
+
+    Triton 3.6 specializes via ``native_specialize_impl(backend, arg, ...)``.
+    Older Inductor still does ``from triton.runtime.jit import specialize_impl``
+    and calls ``specialize_impl(arg, is_const=..., specialize_value=..., align=...)``.
+    ``specialize_extra`` is accepted for signature compatibility but unused:
+    native specialization goes through ``BaseBackend``.
+    """
+    return native_specialize_impl(BaseBackend, arg, is_const, specialize_value, align)
+
+
+def create_specialize_impl(specialize_extra=None):
+    """Factory retained for Triton 3.4/3.5 Inductor hasattr / call paths."""
+
+    def _specialize_impl(arg, is_const=False, specialize_value=True, align=True, specialize_extra=None):
+        return native_specialize_impl(BaseBackend, arg, is_const, specialize_value, align)
+
+    return _specialize_impl
 
 
 class KernelInterface(Generic[T]):

@@ -90,3 +90,16 @@ class BaseBackend(metaclass=ABCMeta):
         if arg.data_ptr() % 16 == 0 and kwargs.get("align", False):
             return "D"
         return ""
+
+    @classmethod
+    def get_arg_specialization(cls, arg, ty, **kwargs):
+        """Torch 2.8 / Triton 3.4-3.5 Inductor compat.
+
+        3.6 dropped this helper; keep a thin dispatcher over
+        get_int_specialization / get_tensor_specialization.
+        """
+        if ty == "int":
+            return cls.get_int_specialization(arg, **kwargs)
+        if ty == "tensor":
+            return cls.get_tensor_specialization(arg, **kwargs)
+        return ""
