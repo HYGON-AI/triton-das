@@ -17,6 +17,38 @@ module attributes {"ttg.num-warps" = 4 : i32} {
 
 // -----
 
+// A dynamically bounded loop may have an inferred trip count of zero.  Its
+// loop-carried result must still be initialized from the initial iter_arg;
+// otherwise the select below is inferred from only its known false operand
+// and the final dynamic comparison is incorrectly folded to true.
+module attributes {"ttg.num-warps" = 4 : i32} {
+  tt.func @dont_fold_dynamic_loop_slot(%lb: index, %ub: index, %step: index) -> i1 {
+    %c0_i32 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c2_i32 = arith.constant 2 : i32
+    %slot = scf.for %iv = %lb to %ub step %step iter_args(%current = %c0_i32) -> (i32) {
+      %next = arith.addi %current, %c1_i32 : i32
+      %in_range = arith.cmpi slt, %next, %c2_i32 : i32
+      %wrapped = arith.select %in_range, %next, %c0_i32 : i32
+      scf.yield %wrapped : i32
+    }
+    %next = arith.addi %slot, %c1_i32 : i32
+    %in_range = arith.cmpi slt, %next, %c2_i32 : i32
+    %wrapped = arith.select %in_range, %next, %c0_i32 : i32
+    %is_zero = arith.cmpi eq, %wrapped, %c0_i32 : i32
+    tt.return %is_zero : i1
+  }
+}
+
+// CHECK-LABEL: tt.func @dont_fold_dynamic_loop_slot
+// CHECK-NOT:     arith.constant true
+// CHECK:         %[[SLOT:.*]] = scf.for
+// CHECK:         %[[NEXT:.*]] = arith.addi %[[SLOT]], %{{.*}} : i32
+// CHECK:         %[[IS_ZERO:.*]] = arith.cmpi eq, %[[NEXT]], %{{.*}} : i32
+// CHECK:         tt.return %[[IS_ZERO]] : i1
+
+// -----
+
 module attributes {"ttg.num-warps" = 4 : i32} {
   tt.func @assumepid(%arg0: !tt.ptr<f32>) -> tensor<1024xf32> {
     %c0 = arith.constant 0 : i32
