@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
 # Modified by Hygon Information Technology Co., Ltd., 2026.
 
 # End-to-end tests to check the correctness of the pipeliner

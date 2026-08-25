@@ -21,8 +21,6 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
 // Modified by Hygon Information Technology Co., Ltd., 2026.
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
