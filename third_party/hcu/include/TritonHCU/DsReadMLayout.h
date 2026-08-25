@@ -83,6 +83,8 @@ inline bool isDsReadMPanelShape(int64_t blockK, int64_t blockN,
 // physical N32 panel.  Its panel bases additionally XOR panel-id bits [1:0]
 // into K bits [1:0], rotating N-contiguous vector stores across all 32 LDS
 // banks without padding; the matching read address reverses this skew.
+// On 64-bank gfx946, each 128B phase issues only 32 four-byte bank accesses,
+// so covering 32 distinct banks is already conflict-free (1-way).
 inline gpu::SharedLinearEncodingAttr
 getDsReadMPanelEncoding(MLIRContext *context, int64_t blockK, int64_t blockN,
                         unsigned elementBitWidth) {

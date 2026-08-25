@@ -971,7 +971,7 @@ It is characterized by the following parameters:
   - 1: gfx908: CDNA1
   - 2: gfx90a: CDNA2
   - 3: gfx942: CDNA3
-  - 4: gfx950: CDNA4
+  - 4: gfx946/gfx950: CDNA4
 - `warpsPerCTA`: The warp layout in the block.
 - `instrShape`: The shape in the form of (M, N, K) of the matrix.
 - `isTransposed`: Indicates the result tensor is transposed so that it can be converted to dotOperand layout
@@ -1130,6 +1130,14 @@ w2 w2 w3 w3
         unsigned elemBitWidth, bool needTrans) const;
 
     bool isHCUMmac() const { return getMmacLayout() != MmacLayout::MFMA; }
+    // gfx946 and gfx950 share the version-4 encoding and both have 64-bank
+    // LDS.  Only gfx950's native MFMA path supports LDS transpose loads;
+    // gfx946 is identified by its HCU MMAC layout.
+    bool has64BankLDS() const { return getVersion() == 4; }
+    bool supportsLDSTranspose() const {
+      return getVersion() == 4 && !isHCUMmac();
+    }
+
     SmallVector<unsigned> getInstrsPerWarp() const {
       bool hasBatchDim = getTilesPerWarp().size() == 3;
       int mIndex = 0 + hasBatchDim;

@@ -2396,11 +2396,11 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
     kDimIndex = 1 - kDimIndex;
 
   bool isKContig = sharedOrder[0] == kDimIndex;
-  // GFX950 supports LDS transpose load instructions, so we need swizzling even
-  // when K dimension is not the contiguous dimension.
-  bool isGFX950 = getVersion() == 4;
+  // Both gfx946 and gfx950 use the version-4 encoding and have 64 LDS banks.
+  // Only gfx950 supports LDS transpose load instructions.  gfx946 is
+  // represented by an HCU MMAC layout and must not enter that path.
   bool swizzleNonKContig =
-      isGFX950 && (elemBitWidth == 8 || elemBitWidth == 16);
+      supportsLDSTranspose() && (elemBitWidth == 8 || elemBitWidth == 16);
 
   // Default-on: unset => enabled; ENABLE=0/false/off disables.
   // (getBoolEnv treats unset as false, so do not use it for this flag.)
@@ -2417,15 +2417,28 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
     // vec = 128/elemBitWidth keeps each lane's 128-bit contiguous chunk intact.
     //
     // b16 (ds_read_m32x16_b16): write/read bank conflict
-    //   params                         | BN=32              | BN=64/128/256/512  | verdict
-    //   vec=8,perPhase=2,maxPhase=4    | write1 / read2     | write2 / read4     | reject (Phase0 4-way)
-    //   vec=8,perPhase=2,maxPhase=2    | write1 / read1     | write2 / read2     | recommend (2-way floor)
+    //   32 banks:
+    //     params                      | BN=32          | BN=64/128/256/512
+    //     vec=8,perPhase=2,maxPhase=4 | write1 / read2 | write2 / read4
+    //     vec=8,perPhase=2,maxPhase=2 | write1 / read1 | write2 / read2
+    //   64 banks (gfx946):
+    //     params                      | BN=32/64       | BN=128/256/512
+    //     vec=8,perPhase=2,maxPhase=4 | write1 / read2 | write2 / read4
+    //     vec=8,perPhase=2,maxPhase=2 | write1 / read1 | write2 / read2
+    //   maxPhase=2 is recommended; maxPhase=4 has a 4-way Phase0 conflict.
     //
     // b8 (ds_read_m32x32_b8): ds_read phase bank conflict
-    //   params                                   | BN=32 | BN=64 | BN=128/256/512 | verdict
-    //   vec=16,perPhase=1,maxPhase=1/2           | 1-way | 2-way | 4-way          | reject (BN>=128)
-    //   vec=16,perPhase=1,maxPhase=4             | n/a   | 1-way | 2-way          | BN>=64 only
-    //   vec=16,perPhase=1,maxPhase=min(4,BN/16)  | 1-way | 1-way | 2-way          | recommend
+    //   32 banks:
+    //     params                          | BN=32 | BN=64 | BN=128/256/512
+    //     vec=16,perPhase=1,maxPhase=1/2  | 1-way | 2-way | 4-way
+    //     vec=16,perPhase=1,maxPhase=4    | n/a   | 1-way | 2-way
+    //     maxPhase=min(4,BN/16)           | 1-way | 1-way | 2-way
+    //   64 banks (gfx946):
+    //     params                          | BN=32 | BN=64 | BN=128 | BN=256/512
+    //     vec=16,perPhase=1,maxPhase=1/2  | 1-way | 1-way | 2-way | 4-way
+    //     vec=16,perPhase=1,maxPhase=4    | n/a   | 1-way | 1-way | 2-way
+    //     maxPhase=min(4,BN/16)           | 1-way | 1-way | 1-way | 2-way
+    //   The dynamic maxPhase is recommended for both bank configurations.
     unsigned vec = 128 / elemBitWidth;
     unsigned perPhase = elemBitWidth == 8 ? 1 : 2;
     unsigned innerDimLength = operandShape[sharedOrder[0]];
@@ -2443,7 +2456,7 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
                                            ctaLayout);
   }
 
-  const unsigned numBanks = isGFX950 ? 64 : 32;
+  const unsigned numBanks = has64BankLDS() ? 64 : 32;
   const unsigned bankBitWidth = 32;
   const unsigned simdWidth = 16;
 
