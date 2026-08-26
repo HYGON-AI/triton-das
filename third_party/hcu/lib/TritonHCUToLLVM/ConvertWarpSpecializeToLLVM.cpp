@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include <climits>
 #include <cstdlib>

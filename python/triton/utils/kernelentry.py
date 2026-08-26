@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 from ..runtime.jit import KernelInterface, JITFunction
 from ..runtime.driver import driver
 from ..runtime.autotuner import Autotuner, Heuristics

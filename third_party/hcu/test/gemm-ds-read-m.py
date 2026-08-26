@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 """ds_read_m buffer-load GEMM correctness (default-on).
 
 Covers:

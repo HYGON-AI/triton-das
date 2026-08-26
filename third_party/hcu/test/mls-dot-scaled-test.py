@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional

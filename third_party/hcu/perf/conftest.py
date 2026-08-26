@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
 
 import pytest
 

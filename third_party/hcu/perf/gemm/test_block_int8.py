@@ -1,6 +1,5 @@
 # Copyright 2023-2024 SGLang Team
 # SPDX-License-Identifier: Apache-2.0
-# Modified by Hygon Information Technology Co., Ltd., 2026.
 # Adapted from https://github.com/sgl-project/sglang/pull/3730
 
 import itertools

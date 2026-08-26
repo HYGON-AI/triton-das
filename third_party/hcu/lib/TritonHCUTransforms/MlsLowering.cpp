@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"

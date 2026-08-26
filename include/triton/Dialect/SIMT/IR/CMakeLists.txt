@@ -1,6 +1,4 @@
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
-# SPDX-License-Identifier: MIT
-# Modified by Hygon Information Technology Co., Ltd., 2026.
 
 set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 

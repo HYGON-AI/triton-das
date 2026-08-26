@@ -1,8 +1,6 @@
 ################################################################################
 #
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
-# SPDX-License-Identifier: MIT
-# Modified by Hygon Information Technology Co., Ltd., 2026.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files
@@ -24,6 +22,8 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 from triton.language import core
 import triton.language as tl
 # from triton_dist.language.core import extern_call

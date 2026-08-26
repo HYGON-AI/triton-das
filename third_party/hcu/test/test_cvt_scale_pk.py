@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
 
 """OCP fp8/bf8 convert smoke for HCU (gfx938 CVT_FP8F32 / gfx946 CVT_SCALE_PK).
 

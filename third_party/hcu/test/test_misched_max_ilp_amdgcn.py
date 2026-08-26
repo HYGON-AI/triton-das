@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 """Check misched / max-ilp clang knobs via pre-generated AMDGCN goldens.
 
 Reads Inputs/hcu-misched-max-ilp-sched-*.amdgcn (compiled offline from

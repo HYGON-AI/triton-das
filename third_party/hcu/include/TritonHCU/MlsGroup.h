@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 #ifndef TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_MLSGROUP_H_
 #define TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_MLSGROUP_H_
 

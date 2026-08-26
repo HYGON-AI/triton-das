@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 # flake8: noqa: F821,F841
 import triton.language.semantic
 import itertools
@@ -298,5 +295,4 @@ if torch.version.hip is not None: #and sem.gpu_matrix_core_version() > 0:
     kernel[(1, 1, 1)](x_tri, y_tri, z_tri, 64, 64, 128, 128, 64, 64)
     print("z_tri",z_tri)
     print("z_np",z_np)
-
 

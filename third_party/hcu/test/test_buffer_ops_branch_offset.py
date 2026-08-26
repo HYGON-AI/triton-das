@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 """Buffer-ops conversion for if/select joined offsets.
 
 Mirrors range-analysis.mlir @ifOp / @select. Under TTGIR these lower to

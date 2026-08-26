@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 r"""
 Command-line interface to inspect optimal config(s) and metadata in the config cache.
 

@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 """Buffer-ops correctness / mode suite (#830, Case5, convert smoke).
 
 Default product knobs:

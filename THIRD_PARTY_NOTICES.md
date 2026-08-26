@@ -162,3 +162,16 @@ Local path:
 Local path:
 
 - `third_party/hcu/perf/geglu.py` (function `geglu_golden_forward` only)
+
+## FlagOS FlagTree (enhanced RemoveLayoutConversions)
+
+- **Project:** FlagTree (FlagOS)
+- **Repository:** https://github.com/flagos-ai/FlagTree
+- **Commit/Version:** Ported from FlagTree `triton_v3.6.x` enhanced RLC work (see FlagTree PR `#763` / commit `1343f09ee4bfb6dd9be68ed84c8e59f1523c94ec` lineage); Hygon integrated in `d361e56913` (`perf(hcu): enhance layout conversion removal`)
+- **Copyright:** Copyright 2018-2020 Philippe Tillet; Copyright 2020-2022 OpenAI; Copyright 2025- FlagOS Contributors
+- **License:** MIT
+- **Modifications:** Yes (standalone `RemoveLayoutConversionsEnhanced` pass for HCU; gated by `TRITON_HCU_RLC_ENHANCE`; retains HCU-specific MatrixLoad/TLE behavior)
+
+Local path:
+
+- `lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversionsEnhanced.cpp`

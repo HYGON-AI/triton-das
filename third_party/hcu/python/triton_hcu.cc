@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"

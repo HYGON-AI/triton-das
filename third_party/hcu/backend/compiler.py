@@ -1,7 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-# Modified by Hygon Information Technology Co., Ltd., 2026.
-
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, amd, hcu, distributed
 from triton import knobs

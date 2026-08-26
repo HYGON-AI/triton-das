@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"

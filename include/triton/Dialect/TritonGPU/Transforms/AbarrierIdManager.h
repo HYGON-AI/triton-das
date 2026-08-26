@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 #ifndef TRITON_TRITONGPU_TRANSFORMS_ABARRIER_ID_MANAGER_H_
 #define TRITON_TRITONGPU_TRANSFORMS_ABARRIER_ID_MANAGER_H_
 

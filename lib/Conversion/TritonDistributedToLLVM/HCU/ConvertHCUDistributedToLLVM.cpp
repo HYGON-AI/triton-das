@@ -20,8 +20,8 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-// SPDX-License-Identifier: MIT
 // Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "triton/Conversion/TritonDistributedToLLVM/Passes.h"
 #include "triton/Dialect/Distributed/IR/Dialect.h"
 #include "triton/Dialect/SIMT/IR/Dialect.h"

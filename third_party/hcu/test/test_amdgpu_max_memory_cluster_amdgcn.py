@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 """Check max_memory_cluster_dwords via pre-generated AMDGCN goldens.
 
 Reads Inputs/hcu-max-mem-cluster-*.amdgcn (compiled offline from

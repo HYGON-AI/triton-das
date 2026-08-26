@@ -2,9 +2,9 @@
  * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
  *
  * SPDX-License-Identifier: MIT
- *
- * Modified by Hygon Information Technology Co., Ltd., 2026.
  */
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "triton/Conversion/TritonDistributedToLLVM/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"

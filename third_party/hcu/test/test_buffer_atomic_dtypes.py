@@ -1,6 +1,3 @@
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
-
 """Test buffer atomic correctness for multiple data types with partial mask.
 
 Verifies that masked buffer_atomic operations do not VM fault when

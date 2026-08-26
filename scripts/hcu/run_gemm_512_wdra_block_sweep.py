@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
 
 """Sweep BLOCK_M/N/K for 512³ GEMM load+WDRA; pick lowest totalGcSimCycles.
 

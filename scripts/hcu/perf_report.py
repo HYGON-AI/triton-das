@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: MIT
 """Nightly-vs-local Triton perf compare via aiter benches.
 
 Default: sync+install aiter, download matching nightly whl, compare vs local.

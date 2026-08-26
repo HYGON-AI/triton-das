@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-// SPDX-License-Identifier: MIT
-
 // This file implements the data partitioning logic used by the Warp
 // Specialization pass for the HCU backend.  The goal is to split
 // computations across the two MMA partitions that the hardware provides.

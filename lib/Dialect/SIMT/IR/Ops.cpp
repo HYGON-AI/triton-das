@@ -20,7 +20,6 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-// SPDX-License-Identifier: MIT
 // Modified by Hygon Information Technology Co., Ltd., 2026.
 
 #include "triton/Dialect/SIMT/IR/Dialect.h"
