@@ -1,6 +1,11 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import triton
 import triton.language as tl
 
+import pytest
 import torch
 import math
 
@@ -79,6 +84,18 @@ def test_module_walk(device):
 
     ttir_module = src.make_ir(target, options, codegen_fns, module_map, context)
     ttir_module.walk(walk_fn)
+
+
+def test_optimize_epilogue_compiler_option(monkeypatch):
+    target = triton.runtime.driver.active.get_current_target()
+    if target.backend != "hip":
+        pytest.skip("HIP-only compiler option")
+    backend = triton.compiler.compiler.make_backend(target)
+
+    monkeypatch.setenv("OPTIMIZE_EPILOGUE", "1")
+    assert backend.parse_options({}).optimize_epilogue is False
+    assert backend.parse_options({"optimize_epilogue": True}).optimize_epilogue is True
+    assert backend.parse_options({"optimize_epilogue": False}).optimize_epilogue is False
 
 
 def test_python_func_in_visit_call(device):

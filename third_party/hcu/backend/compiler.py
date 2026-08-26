@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
 
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, amd, hcu, distributed
@@ -55,7 +56,7 @@ class HIPOptions:
     max_num_imprecise_acc_default: int = 0
     backend_name: str = 'hip'
     instrumentation_mode: str = ""
-    optimize_epilogue: bool = True
+    optimize_epilogue: bool = False
     # 0: mfma
     # 1: mmac legacy
     # 2: mmac interleave
@@ -210,9 +211,6 @@ class HIPBackend(BaseBackend):
 
         if "enable_fp_fusion" not in opts:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
-
-        if "optimize_epilogue" not in opts:
-            args["optimize_epilogue"] = knobs.amd.optimize_epilogue
 
         # dtk triton compatibility: consume legacy compiler.py options and ignore.
         opts.pop("num_ldmatrixes", None)
