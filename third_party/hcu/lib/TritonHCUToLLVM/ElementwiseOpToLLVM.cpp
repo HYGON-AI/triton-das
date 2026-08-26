@@ -360,9 +360,8 @@ hcuCvtScalePkDowncastToFp8FromF16(Location loc,
   return ret;
 }
 
-// ROCDL::HCUCvtScalePk{Fp8,Bf8}F32Op — f32 -> fp8/bf8 (2-wide; no `old` in
-// current HCU intrinsic). Spec writes one 16-bit half via OPSEL[3]; frontend
-// masks both halves before OR so a dirty unused half cannot leak.
+// ROCDL::HCUCvtScalePk{Fp8,Bf8}F32Op — f32 -> fp8/bf8. The intrinsic's tied
+// `old` operand preserves the half not selected by OPSEL[3].
 template <typename ConvertOp>
 static SmallVector<Value>
 hcuCvtScalePkDowncastToFp8FromF32(Location loc,
@@ -373,16 +372,11 @@ hcuCvtScalePkDowncastToFp8FromF32(Location loc,
   Value scale = hcuIdentityE8M0Scale(b);
 
   Value dst = ConvertOp::create(rewriter, loc, i32_ty, v[0], v[1], scale,
-                                /*dstLoHiSel=*/false, /*scaleSel=*/0);
+                                b.i32_val(0), /*dstLoHiSel=*/false,
+                                /*scaleSel=*/0);
   if (v.size() == 4) {
-    Value hi = ConvertOp::create(rewriter, loc, i32_ty, v[2], v[3], scale,
-                                 /*dstLoHiSel=*/true, /*scaleSel=*/0);
-    // FIXME: ISA/AMD preserve via `old` (cf. llvm.amdgcn.cvt.scalef32.pk.fp8.f32
-    // TiedInput). HCU f32 intrinsic has no `old`, so mask+OR here. Once backend
-    // adds old/src2 like f16 (`int_hcu_cvt_scale_pk_fp8_f16`), switch to chained
-    // preserve writes and drop this merge.
-    dst = b.or_(b.and_(dst, b.i32_val(0x0000FFFF)),
-                b.and_(hi, b.i32_val(0xFFFF0000)));
+    dst = ConvertOp::create(rewriter, loc, i32_ty, v[2], v[3], scale, dst,
+                            /*dstLoHiSel=*/true, /*scaleSel=*/0);
   }
 
   auto fp8x4VecTy = vec_ty(i8_ty, 4);
@@ -2129,6 +2123,15 @@ struct FpToFpOpConversion
          llvm::isa<Float16Type, BFloat16Type>(srcElementType) && !capCvtScalePk) ||
         (llvm::isa<Float8E5M2Type>(dstElementType) && roundingMode != RoundingMode::RTNE &&
          hasFp8F32HW)) {
+      numElements = 4;
+    }
+
+    // gfx946 CVT_SCALE_PK writes one 16-bit half at a time and preserves the
+    // other half through its tied `old` operand. Group f32 downcasts by four
+    // so the second conversion can consume the first conversion's result.
+    if (capCvtScalePk && srcElementType.isF32() &&
+        llvm::isa<Float8E4M3FNType, Float8E5M2Type>(dstElementType) &&
+        roundingMode == RoundingMode::RTNE) {
       numElements = 4;
     }
 

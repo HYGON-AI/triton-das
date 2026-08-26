@@ -75,6 +75,7 @@ def run_convert(src_cpu, src_tl, dst_tl, rounding=""):
         triton.reinterpret(dst_gpu, dst_tl),
         n,
         rounding,
+        num_warps=1,
     )
     torch.cuda.synchronize()
     return dst_gpu.to("cpu")
@@ -93,17 +94,21 @@ def f_list(t):
 SRC_F16 = torch.tensor(
     [0.0, 1.0, -1.0, 0.5, 2.0, -0.5, 0.25, 4.0], dtype=torch.float16
 )
+SRC_F16_N2 = torch.tensor([0.0, 1.0], dtype=torch.float16)
 SRC_BF16 = torch.tensor(
     [0.0, 1.0, -1.0, 0.5, 2.0, -0.5, 0.25, 4.0], dtype=torch.bfloat16
 )
+SRC_BF16_N2 = torch.tensor([0.0, 1.0], dtype=torch.bfloat16)
 SRC_F32 = torch.tensor(
     [0.0, 1.0, -1.0, 0.5, 2.0, -0.5, 0.25, 4.0], dtype=torch.float32
 )
-SRC_F32_N2 = torch.tensor([0.0, 1.0], dtype=torch.float32)
+SRC_F32_N4 = torch.tensor([0.0, 1.0, -1.0, 0.5], dtype=torch.float32)
 
 # OCP e5m2 / e4m3 raw bytes
 SRC_E5 = torch.tensor([0x00, 0x3C, 0x38, 0x40, 0xBC, 0x01, 0x7B, 0x80], dtype=torch.uint8)
 SRC_E4 = torch.tensor([0x00, 0x38, 0x30, 0x40, 0xB8, 0x01, 0x7E, 0x80], dtype=torch.uint8)
+SRC_E5_N2 = torch.tensor([0x00, 0x3C], dtype=torch.uint8)
+SRC_E4_N2 = torch.tensor([0x00, 0x38], dtype=torch.uint8)
 
 GOLD_DOWN_E4 = [0x00, 0x38, 0xB8, 0x30, 0x40, 0xB0, 0x28, 0x48]
 GOLD_DOWN_E5 = [0x00, 0x3C, 0xBC, 0x38, 0x40, 0xB8, 0x34, 0x44]
@@ -120,28 +125,36 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize(
     "src,src_tl,dst_tl,rounding,golden",
     [
+        (SRC_F16_N2, tl.float16, tl.float8e4nv, "rtne", [0x00, 0x38]),
+        (SRC_F16_N2, tl.float16, tl.float8e5, "rtne", [0x00, 0x3C]),
+        (SRC_BF16_N2, tl.bfloat16, tl.float8e4nv, "rtne", [0x00, 0x38]),
+        (SRC_BF16_N2, tl.bfloat16, tl.float8e5, "rtne", [0x00, 0x3C]),
         (SRC_F16, tl.float16, tl.float8e4nv, "rtne", GOLD_DOWN_E4),
         (SRC_F16, tl.float16, tl.float8e5, "rtne", GOLD_DOWN_E5),
         (SRC_BF16, tl.bfloat16, tl.float8e4nv, "rtne", GOLD_DOWN_E4),
         (SRC_BF16, tl.bfloat16, tl.float8e5, "rtne", GOLD_DOWN_E5),
         (SRC_F32, tl.float32, tl.float8e4nv, "rtne", GOLD_DOWN_E4),
         (SRC_F32, tl.float32, tl.float8e5, "rtne", GOLD_DOWN_E5),
-        (SRC_F32_N2, tl.float32, tl.float8e4nv, "rtne", [0x00, 0x38]),
-        (SRC_F32_N2, tl.float32, tl.float8e5, "rtne", [0x00, 0x3C]),
+        (SRC_F32_N4, tl.float32, tl.float8e4nv, "rtne", GOLD_DOWN_E4[:4]),
+        (SRC_F32_N4, tl.float32, tl.float8e5, "rtne", GOLD_DOWN_E5[:4]),
     ],
     ids=[
+        "fp16->fp8e4nv(n=2)",
+        "fp16->fp8e5(n=2)",
+        "bf16->fp8e4nv(n=2)",
+        "bf16->fp8e5(n=2)",
         "fp16->fp8e4nv",
         "fp16->fp8e5",
         "bf16->fp8e4nv",
         "bf16->fp8e5",
         "fp32->fp8e4nv(n=8)",
         "fp32->fp8e5(n=8)",
-        "fp32->fp8e4nv(n=2)",
-        "fp32->fp8e5(n=2)",
+        "fp32->fp8e4nv(n=4)",
+        "fp32->fp8e5(n=4)",
     ],
 )
 def test_ocp_fp8_downcast(src, src_tl, dst_tl, rounding, golden):
-    # n=8 is 4x 2-wide packs on gfx946 (numElements==2); not the dead 4-wide OR path.
+    # Each 4-wide f32 pack exercises the two-instruction chained `old` path.
     out = run_convert(src.clone(), src_tl, dst_tl, rounding=rounding)
     assert u8_list(out) == golden
 
@@ -149,6 +162,12 @@ def test_ocp_fp8_downcast(src, src_tl, dst_tl, rounding, golden):
 @pytest.mark.parametrize(
     "src,src_tl,dst_tl,golden",
     [
+        (SRC_E4_N2, tl.float8e4nv, tl.float16, [0.0, 1.0]),
+        (SRC_E5_N2, tl.float8e5, tl.float16, [0.0, 1.0]),
+        (SRC_E4_N2, tl.float8e4nv, tl.bfloat16, [0.0, 1.0]),
+        (SRC_E5_N2, tl.float8e5, tl.bfloat16, [0.0, 1.0]),
+        (SRC_E4_N2, tl.float8e4nv, tl.float32, [0.0, 1.0]),
+        (SRC_E5_N2, tl.float8e5, tl.float32, [0.0, 1.0]),
         (SRC_E5, tl.float8e5, tl.float16, GOLD_UP_E5_F),
         (SRC_E4, tl.float8e4nv, tl.float16, GOLD_UP_E4_F),
         (SRC_E5, tl.float8e5, tl.bfloat16, GOLD_UP_E5_F),
@@ -157,6 +176,12 @@ def test_ocp_fp8_downcast(src, src_tl, dst_tl, rounding, golden):
         (SRC_E5, tl.float8e5, tl.float32, GOLD_UP_E5_F),
     ],
     ids=[
+        "fp8e4nv->fp16(n=2)",
+        "fp8e5->fp16(n=2)",
+        "fp8e4nv->bf16(n=2)",
+        "fp8e5->bf16(n=2)",
+        "fp8e4nv->fp32(n=2)",
+        "fp8e5->fp32(n=2)",
         "fp8e5->fp16",
         "fp8e4nv->fp16",
         "fp8e5->bf16",
