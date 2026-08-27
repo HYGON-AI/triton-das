@@ -10,7 +10,7 @@ function run_pytest() {
     "test_performance_hcu.py"
   )
   file_path=${SRC_HOME}/python/test/regression
-  for f in ${test_files[@]}; do
+  for f in "${test_files[@]}"; do
     pytest_file=${file_path}/${f}
     pytest ${pytest_file}
     ret=$?
@@ -27,7 +27,7 @@ function run_google_test() {
   UNIT_TEST_DIR="${BUILD_DIR}/$(ls ${BUILD_DIR} | grep -i cmake)/unittest"
   if [ ! -d "${UNIT_TEST_DIR}" ]; then
     echo "Could not find '${UNIT_TEST_DIR}'"
-    return -1
+    return 1
   fi
 
   cd ${UNIT_TEST_DIR}
@@ -36,9 +36,9 @@ function run_google_test() {
   test_exclude=(
     "TestPtxAsmFormat"
   )
-  for test in ${ALL_TESTS[@]}; do
+  for test in "${ALL_TESTS[@]}"; do
     is_exclude=False
-    for exc in ${test_exclude[@]}; do
+    for exc in "${test_exclude[@]}"; do
       if [[ $exc == ${test##*/} ]]; then
         is_exclude=True
         break
@@ -69,12 +69,12 @@ function run_lit() {
     echo "1: run only cases in test lists"
     echo "such as:"
     echo -e "$ run_lit 0\n"
-    return -1
+    return 1
   fi
   LIT_TEST_DIR="${BUILD_DIR}/$(ls ${BUILD_DIR} | grep -i cmake)/test"
   if [ ! -d "${LIT_TEST_DIR}" ]; then
     echo "Could not find '${LIT_TEST_DIR}'"
-    return -1
+    return 1
   fi
 
   test_list=(
@@ -155,7 +155,7 @@ function run_lit() {
   # run all with exclude
   if [ $mode -eq 0 ]; then
     filter=${test_exclude[0]##*/}
-    for exclude in ${test_exclude[@]}; do
+    for exclude in "${test_exclude[@]}"; do
       exc_case=${exclude##*/}
       if [[ $exc_case == $filter ]]; then
         continue
@@ -169,7 +169,7 @@ function run_lit() {
     fi
   elif [ $mode -eq 1 ]; then
     # only run test list
-    for case in ${test_list[@]}; do
+    for case in "${test_list[@]}"; do
       echo "case:"
       echo "${case}"
       lit -v ${case}
@@ -199,7 +199,7 @@ function clean_cache() {
 function build_llvm() {
   if [ $# -ne 4 ]; then
     echo "Error: 4 arguments required"
-    return -1
+    return 1
   fi
   # Use default value for function arguments
   repo=${1:-"ssh://git@10.65.42.70:8022/buhui/llvm-project.git"}
