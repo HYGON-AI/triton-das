@@ -4,9 +4,14 @@ set -euo pipefail
 
 # 生成 manylinux 版本标识
 PLATFORM="manylinux_$(ldd --version | awk '{print $NF}' | head -n1 | tr '.' '_')_x86_64"
+echo "[repair] platform=${PLATFORM}, python=$(command -v python || echo NOT_FOUND), version=$(python -V 2>&1 || true)"
 
-TORCH_PATH=$(python -c "import torch, os; print(os.path.dirname(torch.__file__))" 2>/dev/null)
-export LD_LIBRARY_PATH="${TORCH_PATH}/lib:${LD_LIBRARY_PATH}"
+if TORCH_PATH=$(python -c "import torch, os; print(os.path.dirname(torch.__file__))" 2>&1); then
+  echo "[repair] TORCH_PATH=${TORCH_PATH}"
+  export LD_LIBRARY_PATH="${TORCH_PATH}/lib:${LD_LIBRARY_PATH}"
+else
+  echo "[repair] WARNING: torch not importable, skip LD_LIBRARY_PATH setup: ${TORCH_PATH}"
+fi
 
 auditwheel repair --plat "${PLATFORM}" --strip \
   --exclude libgalaxyhip.so.5 \
