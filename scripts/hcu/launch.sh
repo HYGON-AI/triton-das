@@ -241,6 +241,7 @@ function build_llvm() {
       -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld"  \
       -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"  \
       -DCMAKE_INSTALL_PREFIX=../${package_name}  \
+      -DLLVM_FORCE_VC_REVISION=${hash} \
       ../llvm
     ninja -j${MAX_JOBS}
     ninja install -j${MAX_JOBS}
