@@ -337,7 +337,11 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
         if (found != intrinsicCountCache.end()) {
           return found->second;
         }
-        auto v = getOpNumberOfAsyncCopyInstructions(
+        // This 3.6 branch only models async global-to-LDS loads here; the
+        // newer helper also handles async LDS-to-global stores, which are not
+        // present in this code base.  Retain the branch-local load counter for
+        // targets that do not use asyncmark/wait_asyncmark.
+        auto v = getOpNumberOfAsyncLoadInstructions(
             op, targetInfo, axisInfo,
             /*emitRemarkOnNonAsyncOp=*/false);
         intrinsicCountCache[op] = v;
