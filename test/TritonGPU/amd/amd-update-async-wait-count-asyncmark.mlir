@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file --tritonamdgpu-update-async-wait-count=gfx-arch=gfx950 | FileCheck %s
+// RUN: triton-opt %s -split-input-file --tritonamdgpu-update-async-wait-count=arch-generation-name=gfx950 | FileCheck %s
 
 // For CDNA3/CDNA4, ttg.async_wait is generated from 3 sources:
 //   - By pipeliner, num computed within the pass.
