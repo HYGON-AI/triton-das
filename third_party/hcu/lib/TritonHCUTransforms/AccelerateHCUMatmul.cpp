@@ -1222,11 +1222,16 @@ public:
     //    ds_read_b128, which is the largest vector size for shared memory load.
     auto kWidth = kBase;
     // We want to extend kWidth by kPack (kPack=1 means no extension)
-    // to increase ds_read vector size
+    // to increase ds_read vector size. MLS fixes the register-fragment kWidth
+    // for its matrix-load operand. If either operand uses MLS, keep both dot
+    // operands at kBase: applying kPack only to the non-MLS side would create
+    // incompatible A/B dot encodings (for example kWidth 8 vs 16 for int8).
+    // This is deliberately per-dot; ordinary dots in the same module can
+    // still use the requested kPack.
     // However, in FA, the second dot can only use kWidth = kBase since it's
     // limited by the result of the first dot, which is of mfmaLayout.
     auto isDotChainTail = isChainDotTail(dotOp);
-    if (!isDotChainTail)
+    if (!isDotChainTail && !useMatrixLoad)
       kWidth *= kPack;
     // For FA fwd kernel with f16 elementTy, we limit the 2nd dot to have
     // kWidth = 4 so that the coversion from #mma (result of 1st dot)
