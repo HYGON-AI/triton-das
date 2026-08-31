@@ -120,9 +120,8 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   }
 
   auto altKind = MlsInterleaveKind::InterleaveNone;
-  // For an N-major B operand feeding an fp32 MMAC-layout-3 accumulator that is
-  // stored as fp16 directly from VGPRs, factor-2 interleave places adjacent N
-  // values in consecutive VGPRs and avoids a cross-lane pack in the epilogue.
+  // FP16 VGPR matrix_store requires the TT B operand: its N-major MLS view
+  // can use Interleave2 so adjacent output values are packable as f32 VGPRs.
   if (opIdx == 1 && !kMajor && feedsInterleavedFp16MatrixStore(dot))
     altKind = MlsInterleaveKind::Interleave2;
 
@@ -231,6 +230,31 @@ bool requiresBInterleave2(triton::MatrixStoreOp storeOp) {
          mfma.getMmacLayout() == ttg::MmacLayout::TRANSPOSE;
 }
 
+bool hasInterleavableBOperand(triton::MatrixStoreOp storeOp) {
+  auto func = storeOp->getParentOfType<tt::FuncOp>();
+  if (!func)
+    return false;
+
+  bool found = false;
+  func.walk([&](triton::MatrixLoadOp loadOp) {
+    if (found)
+      return;
+    if (auto attr = loadOp->getAttrOfType<triton::amdgpu::MlsEncodingAttr>(
+            triton::amdgpu::MlsEncodingAttr::getMnemonic())) {
+      if (attr.getOpIdx() == 1 && attr.getOrder()[0] == 1)
+        found = true;
+      return;
+    }
+    auto dotAndIdx = getDotOpIdxFromMatrixLoad(loadOp);
+    if (succeeded(dotAndIdx) && dotAndIdx->second == 1) {
+      auto order = getMatrixLoadTensorOrder(loadOp, /*opIdx=*/1);
+      if (order[0] == 1)
+        found = true;
+    }
+  });
+  return found;
+}
+
 bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot) {
   auto resultTy = dyn_cast<RankedTensorType>(dot->getResult(0).getType());
   if (!resultTy || !resultTy.getElementType().isF32())
@@ -265,7 +289,24 @@ bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot) {
           worklist.push_back(outerOp);
     }
   }
-  return false;
+
+  // WASP places the producer load and consumer dot/store in sibling
+  // warp-specialize partitions, which are not connected by SSA forward-slice
+  // traversal.  The store phase runs first, so use its explicit encoding as
+  // the cross-partition contract for layout-3 dots in the same function.
+  auto func = dot->getParentOfType<tt::FuncOp>();
+  if (!func)
+    return false;
+  bool hasInterleavedStore = false;
+  func.walk([&](triton::MatrixStoreOp store) {
+    auto attr = store->getAttrOfType<triton::amdgpu::MlsStoreEncodingAttr>(
+        triton::amdgpu::MlsStoreEncodingAttr::getMnemonic());
+    if ((attr && attr.getInterleaveKind() ==
+                     static_cast<unsigned>(MlsInterleaveKind::Interleave2)) ||
+        requiresBInterleave2(store))
+      hasInterleavedStore = true;
+  });
+  return hasInterleavedStore;
 }
 
 Value convertAndCastTensor(OpBuilder &builder, Value value,
@@ -487,7 +528,7 @@ public:
   }
 };
 
-/// Attach the supported fp16 32x16 VGPR-store encoding to MMAC C layout 3.
+/// Select an fp16 VGPR-store encoding for MMAC C layout 3.
 struct MlsStoreEncodingInsertion
     : public OpRewritePattern<triton::MatrixStoreOp> {
   int mlsVersion;
@@ -505,28 +546,52 @@ public:
     auto value = storeOp.getValue();
     auto valueType = cast<RankedTensorType>(value.getType());
     if (valueType.getRank() != 2 || !valueType.getElementType().isF16() ||
-        !requiresBInterleave2(storeOp))
+        !requiresBInterleave2(storeOp) || !hasInterleavableBOperand(storeOp))
       return failure();
 
-    // The transposed matrix_store_32x16 instruction covers a logical 16x32
-    // region of the row-major C tensor.
-    constexpr unsigned mTile = 16;
-    constexpr unsigned nTile = 32;
     constexpr unsigned bitwidth = 16;
     constexpr auto altKind = MlsInterleaveKind::Interleave2;
-    if (valueType.getShape()[0] % mTile != 0 ||
-        valueType.getShape()[1] % nTile != 0)
-      return failure();
 
     SmallVector<unsigned> order = getMatrixStoreTensorOrder(storeOp);
     bool transpose = order[0] == 1;
+    if (!transpose)
+      return failure();
+
+    auto srcMfma = findSourceMfmaEncoding(value);
+    assert(srcMfma && "requiresBInterleave2 must find an MFMA source");
+    auto warpDims = srcMfma.getWarpsPerCTA();
+    if (warpDims.size() < 2 ||
+        valueType.getShape()[0] % warpDims[0] != 0 ||
+        valueType.getShape()[1] % warpDims[1] != 0)
+      return failure();
+
+    // Instruction names are [contiguous, non-contiguous], while candidates
+    // use logical tensor [M, N] tiles. Select against the per-warp C tile using
+    // the same capability-query strategy as MLS load selection. Scanning the
+    // M/N-sorted candidates backwards prefers 32x32 over 16x64 when both have
+    // the same area; this also avoids the currently unsupported PMD VGPR-256
+    // path whenever the 32x32 instruction can cover the warp tile.
+    int64_t warpM = valueType.getShape()[0] / warpDims[0];
+    int64_t warpN = valueType.getShape()[1] / warpDims[1];
+    auto candidates = MlsInsn::getMatrixStoreTileCandidates(
+        bitwidth, mlsVersion, altKind, transpose);
+    std::optional<std::array<unsigned, 2>> selectedTile;
+    for (auto tile : llvm::reverse(candidates)) {
+      if (warpM % tile[0] == 0 && warpN % tile[1] == 0) {
+        selectedTile = tile;
+        break;
+      }
+    }
+    if (!selectedTile)
+      return failure();
+    unsigned mTile = (*selectedTile)[0];
+    unsigned nTile = (*selectedTile)[1];
+
     auto mlsInsn = MlsInsn::selectOrGetMatrixStoreInsn(
         mTile, nTile, bitwidth, mlsVersion, altKind, transpose);
     if (failed(mlsInsn))
       return failure();
 
-    auto srcMfma = findSourceMfmaEncoding(value);
-    assert(srcMfma && "requiresBInterleave2 must find an MFMA source");
     Value convertedValue = valueType.getEncoding() == Attribute(srcMfma)
                                ? value
                                : convertAndCastTensor(rewriter, value, srcMfma);
@@ -542,6 +607,9 @@ public:
       storeOp.getValueMutable().assign(convertedValue);
       storeOp->setAttr(triton::amdgpu::MlsStoreEncodingAttr::getMnemonic(),
                        mlsEncoding);
+      if (auto func = storeOp->getParentOfType<triton::FuncOp>())
+        func->setAttr("triton.hcu.has_matrix_store",
+                      UnitAttr::get(storeOp.getContext()));
     });
     return success();
   }
@@ -575,7 +643,28 @@ public:
     mlir::RewritePatternSet patterns(context);
     patterns.add<MlsEncodingInsertion, MlsStoreEncodingInsertion>(context,
                                                                   mlsVersion);
-    if (mlir::applyPatternsGreedily(mod, std::move(patterns)).failed())
+    if (mlir::applyPatternsGreedily(mod, std::move(patterns)).failed()) {
+      signalPassFailure();
+      return;
+    }
+
+    bool invalidFp16MatrixStore = false;
+    mod.walk([&](triton::MatrixStoreOp storeOp) {
+      if (storeOp->hasAttr(
+              triton::amdgpu::MlsStoreEncodingAttr::getMnemonic()))
+        return;
+      auto valueType = dyn_cast<RankedTensorType>(storeOp.getValue().getType());
+      if (!valueType || !valueType.getElementType().isF16() ||
+          !requiresBInterleave2(storeOp) ||
+          hasInterleavableBOperand(storeOp))
+        return;
+      storeOp.emitError()
+          << "FP16 matrix_store from MMAC layout 3 requires TT operand "
+             "layout so the B operand can use N-direction Interleave2; use "
+             "tt.store for non-TT layouts";
+      invalidFp16MatrixStore = true;
+    });
+    if (invalidFp16MatrixStore)
       signalPassFailure();
   }
 };

@@ -757,12 +757,6 @@ struct MLSMatrixStoreFromRegOpConversion
   }
 
   /// VGPR→GMEM matrix_store for fp16 MMAC C layout 3.
-  // TODO(hcu): Add end-to-end matrix_store_64x16 backend support. Triton can
-  // model a wider N-major store, but the current HCU Clang/LLVM path does not
-  // yet lower/select the 64x16 VGPR-store form correctly. Complete the builtin
-  // and intrinsic definitions, ROCDL/LLVM lowering, instruction selection and
-  // encoding, then add correctness/codegen coverage before allowing MlsInsn
-  // selection to choose 64x16 here.
   LogicalResult lowerMatrixStoreFromReg(
       Location loc, ConversionPatternRewriter &rewriter,
       RankedTensorType valueTy, Value llValue, Value llBasePtr,
@@ -860,9 +854,17 @@ struct MLSMatrixStoreFromRegOpConversion
         delinearize(rewriter, loc, linearWarpId, mfmaWarps, warpOrder);
     Value warpRow =
         b.mul(multiDimWarpId[0], b.i32_val(static_cast<int32_t>(storeShape[0])));
-    Value warpCol =
-        b.mul(multiDimWarpId[1], b.i32_val(static_cast<int32_t>(storeShape[1])));
-    Value warpColCoord = warpCol;
+    // Interleave2 keeps each pair of instruction-width N stores together and
+    // distributes consecutive pairs across N warps.  Express that ownership
+    // directly instead of first building a contiguous per-warp coordinate and
+    // exchanging address bits afterwards.  This also handles the degenerate
+    // 32x32 case where groupWidth == storeShape[1] (there is no local group to
+    // exchange with the warp coordinate).
+    unsigned storeNGroupWidth =
+        interleaveFactor * msInsnAttr.instrShape[1];
+    unsigned numStoreNWarps = mfmaWarps[1];
+    Value warpCol = b.mul(
+        multiDimWarpId[1], b.i32_val(static_cast<int32_t>(storeNGroupWidth)));
     Value warpBaseOff = loadHelper.dot64(loc, rewriter, {warpRow, warpCol}, llStrides);
     ldBlkOff = b.add(ldBlkOff, warpBaseOff);
     llBlockPos = {b.add(llBlockPos[0], warpRow),
@@ -879,21 +881,57 @@ struct MLSMatrixStoreFromRegOpConversion
         msInsnAttr.instrShape[0] * msInsnAttr.instrShape[1] / iWarpSize;
 
     unsigned valIdx = 0;
+    unsigned wideStoreIdx = 0;
     auto packNext = [&]() -> FailureOr<Value> {
       if (valIdx + numOfElemsPerInsn > inVals.size())
         return failure();
       SmallVector<Value> chunk;
       chunk.reserve(numOfElemsPerInsn);
-      for (unsigned i = 0; i < numOfElemsPerInsn; ++i)
-        chunk.push_back(inVals[valIdx++]);
+      if (msInsnAttr.instrShape == std::array<unsigned, 2>{32, 32}) {
+        // Layout-3's flat order is [M-half][N-half].  Each wide store needs
+        // both MMAC M subgroups for one (storeM, storeN) tile.  The subgroup
+        // stride is one complete row of N stores, not half of all input
+        // values (the latter only happened to work when storeM == 1).
+        unsigned half = numOfElemsPerInsn / 2;
+        unsigned numStoresM =
+            storeShape[0] / msInsnAttr.instrShape[0];
+        unsigned numStoresN =
+            storeShape[1] / msInsnAttr.instrShape[1];
+        unsigned numWideStores = numStoresM * numStoresN;
+        if (half * 2 != numOfElemsPerInsn ||
+            wideStoreIdx >= numWideStores ||
+            inVals.size() != numWideStores * numOfElemsPerInsn)
+          return failure();
+        unsigned storeM = wideStoreIdx / numStoresN;
+        unsigned storeN = wideStoreIdx % numStoresN;
+        unsigned subgroupStride = numStoresN * half;
+        unsigned storeMStride = 2 * subgroupStride;
+        unsigned base = storeM * storeMStride + storeN * half;
+        for (unsigned mSubgroup = 0; mSubgroup < 2; ++mSubgroup)
+          for (unsigned i = 0; i < half; ++i)
+            chunk.push_back(
+                inVals[base + mSubgroup * subgroupStride + i]);
+        ++wideStoreIdx;
+        valIdx += numOfElemsPerInsn;
+      } else {
+        for (unsigned i = 0; i < numOfElemsPerInsn; ++i)
+          chunk.push_back(inVals[valIdx++]);
+      }
+      unsigned elemsPerVreg128 = 128 / storeEncoding.getElemBitWidth();
       if (chunk.size() % interleaveFactor != 0)
         return failure();
-      unsigned elemsPerInterleave = chunk.size() / interleaveFactor;
+      if (chunk.size() % elemsPerVreg128 != 0)
+        return failure();
       SmallVector<Value> interleaved;
       interleaved.reserve(chunk.size());
-      for (unsigned elem = 0; elem < elemsPerInterleave; ++elem)
-        for (unsigned part = 0; part < interleaveFactor; ++part)
-          interleaved.push_back(chunk[part * elemsPerInterleave + elem]);
+      for (unsigned group = 0; group < chunk.size();
+           group += elemsPerVreg128) {
+        unsigned elemsPerInterleave = elemsPerVreg128 / interleaveFactor;
+        for (unsigned elem = 0; elem < elemsPerInterleave; ++elem)
+          for (unsigned part = 0; part < interleaveFactor; ++part)
+            interleaved.push_back(
+                chunk[group + part * elemsPerInterleave + elem]);
+      }
       chunk = std::move(interleaved);
       return packMatrixStoreVGPRArgs(loc, rewriter, valueTy, msInsnAttr,
                                      chunk);
@@ -919,42 +957,9 @@ struct MLSMatrixStoreFromRegOpConversion
       return success();
     };
 
-    // Interleave-2 MFMA-C can share one descriptor across the N repetitions.
-    // The store-specific MapVector helper preserves the
-    // accumulator order while the instruction offset carries the N delta.
-    unsigned localRepetitionBit = 0;
-    unsigned warpNBit = 0;
-    // Interleave2 exchanges the bit selecting the second pair of
-    // instruction-width N repetitions with the bit selecting the next
-    // warp-local N tile. Derive both from the selected instruction/layout.
-    unsigned logicalInstrN = msInsnAttr.instrShape[1];
-    localRepetitionBit = interleaveFactor * logicalInstrN;
-    warpNBit = static_cast<unsigned>(storeShape[1]);
-    if (!llvm::isPowerOf2_32(localRepetitionBit) ||
-        !llvm::isPowerOf2_32(warpNBit) || localRepetitionBit >= warpNBit)
-      return rewriter.notifyMatchFailure(
-          opToErase,
-          "cannot derive distinct Interleave2 repetition and warp-N bits");
     bool useMatrixLoadStoreOffsetsWithMlOffs = true;
     if (boundaryCheckInfo[0] && boundaryCheckInfo[1])
       useMatrixLoadStoreOffsetsWithMlOffs = false;
-
-    // The descriptor contains the warp-N base. Apply the interleave exchange
-    // there once; the per-repetition N bit is exchanged in the instruction
-    // offset below. This replaces four descriptors by one for each M group.
-    if (useMatrixLoadStoreOffsetsWithMlOffs) {
-      int32_t exchangeMask =
-          static_cast<int32_t>(localRepetitionBit | warpNBit);
-      Value swappedWarpCol = b.or_(
-          b.and_(warpColCoord, b.i32_val(~exchangeMask)),
-          b.or_(b.mul(b.and_(warpColCoord, b.i32_val(localRepetitionBit)),
-                      b.i32_val(warpNBit / localRepetitionBit)),
-                b.udiv(b.and_(warpColCoord, b.i32_val(warpNBit)),
-                       b.i32_val(warpNBit / localRepetitionBit))));
-      Value colDelta = b.sub(swappedWarpCol, warpColCoord);
-      ldBlkOff = b.add(ldBlkOff,
-                       b.mul(b.sext(i64_ty, colDelta), llStrides[1]));
-    }
 
     // Rebuild shared layout against the (possibly warp-local) store layout.
     sharedLayout = HCUMlsSharedEncodingAttr::get(
@@ -974,21 +979,16 @@ struct MLSMatrixStoreFromRegOpConversion
       unsigned iterIdx = 0;
       for (auto &ldstInBlkGroup : ldstInBlkMappings) {
         Value ldOffset = b.add(ldstInBlkGroup.first, ldBlkOff);
-        // Apply the same derived repetition/warp-N exchange to the full local
-        // coordinate when the instruction-offset grouping is unavailable.
-        Value localCol =
-            b.add(warpColCoord, ldInBlkOffCoordMappings[iterIdx].second);
-        int32_t exchangeMask =
-            static_cast<int32_t>(localRepetitionBit | warpNBit);
-        Value swappedCol = b.or_(
-            b.and_(localCol, b.i32_val(~exchangeMask)),
-            b.or_(b.mul(b.and_(localCol, b.i32_val(localRepetitionBit)),
-                        b.i32_val(warpNBit / localRepetitionBit)),
-                  b.udiv(b.and_(localCol, b.i32_val(warpNBit)),
-                         b.i32_val(warpNBit / localRepetitionBit))));
-        Value colDelta = b.sub(swappedCol, localCol);
-        ldOffset = b.add(ldOffset,
-                         b.mul(b.sext(i64_ty, colDelta), llStrides[1]));
+        Value logicalCol = ldInBlkOffCoordMappings[iterIdx].second;
+        Value group = b.udiv(logicalCol, b.i32_val(storeNGroupWidth));
+        Value inner = b.urem(logicalCol, b.i32_val(storeNGroupWidth));
+        Value physicalCol = b.add(
+            b.mul(group,
+                  b.i32_val(storeNGroupWidth * numStoreNWarps)),
+            inner);
+        Value colDelta = b.sub(physicalCol, logicalCol);
+        ldOffset = b.add(
+            ldOffset, b.mul(b.sext(i64_ty, colDelta), llStrides[1]));
         Value ldPtr = b.gep(ptr_ty(ctx, 1), elemByteWidth == 1 ? i8_ty : i16_ty,
                             llBasePtr, ldOffset);
         Value llStride = b.trunc(i32_ty, llStrides[sharedLayout.getOrder()[1]]);
@@ -1005,7 +1005,7 @@ struct MLSMatrixStoreFromRegOpConversion
               b.select(posGt, b.sub(posEnd, llShape[0]), b.i32_val(0));
         }
         if (boundaryCheckInfo[1]) {
-          Value ldInBlockOffCoordY = ldInBlkOffCoordMappings[iterIdx].second;
+          Value ldInBlockOffCoordY = physicalCol;
           Value posEnd =
               b.add(b.add(llBlockPos[1], ldInBlockOffCoordY),
                     b.i32_val(msInsnAttr.instrShape[1]));
@@ -1030,7 +1030,8 @@ struct MLSMatrixStoreFromRegOpConversion
       auto ldstInBlkMappings = computeMatrixStoreOffsetsWithMlOffs(
           loc, rewriter, *mlsInsn, storeLayout, msInsnAttr, storeShape,
           llStrides, mlsInsn->isRowMajor(),
-          boundaryCheckInfo, mlOffsInY, ldInBlkOffCoordMappings);
+          boundaryCheckInfo, storeNGroupWidth, numStoreNWarps, mlOffsInY,
+          ldInBlkOffCoordMappings);
       bool groupPaddingInY = !mlOffsInY;
 
       for (auto &ldstInBlkGroup : ldstInBlkMappings) {
@@ -1040,13 +1041,6 @@ struct MLSMatrixStoreFromRegOpConversion
         Value llStride = b.trunc(i32_ty, llStrides[sharedLayout.getOrder()[1]]);
         Value rsrcDesc;
         for (unsigned ldInBlkOffC : ldstInBlkGroup.second) {
-          unsigned exchangeMask = localRepetitionBit | warpNBit;
-          ldInBlkOffC =
-              (ldInBlkOffC & ~exchangeMask) |
-              ((ldInBlkOffC & localRepetitionBit) *
-               (warpNBit / localRepetitionBit)) |
-              ((ldInBlkOffC & warpNBit) /
-               (warpNBit / localRepetitionBit));
           if (!rsrcDesc) {
             Value paddingLen = b.i32_val(0);
             if (needBoundaryCheck) {
@@ -1087,6 +1081,8 @@ struct MLSMatrixStoreFromRegOpConversion
     for (const auto &store : pendingStores)
       generateMatrixStoreVGPROp(loc, rewriter, msInsnAttr.insn, store.packed,
                                 store.rsrcDesc, store.t, store.offset, store.r,
+                                numOfElemsPerInsn *
+                                    storeEncoding.getElemBitWidth() / 32,
                                 false, false);
 
     rewriter.eraseOp(opToErase);
@@ -1109,6 +1105,8 @@ private:
                                 ValueRange llStrides,
                                 bool mlsIsRowMajor,
                                 SmallVector<bool> boundaryCheckInfo,
+                                unsigned storeNGroupWidth,
+                                unsigned numStoreNWarps,
                                 bool &mlOffsInY,     /* key: ldOffValue, value: ldCoordValue */
                                 DenseMap<Value, Value> &ldInBlkOffCoordMappings) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -1151,6 +1149,11 @@ private:
     unsigned dim1DivFactor = !isBit4 ? 1 : mlsTileE[1] / mlsTileG[1];
 
     SmallVector<SmallVector<std::tuple<Value, unsigned, Value>>> storeOffsets;
+    auto mapStoreNOffset = [&](unsigned logicalCol) {
+      unsigned group = logicalCol / storeNGroupWidth;
+      unsigned inner = logicalCol % storeNGroupWidth;
+      return group * numStoreNWarps * storeNGroupWidth + inner;
+    };
     unsigned numGroups = membersPerGroupInY ? numRepsX : numRepsY;     /* need create numGroups rsrc desc */
     unsigned membersPerGroup = membersPerGroupInY ? numRepsY : numRepsX; /* per group has membersPerGroup mls insts */
     storeOffsets.resize(numGroups);
@@ -1169,16 +1172,19 @@ private:
 
             unsigned ctaRow = ctaX * shapePerCta[0];
             unsigned ctaCol = ctaY * shapePerCta[1];
+            unsigned logicalCol =
+                ctaCol + instIdxY * msInsnAttr.instrShape[1] / dim1DivFactor;
+            unsigned physicalCol = mapStoreNOffset(logicalCol);
             /* Note: This fix need sync to other branches */
             Value ldRow = membersPerGroupInY
                               ? b.add(offWarpX, b.i32_val(ctaRow + instIdxX * msInsnAttr.instrShape[0] / dim0DivFactor))
                               : offWarpX;
             Value ldCol = membersPerGroupInY
                               ? offWarpY
-                              : b.add(offWarpY, b.i32_val(ctaCol + instIdxY * msInsnAttr.instrShape[1] / dim1DivFactor));
+                              : b.add(offWarpY, b.i32_val(physicalCol));
 
             Value ldOffV = loadHelper.dot64(loc, rewriter, {ldRow, ldCol}, llStrides);
-            unsigned ldOffC = membersPerGroupInY ? ctaCol + instIdxY * msInsnAttr.instrShape[1] / dim1DivFactor
+            unsigned ldOffC = membersPerGroupInY ? physicalCol
                                                  : ctaRow + instIdxX * msInsnAttr.instrShape[0] / dim0DivFactor;
 
             Value ldInBlockOffVal = groupPaddingInY ? ldCol : ldRow;
@@ -1210,17 +1216,17 @@ private:
 
   /// Emit matrix_store_* VGPR→GMEM.
   /// Builtin/intrinsic: __builtin_hcu_matrix_store_* /
-  /// llvm.hcu.matrix.store.* (vdata:i32x4, rsrc:i32x4, moffset, t, r, glc, slc)
+  /// llvm.hcu.matrix.store.* (vdata:i32xN, rsrc:i32x4, moffset, t, r, glc, slc)
   void generateMatrixStoreVGPROp(Location loc, RewriterBase &rewriter,
                                  StringRef matrixStoreInsnName, Value vdata,
                                  Value rsrcDesc, bool t, int32_t offset, bool r,
+                                 unsigned vdataDwords,
                                  bool glc = false, bool slc = false) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    // Spec requires intx4 vdata.
-    Type v4i32Ty = vec_ty(i32_ty, 4);
+    Type vdataTy = vec_ty(i32_ty, vdataDwords);
     Value vdataI32 = vdata;
-    if (vdata.getType() != v4i32Ty)
-      vdataI32 = b.bitcast(vdata, v4i32Ty);
+    if (vdata.getType() != vdataTy)
+      vdataI32 = b.bitcast(vdata, vdataTy);
 
     OperationState loweredOp(loc, matrixStoreInsnName);
     loweredOp.addOperands(vdataI32);
@@ -1374,14 +1380,23 @@ private:
     auto opIdx = dotOperandLayout.getOpIdx();
     auto mfmaLayout = cast<AMDMfmaEncodingAttr>(dotOperandLayout.getParent());
     Value linearWarpId = getLinearWarpId(loc, rewriter, targetInfo);
+    bool matrixStorePath = false;
+    for (Operation *parent = op; parent; parent = parent->getParentOp()) {
+      if (parent->hasAttr("triton.hcu.has_matrix_store")) {
+        matrixStorePath = true;
+        break;
+      }
+    }
 
     if ((opIdx == 0 && mfmaLayout.getMfmaTile()[0] == mfmaLayout.getInstrShape()[0]) ||
         (opIdx == 1 && mfmaLayout.getMfmaTile()[1] == mfmaLayout.getInstrShape()[1])) {
       res = convertLayoutUnitTilesPerWarp(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                                          dotOperandLayout, smemObj, typeConverter, linearWarpId);
+                                          dotOperandLayout, smemObj, typeConverter,
+                                          linearWarpId, matrixStorePath);
     } else {
         res = convertLayoutMultiTilesPerWarp(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                                             dotOperandLayout, smemObj, typeConverter, linearWarpId);
+                                             dotOperandLayout, smemObj, typeConverter,
+                                             linearWarpId, matrixStorePath);
     }
 
     if (!res)
@@ -1396,9 +1411,11 @@ private:
                                 DotOperandEncodingAttr encoding,
                                 const SharedMemoryObject &smemObj,
                                 const LLVMTypeConverter *typeConverter,
-                                Value linearWarpId) const {
+                                Value linearWarpId,
+                                bool matrixStorePath) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
+    matrixStorePath = matrixStorePath && opIdx == 0;
     auto tensorTy = cast<MemDescType>(tensor.getType());
     ArrayRef<int64_t> shape = tensorTy.getShape();
     auto rank = shape.size();
@@ -1508,7 +1525,7 @@ private:
     auto offsets = computeDsReadMatrixOffsets(rewriter, loc,
                                sharedLayout, dsInsnAttr,
                                spatialWarpId, warpsPerBlockNonK, mlsNumReps,
-                               smemObj, parentShape, shape);
+                               smemObj, parentShape, shape, matrixStorePath);
     Value smemBase = smemObj.getBase();
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
 
@@ -1534,15 +1551,22 @@ private:
         int64_t viewNonK = shape[nonKDimIdx];
         int64_t parentNonK = parentShape[nonKDimIdx];
         if (viewNonK > 0 && parentNonK > viewNonK &&
-            parentNonK % viewNonK == 0) {
+            parentNonK % viewNonK == 0 &&
+            (!matrixStorePath ||
+             viewNonK / warpsPerBlockNonK <
+                 static_cast<int64_t>(mlsTile[nonKDimIdx2D]))) {
           unsigned parts = static_cast<unsigned>(parentNonK / viewNonK);
           if (dsRepPerWarpNonK % parts == 0) {
             dsRepPerWarpNonK /= parts;
             dsLoadsPerK = dsRepPerWarpNonK * dsRepPerWarpK;
             withinTileHalfView = true;
-            nonKLoadBaseVal = b.mul(
-                b.udiv(offs[offBase + nonKDimIdx2D], b.i32_val(viewNonK)),
-                b.i32_val(dsRepPerWarpNonK));
+            // The subslice selects the parent MLS tile.  Within that tile,
+            // the spatial warp selects its ds-read half.
+            nonKLoadBaseVal = matrixStorePath
+                ? b.mul(spatialWarpId, b.i32_val(dsRepPerWarpNonK))
+                : b.mul(b.udiv(offs[offBase + nonKDimIdx2D],
+                               b.i32_val(viewNonK)),
+                        b.i32_val(dsRepPerWarpNonK));
           }
         }
       }
@@ -1619,11 +1643,13 @@ private:
   convertLayoutMultiTilesPerWarp(int opIdx, ConversionPatternRewriter &rewriter,
                                  Location loc, Value tensor,
                                  DotOperandEncodingAttr encoding,
-                                 const SharedMemoryObject &smemObj,
-                                 const LLVMTypeConverter *typeConverter,
-                                 Value linearWarpId) const {
+                                const SharedMemoryObject &smemObj,
+                                const LLVMTypeConverter *typeConverter,
+                                Value linearWarpId,
+                                bool matrixStorePath) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     assert((opIdx == 0 || opIdx == 1) && "unexpected operand idx");
+    matrixStorePath = matrixStorePath && opIdx == 0;
     auto tensorTy = cast<MemDescType>(tensor.getType());
     ArrayRef<int64_t> shape = tensorTy.getShape();
     auto rank = shape.size();
@@ -1740,7 +1766,7 @@ private:
     auto offsets = computeDsReadMatrixOffsets(rewriter, loc,
                                sharedLayout, dsInsnAttr,
                                spatialWarpId, warpsPerBlockNonK, mlsNumReps,
-                               smemObj, parentShape, shape);
+                               smemObj, parentShape, shape, matrixStorePath);
     Value smemBase = smemObj.getBase();
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
 
@@ -1785,14 +1811,21 @@ private:
         int64_t viewNonK = shape[nonKDimIdx];
         int64_t parentNonK = parentShape[nonKDimIdx];
         if (viewNonK > 0 && parentNonK > viewNonK &&
-            parentNonK % viewNonK == 0) {
+            parentNonK % viewNonK == 0 &&
+            (!matrixStorePath ||
+             viewNonK / warpsPerBlockNonK <
+                 static_cast<int64_t>(mlsTile[nonKDimIdx2D]))) {
           unsigned parts = static_cast<unsigned>(parentNonK / viewNonK);
           unsigned dsRepFull = dsInsnAttr.instrsPerWarp[nonKDimIdx2D];
           if (dsRepFull == dsRepPerWarpNonK * parts) {
             withinTileHalfView = true;
-            nonKLoadBaseVal = b.mul(
-                b.udiv(offs[offBase + nonKDimIdx2D], b.i32_val(viewNonK)),
-                b.i32_val(dsRepPerWarpNonK));
+            // The subslice selects the parent MLS tile.  Within that tile,
+            // the spatial warp selects its ds-read half.
+            nonKLoadBaseVal = matrixStorePath
+                ? b.mul(spatialWarpId, b.i32_val(dsRepPerWarpNonK))
+                : b.mul(b.udiv(offs[offBase + nonKDimIdx2D],
+                               b.i32_val(viewNonK)),
+                        b.i32_val(dsRepPerWarpNonK));
           }
         }
       }
@@ -1887,7 +1920,8 @@ private:
                              Value warpNonKId, int warpsPerBlockNonK,
                              ArrayRef<unsigned> mlsReps, SharedMemoryObject smemObj,
                              ArrayRef<int64_t> parentShape,
-                             ArrayRef<int64_t> viewShape) const {
+                             ArrayRef<int64_t> viewShape,
+                             bool matrixStorePath) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto opIdx = sharedLayout.getOpIdx();
     auto mlsTile = sharedLayout.getMlsTile();
@@ -1943,12 +1977,22 @@ private:
     }
 
     llvm::SmallVector<Value> offsets(numBlocks * numMlsTilesPerBlock);
+    bool nonKSlicedView = matrixStorePath &&
+        viewShape[nonKDimIdx] < parentShape[nonKDimIdx];
+    bool warpWithinNonKTile =
+        viewShape[nonKDimIdx] / warpsPerBlockNonK <
+        static_cast<int64_t>(mlsTile[nonKDimIdx]);
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * warpsPerBlockNonK;
 
       for (int mlsTileIdx = 0; mlsTileIdx < numMlsTilesPerBlock; ++mlsTileIdx) {
-        Value mlsNonKOff = b.add(b.i32_val(blockNonKOffset), warpNonKId);
-        mlsNonKOff = b.add(mlsNonKOff, subsliceNonKTileOff);
+        // A within-tile WDRA subslice uses the parent tile plus a caller-side
+        // dsByteOffsets half.  Unsliced operands (notably B) retain the
+        // [block][warp] ownership matched by the direct non-contiguous store.
+        Value mlsNonKOff = nonKSlicedView && warpWithinNonKTile
+            ? b.add(b.i32_val(block), subsliceNonKTileOff)
+            : b.add(b.add(b.i32_val(blockNonKOffset), warpNonKId),
+                    subsliceNonKTileOff);
         Value mlsKOff = b.add(b.i32_val(mlsTileIdx), subsliceKTileOff);
 
         std::array<Value, 2> mlsCoords =

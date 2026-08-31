@@ -470,15 +470,30 @@ FailureOr<MlsInsn> MlsInsn::selectOrGetMlsInsn(unsigned nonKTile,
   return MlsInsn(oAttr);
 }
 
+namespace {
+struct MatrixStoreTileInfo {
+  std::array<unsigned, 2> tile;
+  StringLiteral insn;
+};
+
+constexpr std::array<MatrixStoreTileInfo, 2> matrixStoreTileTable = {{
+    {{16, 32}, "rocdl.matrix.store.32x16.b16"},
+    {{32, 32}, "rocdl.matrix.store.32x32.b16"},
+}};
+} // namespace
+
 FailureOr<MlsInsn> MlsInsn::selectOrGetMatrixStoreInsn(
     unsigned mTile, unsigned nTile, unsigned elemBitWidth,
     unsigned mlsVersion, MlsInterleaveKind interleaveKind, bool transpose) {
-  // VGPR matrix-store support is currently available only for the verified
-  // transposed fp16 32x16 form. In logical M/N tensor coordinates it covers
-  // 16x32 elements.
   if (interleaveKind != MlsInterleaveKind::Interleave2 ||
-      elemBitWidth != 16 || !transpose || mTile != 16 || nTile != 32 ||
+      elemBitWidth != 16 || !transpose ||
       (mlsVersion != 2 && mlsVersion != 3))
+    return failure();
+
+  auto it = llvm::find_if(matrixStoreTileTable, [&](const auto &entry) {
+    return entry.tile == std::array<unsigned, 2>{mTile, nTile};
+  });
+  if (it == matrixStoreTileTable.end())
     return failure();
 
   MlsInsnAttr attr{};
@@ -493,8 +508,24 @@ FailureOr<MlsInsn> MlsInsn::selectOrGetMatrixStoreInsn(
   attr.msInsn.instrsPerWarp = {1, 1};
   attr.msInsn.instrOrder = transpose ? std::array<unsigned, 2>{1, 0}
                                      : std::array<unsigned, 2>{0, 1};
-  attr.msInsn.insn = "rocdl.matrix.store.32x16.b16";
+  attr.msInsn.insn = it->insn;
   return MlsInsn(attr);
+}
+
+SmallVector<std::array<unsigned, 2>>
+MlsInsn::getMatrixStoreTileCandidates(
+    unsigned elemBitWidth, unsigned mlsVersion,
+    MlsInterleaveKind interleaveKind, bool transpose) {
+  SmallVector<std::array<unsigned, 2>> candidates;
+  // Filter the common capability table exactly like matrix-load candidates.
+  for (const auto &entry : matrixStoreTileTable) {
+    auto tile = entry.tile;
+    if (succeeded(selectOrGetMatrixStoreInsn(
+            tile[0], tile[1], elemBitWidth, mlsVersion, interleaveKind,
+            transpose)))
+      candidates.push_back(tile);
+  }
+  return candidates;
 }
 
 

@@ -215,6 +215,14 @@ public:
                                               unsigned mlsVersion,
                                               MlsInterleaveKind altKind = MlsInterleaveKind::InterleaveNone);
 
+  // Return logical M/N tiles supported by VGPR matrix-store for the requested
+  // mode. Candidates are ordered by M first and then N, matching the matrix
+  // load candidate API; callers can scan backwards to prefer the widest tile.
+  static SmallVector<std::array<unsigned, 2>>
+  getMatrixStoreTileCandidates(unsigned elemBitWidth, unsigned mlsVersion,
+                               MlsInterleaveKind interleaveKind,
+                               bool transpose);
+
   static FailureOr<MlsInsn> selectOrGetMlsInsn(unsigned nonKTile,       /* elems of non-k-tile */
                                                unsigned kTile,          /* elems of k-tile */
                                                unsigned elemBitWidth,

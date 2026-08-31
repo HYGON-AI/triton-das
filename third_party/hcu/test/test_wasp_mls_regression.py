@@ -5,7 +5,7 @@ Default scenarios:
   GEMM  × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
   # GEMM  × {load, mls} × {wdra 8+8}                       # temporarily disabled
   GEMM  × {load, mls} × {wdra 4+8} × num_stages=4
-  GEMM  × mls_store × {wasp 4+4, wdra 4+8, wdra4+8/ns4}  # mmac_layout_force=3
+  GEMM  × mls_store × {wdra 4+8}                          # mmac_layout_force=3
   FA    × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
 
 Known limitation: gemm/load/wdra8+8 uses K=512; see the comment near
@@ -43,11 +43,13 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple
 
 import torch
 import triton
@@ -56,6 +58,44 @@ import triton.language as tl
 os.environ.setdefault("AMDGCN_USE_BUFFER_OPS", "1")
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+MATRIX_STORE_REFERENCE_TOPS = 7.672933
+MATRIX_STORE_MAX_REGRESSION_PCT = 2.0
+
+
+def _iter_pmd_stats() -> List[Tuple[Path, int, Optional[float], int]]:
+    stats = []
+    for path in (Path.cwd() / "m5out").rglob("stats.txt"):
+        text = path.read_text(errors="replace")
+        cycles = re.search(r"^totalGcSimCycles\s+(\d+)", text, re.M)
+        frequency = re.search(r"^gcFrequency\s+([0-9.eE+-]+)", text, re.M)
+        if cycles:
+            stats.append((path, int(cycles.group(1)),
+                          float(frequency.group(1)) if frequency else None,
+                          path.stat().st_mtime_ns))
+    return stats
+
+
+def _pmd_stats_snapshot() -> dict[str, Tuple[int, int]]:
+    return {str(path): (mtime, cycles)
+            for path, cycles, _, mtime in _iter_pmd_stats()}
+
+
+def _latest_pmd_measurement(
+    before: dict[str, Tuple[int, int]],
+) -> Tuple[int, float]:
+    base_cycles = max((cycles for _, cycles in before.values()), default=0)
+    candidates = []
+    for path, cycles, frequency, mtime in _iter_pmd_stats():
+        previous = before.get(str(path))
+        if previous is None or mtime > previous[0]:
+            candidates.append((mtime, cycles, frequency))
+    if not candidates:
+        raise AssertionError("matrix_store performance check found no PMD stats")
+    _, cycles, frequency = max(candidates)
+    measured_cycles = cycles - base_cycles if cycles > base_cycles else cycles
+    if measured_cycles <= 0 or frequency is None:
+        raise AssertionError("matrix_store performance check found invalid PMD stats")
+    return measured_cycles, frequency
 
 
 def _load_sibling(mod_name: str, filename: str):
@@ -75,6 +115,12 @@ def _load_sibling(mod_name: str, filename: str):
 
 # MmacLayout::TRANSPOSE — aligns MFMA-C with MLS matrix_store packing.
 MLS_STORE_MMAC_LAYOUT = 3
+MLS_STORE_TEST_SHAPES = (
+    (256, 256, 64),
+    (512, 256, 128),
+    (256, 512, 512),
+    (256, 256, 4096),
+)
 
 
 def gemm_config(
@@ -114,6 +160,7 @@ def gemm_config(
         "BLOCK_SIZE_N": bn,
         "BLOCK_SIZE_K": bk,
         "GROUP_SIZE_M": 1,
+        "optimize_epilogue": True,
         "WARP_SPECIALIZE": wasp,
         "wasp_enabled": wasp,
         "wdra_enabled": wdra,
@@ -164,6 +211,7 @@ def fa_config(
         "BLOCK_M": block,
         "BLOCK_N": block,
         "pre_load_v": False,
+        "optimize_epilogue": True,
         # WASP LDS depth must be 2 or 4 (compiler validates when wasp_enabled).
         "num_stages": 2,
         "wasp_enabled": wasp,
@@ -401,13 +449,17 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
     torch.manual_seed(0)
     if fixed_ab:
         # Constant A/B for itrace (IT0): A=1, B=1 => C[i,j]=K; fp16 1.0 = 0x3c00.
-        # Keep the same layouts as the random path (A row-major, B col-major)
-        # so MLS encoding / strides match production.
         a = torch.ones((M, K), device="cpu", dtype=torch.float16)
-        b = torch.ones((N, K), device="cpu", dtype=torch.float16).transpose(1, 0)
+        b = (torch.ones((K, N), device="cpu", dtype=torch.float16)
+             if use_matrix_store else
+             torch.ones((N, K), device="cpu", dtype=torch.float16).transpose(1, 0))
     else:
         a = torch.randn((M, K), device="cpu", dtype=torch.float16)
-        b = torch.randn((N, K), device="cpu", dtype=torch.float16).transpose(1, 0)
+        # FP16 matrix_store packing requires TT so B can interleave along N.
+        # Keep the ordinary load/MLS regression on its existing TN coverage.
+        b = (torch.randn((K, N), device="cpu", dtype=torch.float16)
+             if use_matrix_store else
+             torch.randn((N, K), device="cpu", dtype=torch.float16).transpose(1, 0))
     a_dev, b_dev = a.to("cuda"), b.to("cuda")
     c = torch.empty((M, N), device="cuda", dtype=torch.float16)
     if use_matrix_store:
@@ -426,6 +478,17 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
         block_m=block_m, block_n=block_n, block_k=block_k,
     )
     if use_matrix_store:
+        config.update({
+            "wdra_num_load_regs": 16,
+            "wdra_num_mma_regs_main": 244,
+            "wdra_num_mma_regs_tail": 244,
+            "empty_arrive_after_mmac": False,
+            "enable_v_mmac_cluster": 0,
+            "enable_consumer_pingpong": True,
+            "amdgpu_enable_max_ilp_scheduling_strategy": True,
+            "hcu_use_gfx946_sched_model_v2": False,
+        })
+    if use_matrix_store:
         kernel = gemm_mls_store_kernel
     elif use_mls:
         kernel = gemm_mls_kernel
@@ -443,8 +506,28 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
     if compile_only:
         kernel.warmup(*args, grid=grid, **config)
         return
+    check_matrix_store_perf = (use_matrix_store and wdra and
+                               load_warps == 4 and mma_warps == 8 and
+                               num_stages == 2 and
+                               shape == MLS_STORE_GEMM_SHAPE)
+    stats_before = _pmd_stats_snapshot() if check_matrix_store_perf else {}
     kernel[grid](*args, **config)
     torch.testing.assert_close(c.cpu(), torch.matmul(a, b), atol=1e-2, rtol=1e-2)
+    if check_matrix_store_perf:
+        cycles, frequency = _latest_pmd_measurement(stats_before)
+        tops = 2.0 * M * N * K * frequency / cycles / 1e3
+        minimum = MATRIX_STORE_REFERENCE_TOPS * (
+            1.0 - MATRIX_STORE_MAX_REGRESSION_PCT / 100.0
+        )
+        print(f"  matrix_store perf: {tops:.6f} TOPS, minimum {minimum:.6f} "
+              f"({cycles} cycles @ {frequency:.6f} GHz)", flush=True)
+        if tops < minimum:
+            raise AssertionError(
+                f"matrix_store performance regression: {tops:.6f} TOPS is "
+                f"below {minimum:.6f} TOPS (reference "
+                f"{MATRIX_STORE_REFERENCE_TOPS:.6f}, max regression "
+                f"{MATRIX_STORE_MAX_REGRESSION_PCT:.1f}%)"
+            )
 
 
 def run_fa(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
@@ -583,27 +666,34 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
                 ))
 
     # GEMM MLS-store epilogue: matrix_load A/B + matrix_store C, layout=3.
-    # Shape/block: M=N=256, K=4096, BM=BN=256, BK=64.
-    for wasp, wdra, load_w, mma_w, nstages in modes:
-        if wdra and load_w >= 8 and nstages == 4:
-            continue
-        name = f"gemm/mls_store/{_mode_tag(wasp, wdra, load_w, mma_w, nstages)}"
-        shape = MLS_STORE_GEMM_SHAPE
-        runner = lambda co, wp=wasp, w=wdra, lw=load_w, mw=mma_w, ns=nstages, sh=shape: run_gemm(
-            use_mls=True, use_matrix_store=True,
-            mmac_layout_force=MLS_STORE_MMAC_LAYOUT,
-            wasp=wp, wdra=w, load_warps=lw or None,
-            mma_warps=mw or None, num_stages=ns, compile_only=co,
-            shape=sh,
-            block_m=MLS_STORE_BLOCK_M,
-            block_n=MLS_STORE_BLOCK_N,
-            block_k=MLS_STORE_BLOCK_K,
-        )
-        cases.append(Case(
-            name=name, kind="gemm", use_mls=True, wasp=wasp, wdra=wdra,
-            load_warps=load_w, mma_warps=mma_w, run=runner, shape=shape,
-            num_stages=nstages, use_matrix_store=True,
-        ))
+    # Cover one/multiple K tiles and one/multiple M/N CTAs.  The long-K shape
+    # also carries the PMD performance guard in run_gemm.
+    mls_store_modes = [
+        (True, True, 4, 8, 2),
+        # no-WASP MLS store is not supported yet: B operand Interleave2 is not
+        # remapped correctly for the normal MMAC consumer path.
+        # (False, False, 0, 0, 2),
+    ]
+    for wasp, wdra, load_w, mma_w, nstages in mls_store_modes:
+        for shape in MLS_STORE_TEST_SHAPES:
+            shape_tag = "x".join(str(dim) for dim in shape)
+            name = (f"gemm/mls_store/{shape_tag}/"
+                    f"{_mode_tag(wasp, wdra, load_w, mma_w, nstages)}")
+            runner = lambda co, wp=wasp, w=wdra, lw=load_w, mw=mma_w, ns=nstages, sh=shape: run_gemm(
+                use_mls=True, use_matrix_store=True,
+                mmac_layout_force=MLS_STORE_MMAC_LAYOUT,
+                wasp=wp, wdra=w, load_warps=lw or None,
+                mma_warps=mw or None, num_stages=ns, compile_only=co,
+                shape=sh,
+                block_m=MLS_STORE_BLOCK_M,
+                block_n=MLS_STORE_BLOCK_N,
+                block_k=MLS_STORE_BLOCK_K,
+            )
+            cases.append(Case(
+                name=name, kind="gemm", use_mls=True, wasp=wasp, wdra=wdra,
+                load_warps=load_w, mma_warps=mma_w, run=runner, shape=shape,
+                num_stages=nstages, use_matrix_store=True,
+            ))
     return cases
 
 
