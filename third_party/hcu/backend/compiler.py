@@ -121,6 +121,11 @@ class HIPOptions:
     # than on the BlockPingpong compiler schedule.
     use_block_pingpong: bool = False
 
+    # Autotune-only UTCL1 page warmup for large, regular GEMM-like reductions.
+    # It is independent of BlockPingpong and remains off by default because
+    # ordinary or small kernels may regress.
+    utc_warmup: bool = False
+
     # wasp options
     wasp_enabled: bool = False
     wdra_enabled: bool = False
@@ -592,6 +597,12 @@ class HIPBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         emuTF32 = False
+        # UTC warmup needs the logical, uncoalesced A/B pointer expressions to
+        # recover each CTA operand tile's true origin. Run it before Coalesce
+        # shifts tensor offsets and before software pipelining clones payload
+        # loads.
+        if options.utc_warmup:
+            hcu.passes.ttgpuir.add_utc_warmup(pm)
         passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)

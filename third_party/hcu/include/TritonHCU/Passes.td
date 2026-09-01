@@ -93,6 +93,29 @@ def TritonHCUPrepareBlockPingpong
   ];
 }
 
+def TritonHCUUTCWarmup
+    : Pass<"tritonhcu-utc-warmup", "mlir::ModuleOp"> {
+  let summary = "Warm UTC translations for large dense HCU GEMM operands";
+  let description = [{
+    Independently match regular 8/16-bit GEMM-like dot reductions, prove each
+    operand's positive-stride CTA tile and boundary masks, issue a guarded
+    side-effecting dword request before the reduction loop, and keep its
+    asynchronous destination live through the loop. Mark matched payload loads
+    for the target-specific cache-swizzle stride. Unsupported loops are left
+    unchanged. A and B are analyzed independently, and only operands whose
+    reduction dimension has a compile-time unit stride (K-major) become
+    warmup candidates. The guarded page-footprint check then decides whether
+    a candidate issues a request at runtime.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::triton::TritonDialect",
+    "mlir::triton::amdgpu::TritonAMDGPUDialect",
+    "mlir::triton::gpu::TritonGPUDialect"
+  ];
+}
+
 def TritonHCUBlockPingpong
     : Pass<"tritonhcu-block-pingpong", "mlir::ModuleOp"> {
   let summary = "Schedule HCU BufferLoad loops as BlockPingpong phases";

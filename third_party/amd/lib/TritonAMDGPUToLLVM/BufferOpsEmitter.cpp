@@ -46,8 +46,12 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
   // bit 20: Behavior on unmap (0 means  "return 0 / ignore")
   // bits 21-22: Index stride for swizzles (N/A)
   // bit 23: Add thread ID (0)
-  // bit 24: Reserved to 1 (RDNA) or 0 (CDNA)
-  // bits 25-26: Reserved (0)
+  // bits 24-26: Reserved on RDNA/legacy CDNA. RDNA requires bit 24 to be 1;
+  //             legacy CDNA requires all three bits to be 0.
+  //             On NMZ and ShaoBo these are descriptor bits 120-122,
+  //             stride_hi_2_0. UTC warmup uses value 0b010 here to encode its
+  //             fixed 32 KiB cache-swizzle stride. It does not emit a 16 KiB
+  //             mode.
   // bit 27: Buffer is non-volatile (CDNA only)
   // bits 28-29: Out of bounds select (RDNA only)
   //             (0 = structured,
@@ -72,12 +76,37 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
       // largest available stride (8k) doesn't help those unsupported large
       // stride. Especially better to avoid using the stride which is 2^N when
       // N>13, e.g. by add padding to the buffer.
+      // UTC warmup's fixed 32 KiB mode is the target-specific exception below.
       Value stride16b =
           LLVM::TruncOp::create(rewriter, loc, i16_ty, blockStride);
       Value strideSat = LLVM::AndOp::create(rewriter, loc, stride16b, mask14b);
       // stride[13:0] = swizzling stride
       // stride[14] = swizzle enabling bit
       stride = LLVM::OrOp::create(rewriter, loc, enableSwizzle, strideSat);
+
+      // NMZ and ShaoBo encode the UTC warmup 32 KiB stride by setting
+      // stride_hi_2_0 to 0b010, i.e. descriptor bit 121 (flags bit 25).
+      // Only an explicit constant 32 KiB request takes this path. Ordinary
+      // dynamic strides never acquire extended descriptor bits, and there is
+      // no 16 KiB software mode.
+      //
+      // Known NMZ/ShaoBo 32 KiB correctness restriction: a buffer instruction
+      // forms its VA as base + offset. If different (base, offset) pairs reach
+      // the same VA, cache swizzle may allocate that address in different L1
+      // sets. Reads and writes to the alias are then not guaranteed to remain
+      // ordered: a write may update memory while a read still observes stale
+      // data from L1. This issue does not apply when changing the base also
+      // guarantees that subsequent requests cannot reach any VA accessed
+      // through the previous base.
+      if (mlir::triton::AMD::supports32KiBCacheSwizzle(
+              targetInfo.getArch())) {
+        auto constantOp = blockStride.getDefiningOp<LLVM::ConstantOp>();
+        if (constantOp) {
+          auto attr = dyn_cast<IntegerAttr>(constantOp.getValue());
+          if (attr && attr.getInt() == 32768)
+            flags |= 1 << 25;
+        }
+      }
     }
   }
 

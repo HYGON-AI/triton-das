@@ -43,6 +43,8 @@ namespace mlir {
 
 namespace {
 
+constexpr StringLiteral kUTCWarmupIdAttr = "hcu.utc_warmup.id";
+
 // ========================== HCU Utility Functions ==========================
 void collectAssumptionsForFuncArgPtr(ModuleOp mod, DenseMap<Value, SetVector<Operation *>> &assumptions) {
   mod.walk([&](LLVM::AssumeOp op) {
@@ -733,6 +735,23 @@ static Value resolveCacheSwizzleStride(Location loc, RankedTensorType ptrTensorT
                                           minRowPitchBytes, rewriter);
 }
 
+static bool hasUTCWarmupRequest(Operation *op) {
+  auto warmupId = op->getAttrOfType<IntegerAttr>(kUTCWarmupIdAttr);
+  if (!warmupId)
+    return false;
+
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  bool requestExists = false;
+  module.walk([&](Operation *candidate) {
+    auto candidateId = candidate->getAttrOfType<IntegerAttr>(kUTCWarmupIdAttr);
+    if (!candidateId || candidateId.getInt() != warmupId.getInt())
+      return;
+    if (isa<triton::amdgpu::UTCWarmupOp>(candidate))
+      requestExists = true;
+  });
+  return requestExists;
+}
+
 // /*-----------------AtomicCAS-------------------*/
 
 struct ConvertTritonAtomicCASOpToBufferAtomicCAS
@@ -1046,10 +1065,23 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
       if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
-        auto ptrTensorTy = cast<RankedTensorType>(ptr.getType());
-        blockStride = resolveCacheSwizzleStride(
-            op->getLoc(), ptrTensorTy, tensorOffset, rewriter,
-            bufferCacheSwizzleEnabled);
+        bool utcWarmupRequestExists = hasUTCWarmupRequest(op);
+        if (utcWarmupRequestExists) {
+          auto targetArch =
+              getAMDArch(op->template getParentOfType<ModuleOp>());
+          if (!targetArch || !AMD::supportsBufferCacheSwizzle(*targetArch))
+            return rewriter.notifyMatchFailure(
+                op, "UTC warmup payload requires a supported target arch");
+          int32_t targetBytes =
+              AMD::supports32KiBCacheSwizzle(*targetArch) ? 32768 : 8192;
+          blockStride = rewriter.create<arith::ConstantIntOp>(
+              op->getLoc(), targetBytes, 32);
+        } else {
+          auto ptrTensorTy = cast<RankedTensorType>(ptr.getType());
+          blockStride = resolveCacheSwizzleStride(
+              op->getLoc(), ptrTensorTy, tensorOffset, rewriter,
+              bufferCacheSwizzleEnabled);
+        }
       }
 
       if (emitBufferOpsOffsetAssert) {

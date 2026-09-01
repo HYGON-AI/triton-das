@@ -133,7 +133,9 @@ bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature) {
 }
 
 // Buffer cache swizzle: kongming (gfx926), zhongda (gfx928), bmz (gfx936),
-// nmz (gfx938), yueying (gfx92a). All use 14-bit stride (64*2^n bytes).
+// nmz (gfx938), yueying (gfx92a), shaobo (gfx946). The ordinary path remains
+// capped at 8 KiB; UTC warmup may explicitly request the extended 32 KiB
+// encoding on gfx938/gfx946.
 bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
   static constexpr llvm::StringRef kCacheSwizzleArchs[] = {
       "gfx926", // kongming
@@ -141,11 +143,23 @@ bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
       "gfx936", // bmz
       "gfx938", // nmz
       "gfx92a", // yueying
+      "gfx946", // shaobo
   };
   for (llvm::StringRef supported : kCacheSwizzleArchs)
     if (arch == supported)
       return true;
   return false;
+}
+
+bool supports32KiBCacheSwizzle(llvm::StringRef arch) {
+  // NMZ/ShaoBo bug in 32 KiB cache-swizzle mode: the cache-set mapping is
+  // affected by the buffer descriptor base and instruction offset separately,
+  // rather than by the resolved VA alone. Consequently, two different
+  // (base, offset) pairs that resolve to the same VA may allocate the address
+  // in different L1 sets, and a read can observe stale data after a write.
+  // Only use this mode when changing the base also makes the old and new
+  // request VA ranges disjoint.
+  return arch == "gfx938" || arch == "gfx946";
 }
 
 static int64_t roundUpLegacyCacheSwizzleStrideBytes(int64_t strideBytes) {

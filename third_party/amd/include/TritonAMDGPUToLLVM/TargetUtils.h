@@ -86,8 +86,14 @@ HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch);
 bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature);
 
 // Buffer cache swizzle: kongming (gfx926), zhongda (gfx928), bmz (gfx936),
-// nmz (gfx938), yueying (gfx92a). All use 14-bit stride (64*2^n bytes).
+// nmz (gfx938), yueying (gfx92a), shaobo (gfx946). Ordinary inference remains
+// capped at 8 KiB; target-specific callers may request extended stride bits.
 bool supportsBufferCacheSwizzle(llvm::StringRef arch);
+
+// NMZ and ShaoBo carry cache-swizzle stride high bits in the resource
+// descriptor and can encode the UTC warmup 32 KiB policy. Yueying remains on
+// the legacy 8 KiB policy.
+bool supports32KiBCacheSwizzle(llvm::StringRef arch);
 
 // Round stride up to a legal 14-bit swizzle value (64*2^n, max 16383). If
 // minStrideBytes > 0 (matrix row pitch), the result is at least that value.

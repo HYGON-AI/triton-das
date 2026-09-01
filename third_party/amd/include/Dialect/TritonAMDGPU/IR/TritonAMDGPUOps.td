@@ -21,6 +21,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 
 #ifndef TRITON_AMDGPU_OPS
 #define TRITON_AMDGPU_OPS
@@ -710,6 +711,10 @@ def LocalLoadPackedTransposedOp : TT_AMDGPU_Op<"local_load_packed_tranposed", [L
 }
 
 
+//===----------------------------------------------------------------------===//
+// HCU Extensions
+//===----------------------------------------------------------------------===//
+
 def MatrixLoadToLocalOp : TT_AMDGPU_Op<"matrix_load_to_local", [AttrSizedOperandSegments]> {
   let summary = "matrix load from global memory to local memory";
   let description = [{
@@ -772,6 +777,47 @@ def MatrixStoreFromRegOp : TT_AMDGPU_Op<"matrix_store_from_reg", [AttrSizedOpera
     )
     attr-dict `:` type($value) `,` type($base)
   }];
+}
+
+def UTCWarmupOp : TT_AMDGPU_Op<"utc_warmup", [
+  // The instruction does not change memory contents. Model its UTC/cache
+  // state update as a conservative GlobalMemory write so later global loads
+  // cannot move above the warmup request.
+  MemoryEffects<[MemWrite<GlobalMemory>]>,
+  TypesMatchWith<"result and offsets have the same type", "result", "offsets", "$_self">
+]> {
+  let summary = "Issue a side-effecting HCU UTC page warmup request";
+  let description = [{
+    Issues one buffer_load_dword per hardware thread solely for its address
+    translation side effect. Its dword result is carried to a matching
+    utc_warmup_consume after the payload computation so the target backend can
+    safely allocate the asynchronous destination VGPR. Offsets are bytes.
+  }];
+  let arguments = (ins
+    Arg<TT_Ptr, "Global memory base pointer to warm up",
+        [MemRead<GlobalMemory>]>:$ptr,
+    I32Tensor:$offsets
+  );
+  let results = (outs I32Tensor:$result);
+  let assemblyFormat = [{
+    $ptr `[` $offsets `]` attr-dict `:`
+    type($ptr) `,` type($offsets) `->` type($result)
+  }];
+}
+
+// Intentionally do not add Pure or a no-memory-effect interface. The op is an
+// opaque compiler-lifetime barrier even though it emits no hardware memory
+// access; making it trivially dead would reintroduce asynchronous VGPR reuse.
+def UTCWarmupConsumeOp : TT_AMDGPU_Op<"utc_warmup_consume"> {
+  let summary = "Keep an asynchronous UTC warmup destination live";
+  let description = [{
+    Anchors the result of a utc_warmup after the payload computation. It has no
+    memory effect and lowers to a side-effecting empty inline-assembly use. The
+    use keeps the backend-allocated destination VGPR live until this point,
+    preventing an outstanding buffer load from overwriting a reused register.
+  }];
+  let arguments = (ins I32Tensor:$value);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
 }
 
 

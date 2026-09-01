@@ -7,6 +7,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
+#include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/Utility/CommonUtils.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -54,6 +55,15 @@ static bool isPureMatmulLoop(scf::ForOp forOp) {
   return dotCounter == 1 && loadCounter >= 2;
 }
 
+static bool containsUTCWarmupOp(Operation *op) {
+  if (isa<triton::amdgpu::UTCWarmupOp>(op))
+    return true;
+
+  bool found = false;
+  op->walk([&](triton::amdgpu::UTCWarmupOp) { found = true; });
+  return found;
+}
+
 // Search through block to find earliest insertion point for move op. This can
 // be either an atomic op or the defining op of source pointer. Search ends when
 // move op is encountered.
@@ -80,7 +90,8 @@ findEarlyInsertionPoint(Block *block, triton::LoadOp move) {
     // - barriers
     // - loops
     if (isa<triton::AtomicRMWOp, triton::AtomicCASOp, gpu::BarrierOp,
-            scf::ForOp, scf::WhileOp>(op)) {
+            scf::ForOp, scf::WhileOp>(op) ||
+        containsUTCWarmupOp(op)) {
       ipnt = bi;
     }
   }

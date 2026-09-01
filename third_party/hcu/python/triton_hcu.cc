@@ -55,6 +55,7 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
                             bool);
   ADD_PASS_WRAPPER_0("add_prepare_block_pingpong",
                      mlir::createTritonHCUPrepareBlockPingpong);
+  ADD_PASS_WRAPPER_0("add_utc_warmup", mlir::createTritonHCUUTCWarmup);
   m.def("add_block_pingpong", addBlockPingpongPipeline);
   ADD_PASS_WRAPPER_0("add_pack_block_pingpong_bit8",
                      mlir::createTritonHCUPackBlockPingpongBit8);

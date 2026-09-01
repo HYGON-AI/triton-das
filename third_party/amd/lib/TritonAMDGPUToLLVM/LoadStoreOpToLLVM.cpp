@@ -796,6 +796,72 @@ struct BufferLoadOpConversion
   }
 };
 
+struct UTCWarmupOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::UTCWarmupOp> {
+  UTCWarmupOpConversion(LLVMTypeConverter &converter,
+                        const AMD::TargetInfo &targetInfo,
+                        PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
+
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::UTCWarmupOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    SmallVector<Value> offsets =
+        unpackLLElements(loc, adaptor.getOffsets(), rewriter);
+    if (offsets.size() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "UTC warmup requires exactly one dword offset per thread");
+
+    LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
+    Value rsrc = bufferEmitter.createResourceDescriptor(adaptor.getPtr());
+
+    auto *ctx = rewriter.getContext();
+    auto asmDialect = LLVM::AsmDialectAttr::get(ctx, LLVM::AsmDialect::AD_ATT);
+    auto request = LLVM::InlineAsmOp::create(
+        rewriter, loc, rewriter.getI32Type(), ValueRange{offsets.front(), rsrc},
+        "buffer_load_dword $0, $1, $2, 0 offen", "=v,v,s,~{memory}",
+        /*has_side_effects=*/true, /*is_align_stack=*/false,
+        LLVM::TailCallKind::None, asmDialect, ArrayAttr::get(ctx, {}));
+
+    Type resultTy = getTypeConverter()->convertType(op.getResult().getType());
+    Value packed =
+        packLLElements(loc, getTypeConverter(), ValueRange{request.getRes()},
+                       rewriter, resultTy);
+    rewriter.replaceOp(op, packed);
+    return success();
+  }
+
+private:
+  const AMD::TargetInfo &targetInfo;
+};
+
+struct UTCWarmupConsumeOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::UTCWarmupConsumeOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::UTCWarmupConsumeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    SmallVector<Value> values =
+        unpackLLElements(loc, adaptor.getValue(), rewriter);
+    if (values.size() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "UTC warmup consumer requires exactly one dword per thread");
+
+    auto *ctx = rewriter.getContext();
+    auto asmDialect = LLVM::AsmDialectAttr::get(ctx, LLVM::AsmDialect::AD_ATT);
+    LLVM::InlineAsmOp::create(
+        rewriter, loc, TypeRange{}, ValueRange{values.front()}, "", "v",
+        /*has_side_effects=*/true, /*is_align_stack=*/false,
+        LLVM::TailCallKind::None, asmDialect, ArrayAttr::get(ctx, {}));
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct BufferLoadToLocalOpConversion
     : public ConvertOpToLLVMPattern<triton::amdgpu::BufferLoadToLocalOp>,
       public DirectToLdsLoadConversionBase {
@@ -2175,6 +2241,8 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
            AsyncTDMCopyLocalToGlobalOpConversion>(typeConverter, targetInfo,
                                                   axisInfoAnalysis, benefit);
   patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
+  patterns.add<UTCWarmupOpConversion>(typeConverter, targetInfo, benefit);
+  patterns.add<UTCWarmupConsumeOpConversion>(typeConverter, benefit);
   patterns.add<AsyncTDMWaitConversion>(typeConverter, benefit);
   patterns.add<AsyncCommitGroupOpConversion>(typeConverter, benefit);
   patterns.add<AsyncCopyMbarrierArriveOpConversion>(typeConverter, benefit);
