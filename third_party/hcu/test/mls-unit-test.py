@@ -328,21 +328,33 @@ def prune_configs(configs, nargs, **kwargs):
                 return True
 
             # Keep the autotune space consistent with BlockPingpong.cpp's
-            # matcher. Native FP8 MMAC consumes K=32 per instruction, and PP
-            # splits the source dot into two halves, so FP8 requires BK64.
+            # matcher. Bit8 BK128 and Bit16 BK64 asymmetric tiles reuse their
+            # larger operand behind a full-CTA read-before-overwrite barrier
+            # and retain two slots for the smaller operand.
             block_m = _config["BLOCK_SIZE_M"]
             block_n = _config["BLOCK_SIZE_N"]
             block_k = _config["BLOCK_SIZE_K"]
             if bitwidth not in (8, 16):
                 return True
-            if bitwidth == 8 and block_k != 64:
+            if bitwidth == 8 and block_k not in (64, 128):
                 return True
             if (block_m < 128 or block_n < 128
                     or block_m % 128 != 0 or block_n % 128 != 0
                     or block_m * block_n > 256 * 256):
                 return True
-            two_slot_bits = 2 * block_k * (block_m + block_n) * bitwidth
-            if two_slot_bits > 64 * 1024 * 8:
+            asymmetric_single_k = ((bitwidth == 8 and block_k == 128)
+                                   or (bitwidth == 16 and block_k == 64))
+            use_single_a = (asymmetric_single_k and block_m == 256
+                            and block_n == 128)
+            use_single_b = (asymmetric_single_k and block_m == 128
+                            and block_n == 256)
+            if use_single_a:
+                required_lds_bits = block_k * (block_m + 2 * block_n) * bitwidth
+            elif use_single_b:
+                required_lds_bits = block_k * (2 * block_m + block_n) * bitwidth
+            else:
+                required_lds_bits = 2 * block_k * (block_m + block_n) * bitwidth
+            if required_lds_bits > 64 * 1024 * 8:
                 return True
 
         # Determine threshold based on bitwidth
@@ -1185,6 +1197,43 @@ def test_mls_channelwise_scaled_bit8(dtype, use_moe_int8_accumulation, b_layout)
     )
 
 
+@pytest.mark.parametrize("block_m,block_n", [(256, 128), (128, 256)])
+@pytest.mark.parametrize("b_layout", ["col", "row"])
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_mls_bit8_asymmetric_bk128_block_pingpong(
+    block_m, block_n, b_layout, dtype
+):
+    """Cover the single-A and single-B INT8/FP8 BK128 schedules."""
+    if not is_hcu_support_mls():
+        pytest.skip("skip: not support mls")
+
+    K = 512
+    a, b = create_test_matrices(block_m, K, block_n, "row", b_layout, dtype)
+    config = {
+        "BLOCK_SIZE_M": block_m,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "optimize_epilogue": False,
+        "use_block_pingpong": True,
+    }
+    assert run_layout_combination_test(
+        a,
+        b,
+        "row",
+        b_layout,
+        0b11,
+        False,
+        False,
+        case_name=(
+            f"Bit8 asymmetric BK128 {block_m}x{block_n} "
+            f"{dtype} row-{b_layout}"
+        ),
+        config=config,
+    )
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("b_layout", ["col", "row"])
 def test_mls_bit16_block_pingpong(dtype, b_layout):
@@ -1213,6 +1262,47 @@ def test_mls_bit16_block_pingpong(dtype, b_layout):
         False,
         False,
         case_name=f"Bit16 {dtype} row-{b_layout}",
+        config=config,
+        output_dtype=dtype,
+    )
+
+
+@pytest.mark.parametrize("block_m,block_n", [(256, 128), (128, 256)])
+@pytest.mark.parametrize("b_layout", ["col", "row"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mls_bit16_asymmetric_bk64_block_pingpong(
+    block_m, block_n, b_layout, dtype
+):
+    """Cover the single-A and single-B FP16/BF16 BK64 schedules."""
+    if not is_hcu_support_mls():
+        pytest.skip("skip: not support mls")
+
+    K = 256
+    a, b = create_test_matrices(
+        block_m, K, block_n, "row", b_layout, dtype
+    )
+    config = {
+        "BLOCK_SIZE_M": block_m,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "optimize_epilogue": False,
+        "use_block_pingpong": True,
+    }
+    assert run_layout_combination_test(
+        a,
+        b,
+        "row",
+        b_layout,
+        0b11,
+        False,
+        False,
+        case_name=(
+            f"Bit16 asymmetric BK64 {block_m}x{block_n} "
+            f"{dtype} row-{b_layout}"
+        ),
         config=config,
         output_dtype=dtype,
     )
@@ -1677,68 +1767,83 @@ def benchmark_matmul_mls(M, N, K, matrix_load_mode, fp8_inputs, a_layout, b_layo
 # Final BlockPingpong snapshot (2026-08-19,
 # TRITON_BUFFER_CACHE_SWIZZLE=1). Bit16 is TFLOPS; channel-wise scale GEMM is
 # TOPS. REF/MLS are historical reference columns; BMZ does not support FP8.
+# UTC columns were retested on 2026-09-02 with utc_warmup=True; each value is
+# the mean of five do_bench medians. pre nonPP uses the best nonPP config and
+# BPP uses the best PP config recorded in 0819-block_pingpong_performance_summary.md.
+# Only rows where at least one selected config covers two complete 2 MiB pages
+# are populated. A value marked † was measured with utc_warmup=True, but that
+# particular config is below the page threshold, so its runtime request is a no-op.
 #
 # Bit16 GEMM
-# | Machine | Type | Layout  | MxNxK          | REF     | MLS     | pre nonPP | post nonPP | tip PP  | post/pre | PP/post |
-# |---------|------|---------|----------------|---------|---------|-----------|------------|---------|----------|---------|
-# | NMZ | FP16 | row-col | 4096^3         | 270.890 | 216.644 | 209.204 | 209.204 | 246.870 |  +0.00% | +18.00% |
-# | NMZ | FP16 | row-col | 5120^3         | 265.211 | 200.841 | 208.542 | 208.542 | 260.553 |  +0.00% | +24.94% |
-# | NMZ | FP16 | row-col | 8192^3         | 280.225 | 171.046 | 204.754 | 204.754 | 275.738 |  +0.00% | +34.67% |
-# | NMZ | FP16 | row-col | 16384^3        | 218.951 | 155.281 | 191.312 | 191.312 | 193.120 |  +0.00% |  +0.95% |
-# | NMZ | FP16 | row-row | 4096^3         | 295.390 | 230.417 | 193.032 | 213.440 | 233.110 | +10.57% |  +9.22% |
-# | NMZ | FP16 | row-row | 5120^3         | 314.239 | 257.774 | 199.741 | 228.693 | 247.337 | +14.49% |  +8.15% |
-# | NMZ | FP16 | row-row | 8192^3         | 245.963 | 277.699 | 201.914 | 226.188 | 262.267 | +12.02% | +15.95% |
-# | NMZ | FP16 | row-row | 16384^3        | 218.800 | 221.737 | 206.809 | 229.864 | 280.397 | +11.15% | +21.98% |
-# | NMZ | FP16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 244.581 |        - |        - |
-# | NMZ | BF16 | row-col | 4096x4096x4064 |       - |       - | 211.146 | 211.175 | 242.525 |  +0.01% | +14.85% |
-# | NMZ | FP16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 232.629 |        - |        - |
-# | NMZ | BF16 | row-row | 4096x4096x4064 |       - |       - | 184.875 | 212.888 | 230.357 | +15.15% |  +8.21% |
-# | BMZ | FP16 | row-col | 4096^3         | 322.930 |       - | 221.262 | 221.253 | 277.426 |  -0.00% | +25.39% |
-# | BMZ | FP16 | row-col | 5120^3         | 371.383 |       - | 271.305 | 271.275 | 328.345 |  -0.01% | +21.04% |
-# | BMZ | FP16 | row-col | 8192^3         | 381.404 |       - | 275.800 | 275.734 | 357.098 |  -0.02% | +29.51% |
-# | BMZ | FP16 | row-col | 16384^3        | 298.484 |       - | 279.571 | 277.670 | 202.853 |  -0.68% | -26.94% |
-# | BMZ | FP16 | row-row | 4096^3         | 341.684 |       - | 207.576 | 233.544 | 263.963 | +12.51% | +13.02% |
-# | BMZ | FP16 | row-row | 5120^3         | 415.999 |       - | 239.373 | 274.894 | 332.706 | +14.84% | +21.03% |
-# | BMZ | FP16 | row-row | 8192^3         | 325.376 |       - | 242.479 | 290.825 | 346.620 | +19.94% | +19.19% |
-# | BMZ | FP16 | row-row | 16384^3        | 275.414 |       - | 250.327 | 277.965 | 346.883 | +11.04% | +24.79% |
-# | BMZ | FP16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 265.146 |        - |        - |
-# | BMZ | BF16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 260.888 |        - |        - |
-# | BMZ | FP16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 260.519 |        - |        - |
-# | BMZ | BF16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 255.459 |        - |        - |
+# | Machine | Type | Layout  | MxNxK          | REF     | MLS     | pre nonPP | post nonPP | tip PP  | pre nonPP+UTC | BPP+UTC | post/pre | PP/post |
+# |---------|------|---------|----------------|---------|---------|-----------|------------|---------|---------------|---------|----------|---------|
+# | NMZ | FP16 | row-col | 4096^3         | 270.890 | 216.644 | 209.204 | 209.204 | 246.870 |       - |       - |  +0.00% | +18.00% |
+# | NMZ | FP16 | row-col | 5120^3         | 265.211 | 200.841 | 208.542 | 208.542 | 260.553 | 211.220 | 262.357† |  +0.00% | +24.94% |
+# | NMZ | FP16 | row-col | 8192^3         | 280.225 | 171.046 | 204.754 | 204.754 | 275.738 | 203.609 | 274.343 |  +0.00% | +34.67% |
+# | NMZ | FP16 | row-col | 16384^3        | 218.951 | 155.281 | 191.312 | 191.312 | 193.120 | 184.392 | 284.439 |  +0.00% |  +0.95% |
+# | NMZ | FP16 | row-row | 4096^3         | 295.390 | 230.417 | 193.032 | 213.440 | 233.110 | 215.050 | 232.878† | +10.57% |  +9.22% |
+# | NMZ | FP16 | row-row | 5120^3         | 314.239 | 257.774 | 199.741 | 228.693 | 247.337 | 228.044 | 248.213† | +14.49% |  +8.15% |
+# | NMZ | FP16 | row-row | 8192^3         | 245.963 | 277.699 | 201.914 | 226.188 | 262.267 | 226.133 | 259.694 | +12.02% | +15.95% |
+# | NMZ | FP16 | row-row | 16384^3        | 218.800 | 221.737 | 206.809 | 229.864 | 280.397 | 229.712 | 278.127 | +11.15% | +21.98% |
+# | NMZ | FP16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 244.581 |       - |       - |        - |        - |
+# | NMZ | BF16 | row-col | 4096x4096x4064 |       - |       - | 211.146 | 211.175 | 242.525 |       - |       - |  +0.01% | +14.85% |
+# | NMZ | FP16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 232.629 |       - |       - |        - |        - |
+# | NMZ | BF16 | row-row | 4096x4096x4064 |       - |       - | 184.875 | 212.888 | 230.357 |       - |       - | +15.15% |  +8.21% |
+# | BMZ | FP16 | row-col | 4096^3         | 322.930 |       - | 221.262 | 221.253 | 277.426 | 221.117 | 277.453† |  -0.00% | +25.39% |
+# | BMZ | FP16 | row-col | 5120^3         | 371.383 |       - | 271.305 | 271.275 | 328.345 |       - |       - |  -0.01% | +21.04% |
+# | BMZ | FP16 | row-col | 8192^3         | 381.404 |       - | 275.800 | 275.734 | 357.098 | 275.329 | 358.910 |  -0.02% | +29.51% |
+# | BMZ | FP16 | row-col | 16384^3        | 298.484 |       - | 279.571 | 277.670 | 202.853 | 266.726 | 284.017 |  -0.68% | -26.94% |
+# | BMZ | FP16 | row-row | 4096^3         | 341.684 |       - | 207.576 | 233.544 | 263.963 |       - |       - | +12.51% | +13.02% |
+# | BMZ | FP16 | row-row | 5120^3         | 415.999 |       - | 239.373 | 274.894 | 332.706 |       - |       - | +14.84% | +21.03% |
+# | BMZ | FP16 | row-row | 8192^3         | 325.376 |       - | 242.479 | 290.825 | 346.620 | 291.018 | 346.819 | +19.94% | +19.19% |
+# | BMZ | FP16 | row-row | 16384^3        | 275.414 |       - | 250.327 | 277.965 | 346.883 | 278.335 | 347.974 | +11.04% | +24.79% |
+# | BMZ | FP16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 265.146 |       - |       - |        - |        - |
+# | BMZ | BF16 | row-col | 4096x4096x4064 |       - |       - |       - |       - | 260.888 |       - |       - |        - |        - |
+# | BMZ | FP16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 260.519 |       - |       - |        - |        - |
+# | BMZ | BF16 | row-row | 4096x4096x4064 |       - |       - |       - |       - | 255.459 |       - |       - |        - |        - |
 #
 # Channel-wise scale GEMM (A scale [M], B scale [N], FP16 output, BK=64)
-# | Machine | Type | Layout  | MxNxK          | pre nonPP | post/current nonPP | tip PP  | post/pre | PP/post |
-# |---------|------|---------|----------------|-----------|--------------------|---------|----------|---------|
-# | NMZ | FP8  | row-col | 4096^3         | 405.686 | 405.725 | 448.945 |  +0.01% | +10.65% |
-# | NMZ | FP8  | row-col | 5120^3         | 417.604 | 417.747 | 485.424 |  +0.03% | +16.20% |
-# | NMZ | FP8  | row-col | 8192^3         | 436.989 | 437.032 | 539.615 |  +0.01% | +23.47% |
-# | NMZ | FP8  | row-col | 16384^3        | 477.404 | 477.600 | 405.250 |  +0.04% | -15.15% |
-# | NMZ | FP8  | row-row | 4096^3         | 346.346 | 395.568 | 439.220 | +14.21% | +11.04% |
-# | NMZ | FP8  | row-row | 5120^3         | 373.201 | 427.356 | 480.788 | +14.51% | +12.50% |
-# | NMZ | FP8  | row-row | 8192^3         | 393.103 | 432.161 | 530.075 |  +9.94% | +22.66% |
-# | NMZ | FP8  | row-row | 16384^3        | 411.009 | 491.909 | 588.840 | +19.68% | +19.71% |
-# | NMZ | FP8  | row-col | 4096x4096x4064 | 378.337 | 378.342 | 347.262 |  +0.00% |  -8.21% |
-# | NMZ | FP8  | row-row | 4096x4096x4064 | 332.410 | 368.291 | 414.914 | +10.79% | +12.66% |
-# | NMZ | INT8 | row-col | 4096^3         | 403.381 | 402.641 | 443.487 |  -0.18% | +10.14% |
-# | NMZ | INT8 | row-col | 5120^3         | 414.784 | 414.801 | 482.164 |  +0.00% | +16.24% |
-# | NMZ | INT8 | row-col | 8192^3         | 435.252 | 435.206 | 536.498 |  -0.01% | +23.27% |
-# | NMZ | INT8 | row-col | 16384^3        | 476.294 | 476.294 | 406.657 |  +0.00% | -14.62% |
-# | NMZ | INT8 | row-row | 4096^3         | 344.243 | 391.968 | 437.183 | +13.86% | +11.54% |
-# | NMZ | INT8 | row-row | 5120^3         | 370.996 | 424.277 | 477.862 | +14.36% | +12.63% |
-# | NMZ | INT8 | row-row | 8192^3         | 391.503 | 430.102 | 527.157 |  +9.86% | +22.57% |
-# | NMZ | INT8 | row-row | 16384^3        | 409.738 | 490.606 | 588.186 | +19.74% | +19.89% |
-# | NMZ | INT8 | row-col | 4096x4096x4064 | 375.027 | 374.970 | 344.830 |  -0.02% |  -8.04% |
-# | NMZ | INT8 | row-row | 4096x4096x4064 | 329.790 | 365.209 | 411.086 | +10.74% | +12.56% |
-# | BMZ | INT8 | row-col | 4096^3         |       - | 349.175 | 479.981 |        - | +37.46% |
-# | BMZ | INT8 | row-col | 5120^3         |       - | 393.548 | 523.494 |        - | +33.02% |
-# | BMZ | INT8 | row-col | 8192^3         |       - | 469.472 | 667.789 |        - | +42.24% |
-# | BMZ | INT8 | row-col | 16384^3        |       - | 546.512 | 488.961 |        - | -10.53% |
-# | BMZ | INT8 | row-row | 4096^3         |       - | 427.134 | 474.193 |        - | +11.02% |
-# | BMZ | INT8 | row-row | 5120^3         |       - | 473.501 | 573.054 |        - | +21.02% |
-# | BMZ | INT8 | row-row | 8192^3         |       - | 540.676 | 663.887 |        - | +22.79% |
-# | BMZ | INT8 | row-row | 16384^3        |       - | 556.117 | 640.992 |        - | +15.26% |
-# | BMZ | INT8 | row-col | 4096x4096x4064 |       - | 337.369 | 365.678 |        - |  +8.39% |
-# | BMZ | INT8 | row-row | 4096x4096x4064 |       - | 392.356 | 399.880 |        - |  +1.92% |
+# | Machine | Type | Layout  | MxNxK          | pre nonPP | post/current nonPP | tip PP  | pre nonPP+UTC | BPP+UTC | post/pre | PP/post |
+# |---------|------|---------|----------------|-----------|--------------------|---------|---------------|---------|----------|---------|
+# | NMZ | FP8  | row-col | 4096^3         | 405.686 | 405.725 | 448.945 |       - |       - |  +0.01% | +10.65% |
+# | NMZ | FP8  | row-col | 5120^3         | 417.604 | 417.747 | 485.424 |       - |       - |  +0.03% | +16.20% |
+# | NMZ | FP8  | row-col | 8192^3         | 436.989 | 437.032 | 539.615 |       - |       - |  +0.01% | +23.47% |
+# | NMZ | FP8  | row-col | 16384^3        | 477.404 | 477.600 | 405.250 | 479.911 | 415.728 |  +0.04% | -15.15% |
+# | NMZ | FP8  | row-row | 4096^3         | 346.346 | 395.568 | 439.220 |       - |       - | +14.21% | +11.04% |
+# | NMZ | FP8  | row-row | 5120^3         | 373.201 | 427.356 | 480.788 |       - |       - | +14.51% | +12.50% |
+# | NMZ | FP8  | row-row | 8192^3         | 393.103 | 432.161 | 530.075 | 431.011 | 529.814† |  +9.94% | +22.66% |
+# | NMZ | FP8  | row-row | 16384^3        | 411.009 | 491.909 | 588.840 | 495.811 | 551.779 | +19.68% | +19.71% |
+# | NMZ | FP8  | row-col | 4096x4096x4064 | 378.337 | 378.342 | 347.262 |       - |       - |  +0.00% |  -8.21% |
+# | NMZ | FP8  | row-row | 4096x4096x4064 | 332.410 | 368.291 | 414.914 |       - |       - | +10.79% | +12.66% |
+# | NMZ | INT8 | row-col | 4096^3         | 403.381 | 402.641 | 443.487 |       - |       - |  -0.18% | +10.14% |
+# | NMZ | INT8 | row-col | 5120^3         | 414.784 | 414.801 | 482.164 |       - |       - |  +0.00% | +16.24% |
+# | NMZ | INT8 | row-col | 8192^3         | 435.252 | 435.206 | 536.498 |       - |       - |  -0.01% | +23.27% |
+# | NMZ | INT8 | row-col | 16384^3        | 476.294 | 476.294 | 406.657 | 478.715 | 411.955 |  +0.00% | -14.62% |
+# | NMZ | INT8 | row-row | 4096^3         | 344.243 | 391.968 | 437.183 |       - |       - | +13.86% | +11.54% |
+# | NMZ | INT8 | row-row | 5120^3         | 370.996 | 424.277 | 477.862 |       - |       - | +14.36% | +12.63% |
+# | NMZ | INT8 | row-row | 8192^3         | 391.503 | 430.102 | 527.157 | 428.870 | 526.958† |  +9.86% | +22.57% |
+# | NMZ | INT8 | row-row | 16384^3        | 409.738 | 490.606 | 588.186 | 494.472 | 552.677 | +19.74% | +19.89% |
+# | NMZ | INT8 | row-col | 4096x4096x4064 | 375.027 | 374.970 | 344.830 |       - |       - |  -0.02% |  -8.04% |
+# | NMZ | INT8 | row-row | 4096x4096x4064 | 329.790 | 365.209 | 411.086 |       - |       - | +10.74% | +12.56% |
+# | BMZ | INT8 | row-col | 4096^3         |       - | 349.175 | 479.981 |       - |       - |        - | +37.46% |
+# | BMZ | INT8 | row-col | 5120^3         |       - | 393.548 | 523.494 |       - |       - |        - | +33.02% |
+# | BMZ | INT8 | row-col | 8192^3         |       - | 469.472 | 667.789 | 469.492 | 668.217† |        - | +42.24% |
+# | BMZ | INT8 | row-col | 16384^3        |       - | 546.512 | 488.961 | 552.412 | 488.425 |        - | -10.53% |
+# | BMZ | INT8 | row-row | 4096^3         |       - | 427.134 | 474.193 |       - |       - |        - | +11.02% |
+# | BMZ | INT8 | row-row | 5120^3         |       - | 473.501 | 573.054 |       - |       - |        - | +21.02% |
+# | BMZ | INT8 | row-row | 8192^3         |       - | 540.676 | 663.887 |       - |       - |        - | +22.79% |
+# | BMZ | INT8 | row-row | 16384^3        |       - | 556.117 | 640.992 | 555.688 | 706.228 |        - | +15.26% |
+# | BMZ | INT8 | row-col | 4096x4096x4064 |       - | 337.369 | 365.678 |       - |       - |        - |  +8.39% |
+# | BMZ | INT8 | row-row | 4096x4096x4064 |       - | 392.356 | 399.880 |       - |       - |        - |  +1.92% |
+#
+# 8-bit row-col 16384^3 UTC-on BPP candidates. These use the same channel-wise
+# scale path above; only measured M256_N256 cases are listed. The 0819 config
+# was autotuned with UTC disabled, whereas M256_N256 warms both A and B.
+# | Machine | Type | 0819 BPP config + UTC | M256_N256_K64_G4_w8_s2 + UTC | Change |
+# |---------|------|------------------------|--------------------------------|--------|
+# | NMZ | FP8  | 415.728 TOPS (M256_N128, A only) | 597.038 TOPS (A+B) | +43.61% |
+# | NMZ | INT8 | 411.955 TOPS (M128_N256, B only) | 595.314 TOPS (A+B) | +44.51% |
+# | BMZ | INT8 | 488.425 TOPS (M256_N128, A only) | 708.635 TOPS (A+B) | +45.09% |
 #
 # Safe-review recheck on NMZ (2026-08-19): BF16 row-col 4096x4096x4064
 # M256_N256_K32_G4_w8_s2 = 241.950 TFLOPS, 203 VGPR, 0 spill; INT8

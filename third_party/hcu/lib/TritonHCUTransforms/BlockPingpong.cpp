@@ -90,11 +90,14 @@ namespace {
 // expose fixed slot1/slot0 parity.
 //
 // Finalize consumes that static parity.  It replaces each combined [2, ...]
-// allocation with independent slot0/slot1 allocations, allowing Allocation and
-// Membar analysis to prove that current-slot reads do not alias next-slot
-// writes. Prepare and BlockPingpong leave unmatched loops alone.  Once
-// BlockPingpong marks a main loop as applied, however, Finalize treats
-// static-buffer materialization as required: silently retaining an aliased [2,
+// allocation with explicit physical slot allocations, allowing Allocation and
+// Membar analysis to reason about current-slot reads and next-slot writes.
+// Normal operands receive independent slot0/slot1 allocations; a proven
+// single-buffer operand maps both generations to one allocation and carries
+// explicit local barriers on both sides of its overwrite. Prepare and
+// BlockPingpong leave unmatched loops alone.  Once BlockPingpong marks a main
+// loop as applied, however, Finalize treats static-buffer materialization as
+// required: silently retaining an aliased [2,
 // ...] buffer would invalidate the performance contract with Membar analysis.
 //
 // This file deliberately does not implement MLS or direct-to-LDS async copy.
@@ -102,7 +105,8 @@ namespace {
 //
 //   BM/BN >= 128, 128-aligned, legal BK half-tiles,
 //   8 waves, num_stages=3
-//   three functional levels + two LDS buffers + two/four PP phases + 2K unroll
+//   three functional levels + two logical LDS generations + two/four PP phases
+//   + 2K unroll
 //
 // The pipeline-stage count, LDS-buffer count, PP-phase count, and unroll factor
 // describe independent concepts.  The three stages perform global load,
@@ -111,18 +115,75 @@ namespace {
 // the loop-carried VGPR live range.  num_stages=3 still uses only two LDS
 // buffers.  One generation is A(BM x BK) + B(BK x BN).  The 16-bit family
 // (FP16/BF16) uses its existing legal BK values; the 8-bit family (FP8/i8/u8)
-// uses BK64 so each BK/2 phase contains a complete 8-bit MMAC K tile.  The
-// matcher proves that two such generations fit the 64 KiB HCU LDS budget
-// before selecting this schedule.  Initial legality is independent of concrete
-// accumulator and epilogue op names: FP16/BF16, FP8/i8/u8, channel-wise
-// scaling, bias, activation, and MoE routing may share this schedule when they
-// lower to one regular dot per BK and only the A/B tiles enter LDS.  The phase
+// normally uses BK64 so each BK/2 phase contains a complete 8-bit MMAC K tile.
+// BM128 x BN128 x BK128 retains both A/B rings and uses the split four-phase
+// path for a directly yielded dot; the asymmetric BK128 extensions reuse their
+// larger operand physically and load that complete operand before its
+// overwrite barrier.  The same physical geometry applies to the asymmetric
+// Bit16 BK64 tiles. Bit8 BK128 additionally requires a K-divisible main loop;
+// its one-shot masked-tail form falls back to the ordinary pipeline. All of
+// these extended layouts use 64 KiB. The
+// matcher proves that the final physical allocation contract fits the HCU LDS
+// budget before selecting either schedule.  Initial legality is independent of
+// concrete accumulator and epilogue op names: FP16/BF16, FP8/i8/u8,
+// channel-wise scaling, bias, activation, and MoE routing may share this
+// schedule when they lower to one regular dot per BK and only the A/B tiles
+// enter LDS.  The phase
 // selector later follows the unique dot-dependent loop yield to distinguish a
 // direct accumulator from a separate post-dot update.  Auxiliary loop loads
 // (for example one scale shared by the complete BK tile) may remain in the
 // ordinary register pipeline.  Multiple dots per BK, operand dequantization
 // before the dot, and tt.dot_scaled need their own slicing contract and are
 // conservatively left unchanged.
+//
+// "BPP8" in tuning results means this required 8-wave schedule; it must not be
+// confused with "Bit8", which describes FP8/i8/u8 operand storage.  The
+// measured 8-wave tile families intentionally have different LDS contracts:
+//
+//   BM256 x BN256 x BK32 Bit16 / BK64 Bit8
+//     The original square family.  A and B both keep two physical slots, using
+//     64 KiB LDS.
+//
+//   BM128 x BN256 or BM256 x BN128, BK32 Bit16 / BK64 Bit8
+//     Asymmetric output tiles in the same original family.  A and B still keep
+//     two physical slots; the LDS footprint falls to 48 KiB.  These tiles are
+//     separate autotune candidates, not aliases for the square schedule.
+//
+//   BM256 x BN128 x BK128 Bit8
+//     The measured MoE extension.  Its two complete A+B generations would use
+//     96 KiB, so Finalize maps both logical A generations to one 32 KiB
+//     physical allocation while retaining two 16 KiB B allocations.  Like
+//     the transposed single-B path, M0 reads the complete physical-single
+//     operand and D0 ends at a full-CTA local barrier before M1 may overwrite
+//     it.  Safety therefore follows from read-before-overwrite synchronization
+//     and does not depend on a particular MMAC layout enumeration.
+//
+//   BM128 x BN128 x BK128 Bit8
+//     A and B each retain two physical 16 KiB slots, using exactly 64 KiB.
+//     Its directly yielded dot uses the common split-BK four-phase topology.
+//     No overwrite barrier is needed because current and next generations
+//     never share a physical slot.
+//
+//   BM128 x BN256 x BK128 Bit8
+//     The mirrored MoE extension.  Two A slots plus two B slots would use
+//     96 KiB, so Finalize retains two 16 KiB A allocations and maps both
+//     logical B generations to one 32 KiB physical allocation.  Both phase
+//     groups consume the complete B tile; full-CTA local barriers therefore
+//     retire every old-B read before either group starts overwriting B.  The
+//     next generation is published only after both groups have contributed
+//     their producer slices.
+//
+//   BM256 x BN128 or BM128 x BN256, BK64 Bit16
+//     These have the same 32 KiB/16 KiB physical operand geometry and use the
+//     same single-A/single-B ownership and synchronization contracts as the
+//     corresponding Bit8 BK128 tiles.
+//
+// Row-row inputs are accepted only when Pipeline exposes the same unique A/B
+// chains, vectorization, physical-buffer ownership, and barrier contract; an
+// unmatched spelling is left on the ordinary pipeline.  Autotune must therefore
+// compare square, asymmetric, BPP, and non-BPP configurations; enabling BPP
+// never asserts that one tile is profitable for every GEMM or scale-GEMM
+// shape.
 //
 // The schedule relies on the following HCU issue rules:
 //
@@ -165,17 +226,18 @@ namespace {
 //
 // A Bit8 reduction uses a two-phase whole-BK variant when the dot has a
 // separate register-only accumulator update before the loop yield.  Splitting
-// that dot across four phases adds rendezvous without splitting the update,
+// such a dot across four phases adds rendezvous without splitting the update,
 // while leaving INT32 to FP32 accumulation or block-scale multiplication in
 // the following memory phase makes that high-priority wave starve its MMAC
-// peer:
+// peer.  BK128 also benefits from amortizing the rendezvous over twice as much
+// K work:
 //
 //   M [read full A+B, issue future A+B, store next A+B] ->
-//   D [full BK64 dot, register-only accumulator update]
+//   D [full BK64/BK128 dot, optional register-only accumulator update]
 //
 // A direct-FP32 accumulator, such as channel-wise FP8, retains the common
-// four-phase schedule because it has no post-dot update and benefits from the
-// finer-grained overlap.
+// four-phase schedule at BK64 because it has no post-dot update and benefits
+// from the finer-grained overlap.
 //
 // Bit16 and Bit8 deliberately use different phase builders.  Their first-level
 // selection uses only input storage width: Bit16 includes FP16/BF16; Bit8
@@ -204,15 +266,89 @@ namespace {
 //         store A(k+1)]                                 -> D0 [dot0]
 //     M1 [read A1, store B(k+1)]                        -> D1 [dot1]
 //
+//   BM128 x BN128 x BK128 double-A/double-B physical ring:
+//     p = current generation parity; p^1 = next generation parity
+//
+//     M0(k) [read B[p].lo+A[p].lo, issue A+B(k+2), read B[p].hi]
+//       -- control barrier --> D0(k) [BK64 dot.lo,
+//                                    store A(k+1) -> A[p^1]]
+//       -- control barrier -->
+//     M1(k) [read A[p].hi, store B(k+1) -> B[p^1]]
+//       -- full barrier: publish the complete p^1 generation -->
+//     D1(k) [BK64 dot.hi]
+//       -- control barrier --> M0(k+1)
+//
+//     time       WaveHigh                         WaveLow
+//     -----------------------------------------------------------------------
+//     P0         D0(k)                            M0(k)
+//     P1         M1(k)                            D0(k)
+//     P2         D1(k)                            M1(k)
+//     P3         M0(k+1)                          D1(k)
+//
+//     storeA may move into D0 only because dot.lo has consumed A[p].lo and
+//     A[p^1] is a disjoint allocation; the full barrier remains after storeB
+//     in M1 and collectively publishes both operands.  The D1 control barrier
+//     is also a data boundary, not optional overhead.  It
+//     prevents WaveHigh's M0(k+1) from reading p^1 while WaveLow is still in
+//     M1(k) writing its slices of that same generation.  Two physical slots
+//     prevent old/new aliasing but do not publish a collectively written tile.
+//
+// Four-phase Bit8 BM256 x BN128 x BK128 single-A/double-B map:
+//
+//   M0(k) [read A.lo+B.lo+A.hi, issue A(k+1)]
+//     -- full-CTA local barrier after D0/M0 rendezvous -->
+//   D0(k) [issue B(k+1), BK64 dot.lo]
+//   M1(k) [read B.hi, store B(k+1) -> B[p^1],
+//          store A(k+1) -> A, full barrier]
+//   D1(k) [BK64 dot.hi]
+//
+//   time       WaveHigh                         WaveLow
+//   -----------------------------------------------------------------------
+//   start      M0(K0)                           entry CondBarrier
+//   P0         D0(K0)                           M0(K0)
+//   P1         M1(K0)                           D0(K0)
+//   P2         D1(K0)                           M1(K0)
+//   P3         M0(K1)                           D1(K0)
+//
+// A has two logical generations but one physical allocation.  Both A halves
+// are loaded in M0, and the D0/M0 dynamic rendezvous is represented by a
+// LocalBarrier.  Therefore every wave has retired every old-A LDS read before
+// any wave enters M1 and overwrites A.  B[p] and B[p^1] are distinct physical
+// allocations.  No producer/consumer row-ownership coincidence, and no
+// LEGACY-versus-INTERLEAVE MMAC layout distinction, is part of this safety
+// proof.
+//
+// Four-phase Bit8 BM128 x BN256 x BK128 double-A/single-B map:
+//
+//   M0(k) [read B.lo+A.lo+B.hi, issue B(k+1)]
+//     -- control barrier after D0/M0 rendezvous -->
+//   D0(k) [issue A(k+1), BK64 dot.lo]
+//   M1(k) [store A(k+1) -> A[p^1], WaveLow stores its B(k+1) slices,
+//          read A.hi, full barrier]
+//   D1(k) [BK64 dot.hi, WaveHigh stores its B(k+1) slices,
+//          full-CTA local barrier]
+//
+// Single-B shares the same read-before-overwrite contract but reaches it at a
+// later dynamic boundary.  Its store is split between WaveLow M1 and WaveHigh
+// D1; neither group can reach a B store before crossing D0's LocalBarrier.
+// Thus M0 keeps a control-only rendezvous, while D0 retires every old-B read
+// before P2 can overwrite B.  The D1/M1 LocalBarrier then publishes the
+// complete collectively written B generation before the next M0 may read it.
+//
 // The four-phase Bit8 generic and panel variants remain inside one Bit8 path;
 // only the panel-sensitive placement of loads/stores differs.  Reading B1
-// before D0 covers its LDS latency with dot0.  Generic B stores A+B together in
-// M1, whereas panel B overlaps the A1 read with the later B store.
+// before D0 covers its LDS latency with dot0.  Generic B normally stores A+B
+// together in M1; the measured 128x128x128 double-ring candidate moves only
+// storeA after dot0, while panel B overlaps the A1 read with the later B store.
 //
-// M0 ends with a control-only rendezvous.  M1 completes A+B(k+1) and uses the
-// only full-memory barrier to publish the next LDS generation.  Representing
-// D0/D1/M0 with gpu.barrier would invite MembarAnalysis to drain outstanding
-// VMEM/DS work at every phase and destroy overlap.
+// M0 normally ends with a control-only rendezvous.  Single-A is the exception:
+// its following peer M1 overwrites A immediately, so M0 must use LocalBarrier.
+// Single-B delays every overwrite until both groups have crossed D0's
+// LocalBarrier and therefore keeps M0 control-only.  M1 completes A+B(k+1)
+// and uses the full gpu.barrier to publish the next LDS generation.  Other
+// phase boundaries stay control-only unless they protect a physical-single
+// overwrite; unnecessarily representing them as gpu.barrier would make
+// MembarAnalysis drain unrelated VMEM/DS work.
 //
 // Late unroll=2 copies the selected two- or four-phase body.  It means
 // 2*BLOCK_SIZE_K (step=64 for BK=32), never a shape-specific 1024 constant.
@@ -223,8 +359,8 @@ constexpr StringLiteral kCandidateAttr =
 constexpr StringLiteral kAppliedAttr = "hcu.block_pingpong.applied";
 constexpr StringLiteral kStaticBuffersAttr =
     "hcu.block_pingpong.static_buffers";
-constexpr StringLiteral kPingpongBufferAttr =
-    "hcu.block_pingpong.lds_buffer";
+constexpr StringLiteral kPingpongBufferAttr = "hcu.block_pingpong.lds_buffer";
+constexpr StringLiteral kSingleBufferAttr = "hcu.block_pingpong.single_buffer";
 constexpr StringLiteral kMaskedTailAttr = "hcu.block_pingpong.masked_tail";
 constexpr StringLiteral kMaskedTailSlicedAttr =
     "hcu.block_pingpong.masked_tail_sliced";
@@ -254,6 +390,8 @@ constexpr int64_t kMaximumAccumulatorBlockMN = 256;
 constexpr int64_t kMaximumAccumulatorElements =
     kMaximumAccumulatorBlockMN * kMaximumAccumulatorBlockMN;
 constexpr int64_t kRequiredBit8BlockK = 64;
+constexpr int64_t kExtendedBit8BlockK = 128;
+constexpr int64_t kAsymmetricBit16BlockK = 64;
 constexpr int64_t kMaximumLDSBytes = 64 * 1024;
 constexpr unsigned kBitsPerByte = 8;
 constexpr unsigned kBit8Width = 8;
@@ -318,6 +456,32 @@ struct BlockTile {
   int64_t k;
 };
 
+// The asymmetric single-buffer schedules operate on the same 32 KiB/16 KiB
+// operand geometry for Bit8 BK128 and Bit16 BK64.  Keep the element width in
+// this contract so no other K shape can inherit the overwrite barriers merely
+// because its M/N tile matches.
+bool hasAsymmetricSingleBufferK(int64_t blockK, unsigned storageBitWidth) {
+  return (storageBitWidth == kBit8Width && blockK == kExtendedBit8BlockK) ||
+         (storageBitWidth == kBit16Width && blockK == kAsymmetricBit16BlockK);
+}
+
+// The 256x128 path aliases the larger A operand and keeps two B generations.
+bool usesSingleABuffer(int64_t blockM, int64_t blockN, int64_t blockK,
+                       unsigned storageBitWidth) {
+  return blockM == 256 && blockN == 128 &&
+         hasAsymmetricSingleBufferK(blockK, storageBitWidth);
+}
+
+// The transposed 128x256 path keeps A as an ordinary two-slot ring and aliases
+// B's two logical generations. Both asymmetric paths use a full-CTA local
+// barrier to retire every read of their complete old aliased operand before
+// either group starts overwriting it.
+bool usesSingleBBuffer(int64_t blockM, int64_t blockN, int64_t blockK,
+                       unsigned storageBitWidth) {
+  return blockM == 128 && blockN == 256 &&
+         hasAsymmetricSingleBufferK(blockK, storageBitWidth);
+}
+
 // Find the unique source tt.load feeding one dot operand.  Walking the actual
 // def-use chain avoids guessing A/B from the number or order of loads in the K
 // loop, and remains unambiguous when two logical operand tiles have the same
@@ -373,7 +537,7 @@ bool hasUnsupportedSourceSideEffects(scf::ForOp loop) {
 // Recover the logical GEMM tile [BM, BK] x [BK, BN] -> [BM, BN] from the dot
 // and return {BM, BN, BK}.  Besides basic rank/shape consistency, this helper
 // validates the measured M/N workload, MFMA-compatible BK/2 halves, operand
-// types/encodings, and the 64 KiB budget for two complete LDS generations.
+// types/encodings, and the 64 KiB budget for the selected physical LDS scheme.
 FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
   auto resultType = dyn_cast<RankedTensorType>(dot.getType());
   auto aType = dyn_cast<RankedTensorType>(dot.getA().getType());
@@ -402,14 +566,24 @@ FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
       getStorageBitWidth(aType) != getStorageBitWidth(bType))
     return failure();
 
-  // HCU's native 8-bit MMAC consumes K=32 per instruction.  BlockPingpong
-  // splits one source dot into two BK/2 phases, so all 8-bit inputs (FP8,
-  // signed i8, and unsigned i8) must use BK64.  Keep this constraint based on
-  // storage width rather than enumerating element types so every byte-valued
-  // dot follows the same legality contract.
-  if (hasElementBitWidth(aType.getElementType(), kBit8Width) &&
-      blockK != kRequiredBit8BlockK)
+  // HCU's native 8-bit MMAC consumes K=32 per instruction.  BK64 uses the
+  // normal two-generation A+B ring. BK128 uses that ring for 128x128, and the
+  // proved single-A/single-B contract for the two asymmetric shapes. Each
+  // BK128 dot contains four native MMAC K steps, with phase selection handled
+  // below.
+  bool isBit8 = hasElementBitWidth(aType.getElementType(), kBit8Width);
+  if (isBit8 && blockK != kRequiredBit8BlockK && blockK != kExtendedBit8BlockK)
     return failure();
+  if (isBit8 && blockK == kExtendedBit8BlockK) {
+    // The measured BK128 family carries the dot result directly.  Do not also
+    // admit a post-dot reduction shape at this larger K until its live ranges
+    // and whole-tile schedule have independent coverage.
+    auto loop = dot->getParentOfType<scf::ForOp>();
+    auto yield = loop ? dyn_cast<scf::YieldOp>(loop.getBody()->getTerminator())
+                      : nullptr;
+    if (!yield || !llvm::is_contained(yield.getOperands(), dot.getResult()))
+      return failure();
+  }
 
   auto aEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(aType.getEncoding());
   auto bEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(bType.getEncoding());
@@ -435,15 +609,20 @@ FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
       halfK % aInstrShape[1] != 0 || halfK % bInstrShape[0] != 0)
     return failure();
 
-  // Two independent LDS generations are required.  An 8-bit BK64 tile has the
-  // same LDS footprint as a 16-bit BK32 tile.  A 128x128 Bit16 BK64 tile also
-  // fits exactly in the 64 KiB limit; keep the budget check authoritative for
-  // every legal M/N/K combination.
-  int64_t bitsPerK =
-      blockM * getStorageBitWidth(aType) + blockN * getStorageBitWidth(bType);
-  int64_t maximumBlockK =
-      (kMaximumLDSBytes * kBitsPerByte) / kNumLDSBuffers / bitsPerK;
-  if (blockK > maximumBlockK)
+  // The proved asymmetric BK128 extensions make the larger operand physical
+  // single-buffered.  Both 256x128 single-A and 128x256 single-B use the same
+  // full-CTA contract: all waves finish reading the old aliased generation
+  // before any wave overwrites it.  Other families retain two complete A+B
+  // generations.
+  unsigned storageBitWidth = getStorageBitWidth(aType);
+  int64_t aTileBits = blockM * blockK * storageBitWidth;
+  int64_t bTileBits = blockK * blockN * storageBitWidth;
+  int64_t requiredLDSBits = kNumLDSBuffers * (aTileBits + bTileBits);
+  if (usesSingleABuffer(blockM, blockN, blockK, storageBitWidth))
+    requiredLDSBits = aTileBits + kNumLDSBuffers * bTileBits;
+  else if (usesSingleBBuffer(blockM, blockN, blockK, storageBitWidth))
+    requiredLDSBits = kNumLDSBuffers * aTileBits + bTileBits;
+  if (requiredLDSBits > kMaximumLDSBytes * kBitsPerByte)
     return failure();
 
   return BlockTile{blockM, blockN, blockK};
@@ -547,8 +726,8 @@ bool hasRequiredGlobalLoadVectorization(
 // defining the hinted value.  Preserve the same information here after the
 // HCU matcher has proved that a loop-invariant mask supports the required
 // 128-bit load.  In particular, a MoE token-validity predicate is constant
-// across A's K dimension, but cloning the unmasked main loop can otherwise
-// lose that fact before AMD ScheduleLoops filters small loads.
+// across A's K dimension, but cloning the unmasked main loop can
+// otherwise lose that fact before AMD ScheduleLoops filters small loads.
 void preserveMaskConstancyHints(
     const OriginalCandidate &candidate,
     triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis,
@@ -1148,9 +1327,98 @@ Value selectStaticBuffer(OpBuilder &builder, ttg::MemDescIndexOp index,
   return ifOp.getResult(0);
 }
 
-// Materialize each proven A/B ring allocation as separate slot0 and slot1
-// LocalAllocOps.  Exposing non-aliasing slots lets Allocation/Membar preserve
-// the intended read-current/write-next overlap in the unrolled steady state.
+// Return whether a memdesc is carried from one specific combined allocation.
+// Pipeline epilogues may expose it directly, through memdesc_index/select, or
+// as an scf.for result, so SSA identity after materialization is insufficient.
+bool isDerivedFromBuffer(Value value, Value buffer,
+                         llvm::SmallDenseSet<Value> &visited) {
+  if (value == buffer)
+    return true;
+  if (!visited.insert(value).second)
+    return false;
+
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    auto loop =
+        dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
+    if (!loop || argument.getOwner() != loop.getBody() ||
+        argument.getArgNumber() == 0)
+      return false;
+    unsigned index = argument.getArgNumber() - 1;
+    auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+    return isDerivedFromBuffer(loop.getInitArgs()[index], buffer, visited) ||
+           isDerivedFromBuffer(yield.getOperand(index), buffer, visited);
+  }
+
+  auto result = dyn_cast<OpResult>(value);
+  if (!result)
+    return false;
+  Operation *owner = result.getOwner();
+  if (auto index = dyn_cast<ttg::MemDescIndexOp>(owner))
+    return isDerivedFromBuffer(index.getSrc(), buffer, visited);
+  if (auto select = dyn_cast<arith::SelectOp>(owner))
+    return isDerivedFromBuffer(select.getTrueValue(), buffer, visited) ||
+           isDerivedFromBuffer(select.getFalseValue(), buffer, visited);
+  if (auto loop = dyn_cast<scf::ForOp>(owner)) {
+    unsigned index = result.getResultNumber();
+    auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+    return isDerivedFromBuffer(loop.getInitArgs()[index], buffer, visited) ||
+           isDerivedFromBuffer(yield.getOperand(index), buffer, visited);
+  }
+  if (auto ifOp = dyn_cast<scf::IfOp>(owner)) {
+    unsigned index = result.getResultNumber();
+    auto thenYield = cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+    auto elseYield = cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator());
+    return isDerivedFromBuffer(thenYield.getOperand(index), buffer, visited) ||
+           isDerivedFromBuffer(elseYield.getOperand(index), buffer, visited);
+  }
+  return false;
+}
+
+bool isDerivedFromBuffer(Value value, Value buffer) {
+  llvm::SmallDenseSet<Value> visited;
+  return isDerivedFromBuffer(value, buffer, visited);
+}
+
+// A generic pipeline epilogue stores its prefetched next generation before it
+// loads the current generation because the ring slots are disjoint.  For an
+// asymmetric single-buffered operand (Bit8 BK128 or Bit16 BK64), hoist the
+// current load and bracket the overwrite with full-workgroup LDS barriers.
+// The first barrier retires every wave's old-generation reads before any wave
+// overwrites the common slot.  The second publishes every wave's new-generation
+// writes before the later load consumes data produced by other waves.
+LogicalResult makeSingleBufferEpilogueSafe(scf::ForOp loop, Value buffer) {
+  ttg::LocalStoreOp nextStore;
+  ttg::LocalLoadOp currentLoad;
+  for (Operation *op = loop->getNextNode(); op; op = op->getNextNode()) {
+    if (!nextStore) {
+      if (auto store = dyn_cast<ttg::LocalStoreOp>(op);
+          store && isDerivedFromBuffer(store.getDst(), buffer))
+        nextStore = store;
+      continue;
+    }
+    if (auto load = dyn_cast<ttg::LocalLoadOp>(op);
+        load && isDerivedFromBuffer(load.getSrc(), buffer)) {
+      currentLoad = load;
+      break;
+    }
+  }
+  if (!nextStore || !currentLoad)
+    return failure();
+
+  currentLoad->moveBefore(nextStore);
+  OpBuilder builder(currentLoad);
+  builder.setInsertionPointAfter(currentLoad);
+  ttg::LocalBarrierOp::create(builder, currentLoad.getLoc());
+  builder.setInsertionPointAfter(nextStore);
+  ttg::LocalBarrierOp::create(builder, nextStore.getLoc());
+  return success();
+}
+
+// Materialize each proven A/B ring allocation as static LocalAllocOps.  Normal
+// double buffers receive separate slot0/slot1 allocations.  A proven
+// single-buffer operand maps both logical generations to one allocation; its
+// explicit read-retirement and write-publication barriers make that physical
+// alias safe and visible to Membar.
 LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
   auto plans = matchStaticDoubleBuffers(loop);
   if (failed(plans))
@@ -1166,17 +1434,25 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
   //   local_store(slot1) -> local_load(slot0, second K half)
   //   local_load(slot0) -> local_store(slot1, B)
   //
-  // The cold pipeline epilogue still selects a slot dynamically with scf.if.
-  // Its joined alias set is conservative by design and does not affect the
+  // A normal double-buffer epilogue still selects a slot dynamically with
+  // scf.if.  A single-buffer epilogue instead uses slot0 after the explicit
+  // load/barrier/store/barrier protection above. Neither case changes the
   // steady-state BlockPingpong phases.
   for (StaticBufferPlan &plan : *plans) {
     ttg::LocalAllocOp combined = plan.combinedAlloc;
     Type slotType = plan.hotIndices.front().getType();
     OpBuilder builder(combined);
+    bool isSingleBuffer = combined->hasAttr(kSingleBufferAttr);
+    if (isSingleBuffer &&
+        failed(makeSingleBufferEpilogueSafe(loop, combined.getResult())))
+      return failure();
     Value slot0 =
         ttg::LocalAllocOp::create(builder, combined.getLoc(), slotType);
     Value slot1 =
-        ttg::LocalAllocOp::create(builder, combined.getLoc(), slotType);
+        isSingleBuffer
+            ? slot0
+            : ttg::LocalAllocOp::create(builder, combined.getLoc(), slotType)
+                  .getResult();
 
     DenseMap<Operation *, Value> hotReplacements;
     hotReplacements[plan.hotIndices[0]] = slot1;
@@ -1195,15 +1471,20 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
     for (ttg::MemDescIndexOp index : allIndices) {
       Value replacement = hotReplacements.lookup(index);
       if (!replacement) {
-        builder.setInsertionPoint(index);
-        replacement = selectStaticBuffer(builder, index, slot0, slot1);
+        if (isSingleBuffer) {
+          replacement = slot0;
+        } else {
+          builder.setInsertionPoint(index);
+          replacement = selectStaticBuffer(builder, index, slot0, slot1);
+        }
       }
       index.replaceAllUsesWith(replacement);
       index.erase();
     }
     for (ttg::LocalDeallocOp dealloc : deallocs) {
       builder.setInsertionPoint(dealloc);
-      ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slot1);
+      if (!isSingleBuffer)
+        ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slot1);
       ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slot0);
       dealloc.erase();
     }
@@ -1422,6 +1703,8 @@ private:
   SmallVector<SmallVector<Operation *, kNumKHalves>, kNumOperands> slicedLoads;
   SmallVector<Operation *, kNumKHalves> slicedDots;
   Operation *lastInserted = nullptr;
+  Value waveLowPredicate;
+  Value waveHighPredicate;
   int32_t kWidth = 0;
 
   LogicalResult validateSlicing();
@@ -1435,8 +1718,13 @@ private:
   void appendOperandSlice(unsigned operandIndex, unsigned half);
   void appendOperandHalf(unsigned half);
   void appendControlBarrier(OpBuilder &builder, Location loc);
+  void appendLocalMemoryBarrier(OpBuilder &builder, Location loc);
   void appendFullBarrier(OpBuilder &builder, Location loc);
   void appendDotCluster(OpBuilder &builder, Operation *dot, Location loc);
+  void appendPredicatedStore(OpBuilder &builder, Location loc, Value predicate,
+                             Operation *store);
+  LogicalResult scheduleSingleAPhases(OpBuilder &builder, Location loc);
+  LogicalResult scheduleSingleBPhases(OpBuilder &builder, Location loc);
   LogicalResult scheduleBit8Phases(OpBuilder &builder, Location loc,
                                    bool usePanelB);
   LogicalResult scheduleBit8WholeTilePhases(OpBuilder &builder, Location loc);
@@ -1630,6 +1918,17 @@ void BufferLoadPingponger::appendControlBarrier(OpBuilder &builder,
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
 }
 
+void BufferLoadPingponger::appendLocalMemoryBarrier(OpBuilder &builder,
+                                                    Location loc) {
+  // Unlike a control-only phase boundary, this boundary protects a physical
+  // single-buffer overwrite. LocalBarrier is visible to MembarAnalysis and on
+  // CDNA lowers exactly to an LDS wait followed by a whole-CTA s_barrier; it
+  // deliberately does not drain unrelated VMEM operations.
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  append(ttg::LocalBarrierOp::create(builder, loc));
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+}
+
 void BufferLoadPingponger::appendFullBarrier(OpBuilder &builder, Location loc) {
   // M1 completes B(k+1), so A+B(k+1) is now a complete LDS generation.  This
   // is the only steady-state boundary that publishes memory and permits the
@@ -1654,6 +1953,19 @@ void BufferLoadPingponger::appendDotCluster(OpBuilder &builder, Operation *dot,
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
 }
 
+void BufferLoadPingponger::appendPredicatedStore(OpBuilder &builder,
+                                                 Location loc, Value predicate,
+                                                 Operation *store) {
+  assert(predicate && "wave-group predicate must be initialized");
+  assert(store && "predicated store must be initialized");
+  builder.setInsertionPointAfter(lastInserted);
+  auto storeIf = scf::IfOp::create(builder, loc, TypeRange{}, predicate,
+                                   /*withElseRegion=*/false);
+  OpBuilder thenBuilder = storeIf.getThenBodyBuilder();
+  thenBuilder.clone(*store);
+  append(storeIf);
+}
+
 void BufferLoadPingponger::addAsymmetricSync(OpBuilder &builder, Location loc) {
   // Divide eight 64-lane waves into two groups of four.  thread_id_x is
   // lane-varying at the ISA level even though thread_id_x >> 6 is wave-uniform;
@@ -1675,16 +1987,23 @@ void BufferLoadPingponger::addAsymmetricSync(OpBuilder &builder, Location loc) {
   waveId = LLVM::createLLVMIntrinsicCallOp(
                builder, loc, "llvm.amdgcn.readfirstlane", {i32Type}, {waveId})
                .getResult(0);
+  // On current BW1000/BW1100 hardware an eight-wave CTA is placed as
+  //   SIMD0: warp0/warp4, SIMD1: warp1/warp5,
+  //   SIMD2: warp2/warp6, SIMD3: warp3/warp7.
+  // Splitting warp0-3 from warp4-7 therefore gives every SIMD one wave from
+  // each phase. Data safety remains a separate buffer/barrier contract: the
+  // asymmetric physical-single paths load the complete aliased operand
+  // before a full-CTA local barrier permits any wave to overwrite it.
   Value groupSize =
       arith::ConstantIntOp::create(builder, loc, kWaveGroupSize, 32);
-  Value waveLow = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult,
-                                        waveId, groupSize);
-  Value waveHigh = arith::CmpIOp::create(
+  waveLowPredicate = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::ult, waveId, groupSize);
+  waveHighPredicate = arith::CmpIOp::create(
       builder, loc, arith::CmpIPredicate::uge, waveId, groupSize);
-  tta::CondBarrierOp::create(builder, loc, waveLow);
+  tta::CondBarrierOp::create(builder, loc, waveLowPredicate);
 
   builder.setInsertionPointAfter(candidate.loop);
-  tta::CondBarrierOp::create(builder, loc, waveHigh);
+  tta::CondBarrierOp::create(builder, loc, waveHighPredicate);
 }
 
 bool BufferLoadPingponger::shouldIssueBit8BFirst() const {
@@ -1695,15 +2014,82 @@ bool BufferLoadPingponger::shouldIssueBit8BFirst() const {
   return candidate.blockN >= candidate.blockM;
 }
 
-// 8-bit and 16-bit kernels intentionally use separate phase builders. Their
-// profitable VMEM/LDS orders differ, and keeping the paths independent avoids
-// a Bit8 change silently perturbing the established Bit16 schedule.
+// BM256xBN128 physical-single A path.  It is deliberately separate from the
+// mirrored single-B path: M1 overwrites A unconditionally, so M0 itself must
+// drain every old-A read before the peer can enter M1.
+LogicalResult BufferLoadPingponger::scheduleSingleAPhases(OpBuilder &builder,
+                                                          Location loc) {
+  appendOperandSlice(kOperandA, kFirstKHalf);
+  appendOperandSlice(kOperandB, kFirstKHalf);
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  if (failed(moveWithBackwardSlice(candidate.globalA)))
+    return failure();
+  appendOperandSlice(kOperandA, kSecondKHalf);
+  appendLocalMemoryBarrier(builder, loc);
+
+  if (failed(moveWithBackwardSlice(candidate.globalB)))
+    return failure();
+  appendDotCluster(builder, slicedDots[kFirstKHalf], loc);
+  appendLocalMemoryBarrier(builder, loc);
+
+  appendOperandSlice(kOperandB, kSecondKHalf);
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  if (failed(moveWithBackwardSlice(candidate.storeB)) ||
+      failed(moveWithBackwardSlice(candidate.storeA)))
+    return failure();
+  appendFullBarrier(builder, loc);
+
+  appendDotCluster(builder, slicedDots[kSecondKHalf], loc);
+  if (failed(moveAccumulatorUpdateAfterDot(slicedDots[kSecondKHalf])))
+    return failure();
+  appendControlBarrier(builder, loc);
+  return success();
+}
+
+// BM128xBN256 physical-single B path.  B stores are split between Low-M1 and
+// High-D1.  Both groups cross D0's LocalBarrier before either store can run,
+// so M0 needs only a control rendezvous; the final D1/M1 rendezvous publishes
+// the collectively written generation.
+LogicalResult BufferLoadPingponger::scheduleSingleBPhases(OpBuilder &builder,
+                                                          Location loc) {
+  appendOperandSlice(kOperandB, kFirstKHalf);
+  appendOperandSlice(kOperandA, kFirstKHalf);
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  if (failed(moveWithBackwardSlice(candidate.globalB)))
+    return failure();
+  appendOperandSlice(kOperandB, kSecondKHalf);
+  appendControlBarrier(builder, loc);
+
+  if (failed(moveWithBackwardSlice(candidate.globalA)))
+    return failure();
+  appendDotCluster(builder, slicedDots[kFirstKHalf], loc);
+  appendLocalMemoryBarrier(builder, loc);
+
+  if (failed(moveWithBackwardSlice(candidate.storeA)))
+    return failure();
+  appendPredicatedStore(builder, loc, waveLowPredicate, candidate.storeB);
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  appendOperandSlice(kOperandA, kSecondKHalf);
+  appendFullBarrier(builder, loc);
+
+  appendDotCluster(builder, slicedDots[kSecondKHalf], loc);
+  if (failed(moveAccumulatorUpdateAfterDot(slicedDots[kSecondKHalf])))
+    return failure();
+  appendPredicatedStore(builder, loc, waveHighPredicate, candidate.storeB);
+  appendLocalMemoryBarrier(builder, loc);
+  candidate.storeB.erase();
+  return success();
+}
+
+// Ordinary Bit8 double-buffered path.  Physical-single schedules are kept in
+// the two functions above so changes to one overwrite contract cannot silently
+// perturb the other or the established two-A/two-B family.
 LogicalResult BufferLoadPingponger::scheduleBit8Phases(OpBuilder &builder,
                                                        Location loc,
                                                        bool usePanelB) {
-  // M0: issue current half0, future A, and the heavier B half1 read, but no
-  // local store on the generic path. B1 stays live across D0, giving its DS
-  // reads two phases of latency cover without carrying A1 across the dot.
+  bool useDoubleBufferLatencySchedule = !usePanelB && candidate.blockM == 128 &&
+                                        candidate.blockN == 128 &&
+                                        candidate.blockK == 128;
   if (shouldIssueBit8BFirst()) {
     appendOperandSlice(kOperandB, kFirstKHalf);
     appendOperandSlice(kOperandA, kFirstKHalf);
@@ -1720,31 +2106,28 @@ LogicalResult BufferLoadPingponger::scheduleBit8Phases(OpBuilder &builder,
     if (failed(moveWithBackwardSlice(candidate.storeA)))
       return failure();
   } else {
-    if (failed(moveWithBackwardSlice(candidate.globalA)))
-      return failure();
-    if (failed(moveWithBackwardSlice(candidate.globalB)))
+    if (failed(moveWithBackwardSlice(candidate.globalA)) ||
+        failed(moveWithBackwardSlice(candidate.globalB)))
       return failure();
     appendOperandSlice(kOperandB, kSecondKHalf);
   }
   appendControlBarrier(builder, loc);
 
   appendDotCluster(builder, slicedDots[kFirstKHalf], loc);
+  if (useDoubleBufferLatencySchedule &&
+      failed(moveWithBackwardSlice(candidate.storeA)))
+    return failure();
   appendControlBarrier(builder, loc);
 
-  // M1: generic B stores the complete next generation together. Panel B reads
-  // A1 first so the B store covers its generic DS-read latency without
-  // extending A1 across D0.
+  appendOperandSlice(kOperandA, kSecondKHalf);
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
   if (usePanelB) {
-    appendOperandSlice(kOperandA, kSecondKHalf);
-    append(ROCDL::SchedBarrier::create(builder, loc, 0));
     if (failed(moveWithBackwardSlice(candidate.storeB)))
       return failure();
-  } else {
-    appendOperandSlice(kOperandA, kSecondKHalf);
-    append(ROCDL::SchedBarrier::create(builder, loc, 0));
-    if (failed(moveWithBackwardSlice(candidate.storeA)) ||
-        failed(moveWithBackwardSlice(candidate.storeB)))
-      return failure();
+  } else if ((!useDoubleBufferLatencySchedule &&
+              failed(moveWithBackwardSlice(candidate.storeA))) ||
+             failed(moveWithBackwardSlice(candidate.storeB))) {
+    return failure();
   }
   appendFullBarrier(builder, loc);
 
@@ -1755,10 +2138,10 @@ LogicalResult BufferLoadPingponger::scheduleBit8Phases(OpBuilder &builder,
   return success();
 }
 
-// Pair one complete BK64 memory phase with one complete BK64 dot/update phase
-// so post-dot reductions do not pay four rendezvous without being splittable
-// themselves. Static double-buffer materialization proves that the current
-// full-tile reads do not alias the next-tile stores.
+// Pair one complete-BK memory phase with one complete-BK dot/update phase so
+// post-dot reductions do not pay four rendezvous without being splittable.
+// Physical-single BK128 operands use the split four-phase builder above,
+// which reads their complete old tile before permitting an overwrite.
 LogicalResult
 BufferLoadPingponger::scheduleBit8WholeTilePhases(OpBuilder &builder,
                                                   Location loc) {
@@ -1773,8 +2156,9 @@ BufferLoadPingponger::scheduleBit8WholeTilePhases(OpBuilder &builder,
 
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
   if (failed(moveWithBackwardSlice(candidate.globalA)) ||
-      failed(moveWithBackwardSlice(candidate.globalB)) ||
-      failed(moveWithBackwardSlice(candidate.storeA)) ||
+      failed(moveWithBackwardSlice(candidate.globalB)))
+    return failure();
+  if (failed(moveWithBackwardSlice(candidate.storeA)) ||
       failed(moveWithBackwardSlice(candidate.storeB)))
     return failure();
   appendFullBarrier(builder, loc);
@@ -1793,7 +2177,8 @@ BufferLoadPingponger::scheduleBit8WholeTilePhases(OpBuilder &builder,
 // pipeline values are independent and remain in the memory phase.
 FailureOr<Operation *>
 BufferLoadPingponger::findAccumulatorUpdateRoot(Operation *dot) {
-  auto yield = dyn_cast<scf::YieldOp>(candidate.loop.getBody()->getTerminator());
+  auto yield =
+      dyn_cast<scf::YieldOp>(candidate.loop.getBody()->getTerminator());
   if (!yield)
     return failure();
 
@@ -1894,14 +2279,17 @@ LogicalResult BufferLoadPingponger::run() {
   OpBuilder builder(candidate.loop);
   Location loc = candidate.dot.getLoc();
   auto aType = cast<RankedTensorType>(candidate.dot.getA().getType());
+  unsigned storageBitWidth = getStorageBitWidth(aType);
   bool isBit8Pipeline = hasElementBitWidth(aType.getElementType(), kBit8Width);
+  bool useSingleA = usesSingleABuffer(candidate.blockM, candidate.blockN,
+                                      candidate.blockK, storageBitWidth);
+  bool useSingleB = usesSingleBBuffer(candidate.blockM, candidate.blockN,
+                                      candidate.blockK, storageBitWidth);
   auto accumulatorUpdateRoot =
       findAccumulatorUpdateRoot(candidate.dot.getOperation());
-  bool hasPostDotAccumulatorUpdate =
-      succeeded(accumulatorUpdateRoot) &&
-      *accumulatorUpdateRoot != candidate.dot;
-  bool useWholeTileBit8Phases =
-      isBit8Pipeline && hasPostDotAccumulatorUpdate;
+  bool hasPostDotAccumulatorUpdate = succeeded(accumulatorUpdateRoot) &&
+                                     *accumulatorUpdateRoot != candidate.dot;
+  bool useWholeTileBit8Phases = isBit8Pipeline && hasPostDotAccumulatorUpdate;
   bool preloadBHalf1 = shouldPreloadSecondBHalf();
   if (!useWholeTileBit8Phases && failed(sliceDot(builder)))
     return failure();
@@ -1910,10 +2298,17 @@ LogicalResult BufferLoadPingponger::run() {
   if (!anchor)
     return failure();
   lastInserted = anchor;
+  addAsymmetricSync(builder, loc);
   builder.setInsertionPointAfter(anchor);
 
   if (useWholeTileBit8Phases) {
     if (failed(scheduleBit8WholeTilePhases(builder, loc)))
+      return failure();
+  } else if (useSingleA) {
+    if (failed(scheduleSingleAPhases(builder, loc)))
+      return failure();
+  } else if (useSingleB) {
+    if (failed(scheduleSingleBPhases(builder, loc)))
       return failure();
   } else if (isBit8Pipeline) {
     if (failed(scheduleBit8Phases(builder, loc, preloadBHalf1)))
@@ -1922,7 +2317,6 @@ LogicalResult BufferLoadPingponger::run() {
     return failure();
   }
 
-  addAsymmetricSync(builder, loc);
   candidate.loop->setAttr(kLoopUnrollFactorAttr,
                           builder.getI32IntegerAttr(kLateUnrollFactor));
   candidate.loop->removeAttr(kCandidateAttr);
@@ -1931,6 +2325,13 @@ LogicalResult BufferLoadPingponger::run() {
   candidate.loop->setAttr(kAppliedAttr, builder.getUnitAttr());
   candidate.allocA->setAttr(kPingpongBufferAttr, builder.getUnitAttr());
   candidate.allocB->setAttr(kPingpongBufferAttr, builder.getUnitAttr());
+  if (useSingleA) {
+    // A is protected by the full-CTA read-before-overwrite boundary.  B does
+    // not alias and remains a two-slot ring.
+    candidate.allocA->setAttr(kSingleBufferAttr, builder.getUnitAttr());
+  } else if (useSingleB) {
+    candidate.allocB->setAttr(kSingleBufferAttr, builder.getUnitAttr());
+  }
   if (isBit8Pipeline) {
     if (auto function = candidate.loop->getParentOfType<tt::FuncOp>()) {
       function->setAttr(kPackBlockPingpongBit8Attr, builder.getUnitAttr());
@@ -1938,8 +2339,8 @@ LogicalResult BufferLoadPingponger::run() {
                                                      builder.getUnitAttr());
     }
   }
-  Operation *remarkDot =
-      useWholeTileBit8Phases ? candidate.dot.getOperation() : slicedDots.front();
+  Operation *remarkDot = useWholeTileBit8Phases ? candidate.dot.getOperation()
+                                                : slicedDots.front();
   remarkDot->emitRemark()
       << "performed HCU BufferLoad BlockPingpong scheduling\n";
   return success();
@@ -1971,6 +2372,17 @@ struct TritonHCUPrepareBlockPingpongPass
             Value mask = load.getMask();
             return mask && !loop.isDefinedOutsideOfLoop(mask);
           });
+      auto aType = cast<RankedTensorType>(candidate->dot.getA().getType());
+      if (hasLoopVariantMask &&
+          hasElementBitWidth(aType.getElementType(), kBit8Width) &&
+          candidate->blockK == kExtendedBit8BlockK) {
+        // The one-shot tail created below remains a direct global-load dot;
+        // AMD Pipeline does not give it the LDS chain required by
+        // sliceMaskedTailDot. Keep this uncommon BK128 non-divisible-K shape
+        // on the ordinary pipeline instead of retaining a full-BK operand live
+        // beside the accumulator and risking a severe VGPR/spill cliff.
+        continue;
+      }
       std::optional<KBoundaryTailPlan> tailPlan;
       DenseMap<Operation *, Value> effectiveMasks;
       if (hasLoopVariantMask) {
@@ -2002,8 +2414,10 @@ struct TritonHCUPrepareBlockPingpongPass
       // the same two LDS generations. The later scheduler selects either the
       // M0-D0-M1-D1 or whole-BK M-D phase topology from reduction dataflow. AMD
       // already places local_load at the last stage, so HCU only overrides
-      // local_store and the LDS buffer count. The matcher has already proved
-      // that two complete A/B generations fit in HCU's 64 KiB LDS.
+      // local_store and the logical LDS generation count.  The matcher has
+      // already proved that either two complete A/B generations, or one of the
+      // exact asymmetric Bit8 BK128 / Bit16 BK64 single-operand mappings, fits
+      // in HCU's 64 KiB LDS.
       OpBuilder builder(loop);
       loop->setAttr(tt::kNumStagesAttrName,
                     builder.getI32IntegerAttr(kRequiredStages));
@@ -2016,7 +2430,8 @@ struct TritonHCUPrepareBlockPingpongPass
 };
 
 // Post-pipeline pass: reduce masked-tail VGPR pressure and transactionally
-// apply the selected HCU two- or four-phase schedule to each expanded candidate.
+// apply the selected HCU two- or four-phase schedule to each expanded
+// candidate.
 struct TritonHCUBlockPingpongPass
     : impl::TritonHCUBlockPingpongBase<TritonHCUBlockPingpongPass> {
   using Base::Base;

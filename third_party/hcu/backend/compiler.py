@@ -112,10 +112,11 @@ class HIPOptions:
 
     # Enable the HCU-only BufferLoad BlockPingpong schedule. The HCU matcher
     # accepts only measured 8-warp GEMM tiles with legal BK halves, vectorized
-    # A/B loads and two LDS generations fitting in 64 KiB. Async copy and WASP
-    # must be disabled. Prepare gives each matched loop its internal three-stage
-    # pipeline, independently of the caller's num_stages value; reduction
-    # dataflow later selects a split-BK four-phase or whole-BK two-phase body.
+    # A/B loads, and an LDS buffering scheme fitting in 64 KiB. Async copy and
+    # WASP must be disabled. Prepare gives each matched loop its internal
+    # three-stage pipeline, independently of the caller's num_stages value;
+    # reduction dataflow later selects a split-BK four-phase or whole-BK
+    # two-phase body.
     # Keep GROUP_SIZE_M in the kernel autotune space: it controls CTA traversal
     # and cache locality, and its best value depends on the problem shape rather
     # than on the BlockPingpong compiler schedule.
