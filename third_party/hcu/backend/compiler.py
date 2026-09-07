@@ -437,20 +437,21 @@ class HIPBackend(BaseBackend):
     @staticmethod
     def path_to_rocm_clang():
         llvm_path = HIPBackend.path_to_rocm_llvm()
-        # Check env path for clang
-        clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH",
-                                    # By default, use clang-18
-                                   str(llvm_path / "bin/clang-18"))
-        if clang_env_path is not None:
+        # Explicit override takes precedence.
+        clang_env_path = os.getenv("TRITON_HIP_CLANG_PATH")
+        if clang_env_path:
             clang = Path(clang_env_path)
             if clang.is_file():
                 return clang
-        clang = llvm_path / "bin/clang"
-        if clang.is_file():
-            return clang
-        clang = Path("/usr/bin/clang")
-        if clang.is_file():
-            return clang
+        # Prefer newer clang, then fall back (same bin/ location).
+        for candidate in (
+                llvm_path / "bin/clang-22",
+                llvm_path / "bin/clang-18",
+                llvm_path / "bin/clang",
+                Path("/usr/bin/clang"),
+        ):
+            if candidate.is_file():
+                return candidate
         raise Exception(
             f"ROCm compiler not found under {llvm_path}/bin/clang. "
             "Set 'TRITON_HIP_CLANG_PATH' to its path."
