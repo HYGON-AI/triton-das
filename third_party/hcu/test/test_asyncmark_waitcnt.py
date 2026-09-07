@@ -86,7 +86,9 @@ def _assert_partial_wait(asm, pending_loads):
         counts = [int(n) for n in re.findall(r"\bvmcnt\((\d+)\)", after)]
         assert counts and all(n == pending_loads for n in counts), after
         # An earlier full wait would make a later vmcnt(N) assertion vacuous.
-        assert not re.search(r"\bvmcnt\(", before), before
+        # Partial waits may consume older, unrelated buffer loads while the
+        # loads protected by this async wait remain in flight.
+        assert not re.search(r"\bvmcnt\(0\)", before), before
         checked += 1
     assert checked, f"No MLS wait retained {pending_loads} ordinary buffer loads"
 
