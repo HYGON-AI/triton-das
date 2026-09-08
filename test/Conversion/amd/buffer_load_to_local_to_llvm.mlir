@@ -1,11 +1,14 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx950 | FileCheck %s --check-prefixes=COMMON,GFX950
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx942 --verify-diagnostics | FileCheck %s --check-prefixes=COMMON,GFX942
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx938 --verify-diagnostics | FileCheck %s --check-prefix=HCU
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 64], warpsPerCTA = [4, 1], order = [1, 0]}>
 #shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32, ttg.target = "hip:gfx942", "ttg.threads-per-warp" = 64 : i32} {
   // COMMON-LABEL: buffer_load_to_local_simple
+  // HCU-LABEL: buffer_load_to_local_simple
   tt.func public @buffer_load_to_local_simple(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
                                 %arg1: !tt.ptr<f32>,
                                 %arg2: tensor<32x64xi32, #blocked>,
@@ -15,6 +18,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // COMMON-NOT: rocdl.make.buffer.rsrc
     // COMMON-COUNT-8: rocdl.raw.ptr.buffer.load.async.lds
     // COMMON-NOT: rocdl.raw.ptr.buffer.load.async.lds
+    // HCU: rocdl.make.buffer.rsrc
+    // HCU-COUNT-8: rocdl.raw.ptr.buffer.load.async.lds
     %65 = amdg.buffer_load_to_local %arg1[%arg2] into %arg3 : <f32>[tensor<32x64xi32, #blocked>] -> <32x64xf32, #shared, #smem, mutable>
     tt.return
   }

@@ -1,3 +1,4 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 // This file implements the data partitioning logic used by the Warp
 // Specialization pass for the HCU backend.  The goal is to split
 // computations across the two MMA partitions that the hardware provides.
@@ -2083,7 +2084,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     auto newMlsOp = builder.createWithAsyncTaskIds<tta::MatrixLoadToLocalOp>(
         op->getLoc(), newBase, newShapeVals, newStrideVals, newTensorShape,
         newIndices, mlsOp.getBoundaryCheck(), mlsOp.getCache(),
-        mlsOp.getEvict(), mlsOp.getIsVolatile(), newDest);
+        mlsOp.getEvict(), mlsOp.getIsVolatile(), newDest, Value());
     // TwoPTwoC: tag each half with its consumer task id so SplitMma can move
     // the write into the matching Load partition. OnePTwoC keeps load attrs.
     if (partitionScheme.producerSliced &&

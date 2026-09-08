@@ -1,11 +1,14 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx950 | FileCheck %s --check-prefix=GFX950
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx942 | FileCheck %s
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx938 | FileCheck %s --check-prefix=HCU
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 64], warpsPerCTA = [4, 1], order = [1, 0]}>
 #shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32, ttg.target = "hip:gfx942", "ttg.threads-per-warp" = 64 : i32} {
   // CHECK-LABEL: async_copy
+  // HCU-LABEL: async_copy
   tt.func public @async_copy(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
                                 %arg1: i32 {tt.divisibility = 16 : i32},
                                 %arg2: !ttg.memdesc<32x64xf32, #shared, #smem, mutable>) {
@@ -15,6 +18,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // CDNA3/CDNA4 use the async variant so LLVM tracks via asyncmark.
     // CHECK-COUNT-8: rocdl.global.load.async.lds
     // CHECK-NOT: rocdl.global.load.async.lds
+    // HCU-COUNT-8: rocdl.global.load.async.lds
     %2 = ttg.async_copy_global_to_local %1, %arg2 : tensor<32x64x!tt.ptr<f32>, #blocked> -> <32x64xf32, #shared, #smem, mutable>
     tt.return
   }
@@ -73,6 +77,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32, ttg.target = "hip:gfx942", "ttg.threads-per-warp" = 64 : i32} {
   // CHECK-LABEL: async_wait
   // GFX950-LABEL: async_wait
+  // HCU-LABEL: async_wait
   tt.func public @async_wait(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
                              %arg1: i32 {tt.divisibility = 16 : i32},
                              %arg2: !ttg.memdesc<32x64xf16, #shared, #smem, mutable>) {
@@ -81,19 +86,24 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // LLVM will compute the final waitcnt.
     // CHECK: rocdl.wait.asyncmark 0
     // GFX950: rocdl.wait.asyncmark 0
+    // HCU: rocdl.wait.asyncmark 0
     ttg.async_wait {num = 0 : i32}
     // CHECK: rocdl.wait.asyncmark 1
     // GFX950: rocdl.wait.asyncmark 1
+    // HCU: rocdl.wait.asyncmark 1
     ttg.async_wait {num = 1 : i32}
     // CHECK: rocdl.wait.asyncmark 62
     // GFX950: rocdl.wait.asyncmark 62
+    // HCU: rocdl.wait.asyncmark 62
     ttg.async_wait {num = 62 : i32}
     // CHECK: rocdl.wait.asyncmark 63
     // GFX950: rocdl.wait.asyncmark 63
+    // HCU: rocdl.wait.asyncmark 63
     ttg.async_wait {num = 63 : i32}
     // No clamping — LLVM handles it based on instruction count
     // CHECK: rocdl.wait.asyncmark 64
     // GFX950: rocdl.wait.asyncmark 64
+    // HCU: rocdl.wait.asyncmark 64
     ttg.async_wait {num = 64 : i32}
     tt.return
   }
@@ -107,6 +117,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32, ttg.target = "hip:gfx942", "ttg.threads-per-warp" = 64 : i32} {
   // CHECK-LABEL: async_commit_group
   // GFX950-LABEL: async_commit_group
+  // HCU-LABEL: async_commit_group
   tt.func public @async_commit_group(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
                                      %arg1: i32 {tt.divisibility = 16 : i32},
                                      %arg2: !ttg.memdesc<32x64xf16, #shared, #smem, mutable>) {
@@ -117,6 +128,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // GFX950: rocdl.asyncmark
     // GFX950: llvm.mlir.constant(0 : i32) : i32
     // GFX950-NEXT: llvm.return
+    // HCU: rocdl.asyncmark
+    // HCU: llvm.mlir.constant(0 : i32) : i32
+    // HCU-NEXT: llvm.return
     ttg.async_commit_group
     tt.return
   }

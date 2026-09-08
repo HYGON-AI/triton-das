@@ -1,3 +1,4 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 /*
  * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  *
@@ -720,6 +721,8 @@ def MatrixLoadToLocalOp : TT_AMDGPU_Op<"matrix_load_to_local", [AttrSizedOperand
   let description = [{
     This operation load matrix data from global memory to local memory asynchronously.
     This is analogue to tt.matrix_load except the data are copied to local memory.
+    The optional scalar `pred` is a workgroup-uniform pipeline execution
+    predicate. False disables the transfer, not the surrounding commit group.
   }];
 
   let arguments = (ins
@@ -732,13 +735,15 @@ def MatrixLoadToLocalOp : TT_AMDGPU_Op<"matrix_load_to_local", [AttrSizedOperand
     DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache,
     DefaultValuedAttr<TT_EvictionPolicyAttr, "triton::EvictionPolicy::NORMAL">:$evict,
     DefaultValuedAttr<BoolAttr, "false">:$isVolatile,
-    Arg<TTG_MemDescType, "Shared memory slice to write to", [MemWrite<SharedMemory>]>:$dest
+    Arg<TTG_MemDescType, "Shared memory slice to write to", [MemWrite<SharedMemory>]>:$dest,
+    Optional<I1>:$pred
   );
   let results = (outs TTG_AsyncToken:$token);
 
   let assemblyFormat = [{
     $base `,` $dest `,` `shape` `=` `[` $shape `]` `,` `strides` `=` `[` $strides `]` `,`
     `tensorShape` `=` $tensorShape `,` `indices` `=` `[` $indices `]`
+    (`pred` `=` $pred^)?
     oilist(
       `boundaryCheck` `=` $boundaryCheck |
       `cacheModifier` `=` $cache |

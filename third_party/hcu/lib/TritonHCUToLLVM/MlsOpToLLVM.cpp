@@ -122,6 +122,21 @@ struct MLSMatrixLoadToLocalOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
+    // AsyncTokenType converts to i32. This value only replaces the SSA token;
+    // it is neither a predicate nor a count/completion state for the transfer.
+    Value convertedToken = b.i32_val(0);
+    // Pipeline predicates are uniform across the workgroup. Guard the actual
+    // transfer, leaving async_commit_group outside: even an empty iteration
+    // must keep the same mark history. Never speculate a short-loop prefetch.
+    Block *continuation = nullptr;
+    if (Value pred = adaptor.getPred()) {
+      Block *before = rewriter.getInsertionBlock();
+      continuation = rewriter.splitBlock(before, op->getIterator());
+      Block *body = rewriter.createBlock(continuation);
+      rewriter.setInsertionPointToEnd(before);
+      LLVM::CondBrOp::create(rewriter, loc, pred, body, continuation);
+      rewriter.setInsertionPointToStart(body);
+    }
     bool mABIsNeed = targetInfo.getGPUKind() == llvm::AMDGPU::GPUKind::GK_GFX938;
 
     auto ctx = rewriter.getContext();
@@ -339,7 +354,11 @@ struct MLSMatrixLoadToLocalOpConversion
       }
     }
 
-    rewriter.eraseOp(op);
+    if (continuation) {
+      LLVM::BrOp::create(rewriter, loc, ValueRange{}, continuation);
+      rewriter.setInsertionPoint(op);
+    }
+    rewriter.replaceOp(op, convertedToken);
     return success();
   }
 

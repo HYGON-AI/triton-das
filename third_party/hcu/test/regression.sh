@@ -15,6 +15,8 @@ pytest_cases=(
   "${hcu_file_path}/rmsnorm.py"
   "${hcu_file_path}/fused-attention.py"
   "${hcu_file_path}/mls-unit-test.py"
+  "${hcu_file_path}/test_mls_async_pipeline.py"
+  "${hcu_file_path}/test_asyncmark_waitcnt.py"
   "${hcu_file_path}/gemm-ds-read-m.py"
   "${hcu_file_path}/test_elementwise_fma.py"
   "${hcu_file_path}/test_cvt_scale_pk.py"

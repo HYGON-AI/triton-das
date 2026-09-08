@@ -1,5 +1,7 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx950 --convert-scf-to-cf | FileCheck %s --check-prefix=COMMON
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx942 --convert-scf-to-cf | FileCheck %s --check-prefix=COMMON
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=arch=gfx938 --convert-scf-to-cf | FileCheck %s --check-prefix=COMMON
 
 // COMMON: [[$ASYNC_COPY_SCOPE:#.*]] = #llvm.alias_scope<id = "amdg.AsyncCopies"
 // COMMON: [[$LOCAL_LOAD_SCOPE:#.*]] = #llvm.alias_scope<id = "amdg.LocalLoads"

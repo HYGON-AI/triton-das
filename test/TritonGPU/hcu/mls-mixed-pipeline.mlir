@@ -1,4 +1,6 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 // RUN: triton-opt %s -tritonhcu-mls-stream-pipeline="num_stages=2 use_async_copy=0" -tritonamdgpu-schedule-loops=num_stages=2 -tritonamdgpu-pipeline | FileCheck %s
+// RUN: triton-opt %s -tritonhcu-mls-stream-pipeline="num_stages=3 use_async_copy=0" -tritonamdgpu-schedule-loops=num_stages=3 -tritonamdgpu-pipeline="use_async_copy=0" --tritonhcu-update-async-wait-count=arch-generation-name=gfx938 | FileCheck %s --check-prefix=MULTI
 
 #blocked = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [4, 16], warpsPerCTA = [1, 8], order = [0, 1]}>
 #mma = #ttg.amd_mfma<{version = 3, warpsPerCTA = [2, 4], instrShape = [16, 16, 16], isTransposed = false, mmacLayout = 1}>
@@ -14,6 +16,15 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
   // CHECK:   tt.load
   // CHECK:   tt.dot
   // CHECK:   ttg.local_store
+  // Only the MLS operand contributes a commit group, not the ordinary tt.load.
+  // MULTI-LABEL: tt.func public @matmul_kernel
+  // MULTI: scf.for
+  // MULTI: ttg.async_wait %{{[^ ,]+}} {num = 1 : i32}
+  // MULTI: amdg.matrix_load_to_local
+  // MULTI: ttg.async_commit_group
+  // MULTI: tt.load
+  // MULTI: scf.yield
+  // MULTI: ttg.async_wait {{.*}} {num = 0 : i32}
   tt.func public @matmul_kernel(
       %arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
       %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},

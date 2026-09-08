@@ -47,7 +47,9 @@ struct StreamCopyChainOps {
 };
 
 struct AsyncCopyChainOps {
-  ttg::AsyncCopyGlobalToLocalOp copyOp;
+  // Generic/buffer-to-LDS and HCU MLS share scheduling and group semantics.
+  // Either ttg::AsyncCopyGlobalToLocalOp or tt::amdgpu::MatrixLoadToLocalOp (MLS).
+  Operation *copyOp;
   ttg::AsyncCommitGroupOp commitOp;
   ttg::AsyncWaitOp waitOp;
   ttg::LocalLoadOp maybeLocalLoadOp;
@@ -83,6 +85,42 @@ AsyncCopyChainOps createAsyncCopy(tt::LoadOp loadOp, Value alloc,
       builder, loadOp->getResult(0), viewLoad, waitOp);
 
   return {copyOp, commitOp, waitOp, maybeSharedLoad};
+}
+
+static ttg::SharedEncodingTrait getMlsSharedEncoding(tt::MatrixLoadOp load) {
+  auto attr = load->getAttrOfType<tt::amdgpu::MlsEncodingAttr>(
+      tt::amdgpu::MlsEncodingAttr::getMnemonic());
+  auto ty = cast<RankedTensorType>(load.getType());
+  return ttg::HCUMlsSharedEncodingAttr::get(
+      load.getContext(), attr.getOpIdx(), attr.getMlsTile(),
+      attr.getElemBitWidth(),
+      static_cast<ttg::MlsElemBitTyKind>(attr.getElemBitTyKind()),
+      attr.getAlt2Kind(), attr.getVersion(), attr.getOrder(),
+      ttg::getCTALayout(ty.getEncoding()));
+}
+
+static AsyncCopyChainOps createMlsCopy(tt::MatrixLoadOp load, Value alloc,
+                                       Value extractIdx,
+                                       tt::CoarseSchedule &schedule) {
+  OpBuilder builder(load);
+  auto loc = load.getLoc();
+  auto view = triton::createSingleBufferView(builder, alloc, extractIdx);
+  auto copy = tt::amdgpu::MatrixLoadToLocalOp::create(
+      builder, loc, load.getBase(), load.getShape(), load.getStrides(),
+      load.getTensorShape(), load.getIndices(), load.getBoundaryCheck(),
+      load.getCache(), load.getEvict(), load.getIsVolatile(), view, Value());
+  auto name = tt::amdgpu::MlsEncodingAttr::getMnemonic();
+  copy->setAttr(name, load->getAttr(name));
+  auto commit = ttg::AsyncCommitGroupOp::create(builder, loc, copy.getToken());
+  auto wait = ttg::AsyncWaitOp::create(builder, loc, commit.getResult(), 0);
+  auto local =
+      tt::replaceUsesWithLocalLoad(builder, load->getResult(0), view, wait);
+  // Keep the scheduling anchor on the replacement copy, not the erased MLS.
+  auto [stage, cluster] = schedule[load];
+  schedule.insert(copy, stage, cluster);
+  schedule.erase(load);
+  load->erase();
+  return {copy, commit, wait, local};
 }
 
 void scheduleLocalLoad(ttg::LocalLoadOp localLoadOp,
@@ -324,7 +362,8 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
 LoadToStreamOpMap
 createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
                 const int &numBuffers, bool useAsyncCopy,
-                tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
+                tt::ModuleAxisInfoAnalysis &axisInfoAnalysis,
+                tt::CoarseSchedule &schedule) {
   IRRewriter builder(forOp);
   Location loc = forOp.getLoc();
   Value minusOne = arith::ConstantIntOp::create(builder, loc, -1, 32);
@@ -355,6 +394,17 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
   for (auto &[l, info] : loadToInfo) {
     if (!info.sharedEncoding)
       continue;
+
+    // Keep the MLS adaptation separate so the ordinary load path below stays
+    // aligned with upstream. Both paths share buffer rotation and scheduling.
+    if (auto matrixLoad = dyn_cast<tt::MatrixLoadOp>(l)) {
+      auto ty = cast<RankedTensorType>(matrixLoad.getType());
+      Value alloc = triton::createAlloc(forOp, ty, matrixLoad.getLoc(),
+                                        info.sharedEncoding, numBuffers);
+      auto copy = createMlsCopy(matrixLoad, alloc, extractIdx, schedule);
+      loadToStreamOp[copy.copyOp] = copy;
+      continue;
+    }
 
     auto loadOp = dyn_cast<tt::LoadOp>(l);
     if (!loadOp)
@@ -546,7 +596,7 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
   return success();
 }
 
-void scheduleAsyncCopy(const AsyncCopyChainOps &asyncOps, tt::LoadOp loadOp,
+void scheduleAsyncCopy(const AsyncCopyChainOps &asyncOps, Operation *loadOp,
                        tt::CoarseSchedule &schedule, const Stages &stages,
                        const Clusters &clusters) {
   auto [copyOp, commitOp, waitOp, maybeLocalLoadOp] = asyncOps;
@@ -592,14 +642,17 @@ void scheduleStreamOps(const LoadToStreamOpMap &loadToStreamOp,
                        tt::CoarseSchedule &schedule, const Stages &stages,
                        const Clusters &clusters) {
   for (auto [l, streamOps] : loadToStreamOp) {
-    auto loadOp = dyn_cast<tt::LoadOp>(l);
-    if (!loadOp)
-      continue;
+    // MLS uses its replacement MatrixLoadToLocalOp as the map key, so the
+    // original tt.load-only filter would skip its async-copy scheduling.
+    // auto loadOp = dyn_cast<tt::LoadOp>(l);
+    // if (!loadOp)
+    //   continue;
 
     if (auto asyncOps = std::get_if<AsyncCopyChainOps>(&streamOps)) {
-      scheduleAsyncCopy(*asyncOps, loadOp, schedule, stages, clusters);
+      scheduleAsyncCopy(*asyncOps, l, schedule, stages, clusters);
     } else if (auto sOps = std::get_if<StreamCopyChainOps>(&streamOps)) {
-      scheduleStreamCopy(*sOps, loadOp, schedule, stages, clusters);
+      scheduleStreamCopy(*sOps, cast<tt::LoadOp>(l), schedule, stages,
+                         clusters);
     }
   }
 }
@@ -624,7 +677,8 @@ void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
 
   // Convert the loads into shared memory allocations and loads from them.
   auto loadToStreamOps = createStreamOps(loadToInfo, forOp, numBuffers,
-                                         useAsyncCopy, axisInfoAnalysis);
+                                         useAsyncCopy, axisInfoAnalysis,
+                                         schedule);
 
   scheduleStreamOps(loadToStreamOps, schedule, stages, clusters);
   dumpSchedule(schedule, "Coarse schedule stream ops:");
@@ -736,7 +790,8 @@ void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
   // TODO support different numBuffers
   int numBuffers = useAsyncCopy ? 2 : 1;
   auto loadToStreamOps = createStreamOps(loadToInfo, forOp, numBuffers,
-                                         useAsyncCopy, axisInfoAnalysis);
+                                         useAsyncCopy, axisInfoAnalysis,
+                                         schedule);
   scheduleStreamOps(loadToStreamOps, schedule, clusters);
 
   for (auto [l, _] : loadToInfo) {
@@ -781,7 +836,10 @@ void lowerLoop(scf::ForOp forOp,
   LoadToInfoMap loadToInfo;
   for (const auto &[load, info] : loadOpToIndLevel) {
     auto [distance, use] = info;
-    if (load->hasAttrOfType<BoolAttr>(AttrBypassLDS)) {
+    if (auto matrixLoad = dyn_cast<tt::MatrixLoadOp>(load)) {
+      auto shared = getMlsSharedEncoding(matrixLoad);
+      loadToInfo[load] = {shared, distance, use};
+    } else if (load->hasAttrOfType<BoolAttr>(AttrBypassLDS)) {
       load->removeAttr(AttrBypassLDS);
       loadToInfo[load] = {nullptr, distance, use};
     } else {

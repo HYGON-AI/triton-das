@@ -1,3 +1,4 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
@@ -224,6 +225,9 @@ static bool isCoalesced(RankedTensorType loadType,
 /// any further rearrangement.
 static Operation *bypassLDS(Operation *load, Operation *use) {
   if (!load || !use)
+    return nullptr;
+  // MLS has a fixed direct-to-LDS layout; never rewrite it as a VGPR load.
+  if (isa<tt::MatrixLoadOp>(load))
     return nullptr;
 
   // Only applies to dot-like ops (scaled/regular) that conform to this
@@ -523,6 +527,28 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
 }
 } // namespace ChainedDotSchedule
 
+bool canPipelineMlsLoop(scf::ForOp forOp, int numStages) {
+  auto matrixLoads = forOp.getBody()->getOps<tt::MatrixLoadOp>();
+  if (matrixLoads.empty())
+    return true;
+
+  // Multiple dot layouts can disagree on the MLS consumer layout.
+  // TODO: Support multi-dot MLS loops and replace this blanket restriction
+  // with checks for actual consumer-layout conflicts.
+  if (llvm::count_if(*forOp.getBody(), [](Operation &op) {
+        return isa<tt::DotOpInterface>(op);
+      }) > 1)
+    return false;
+
+  triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
+      forOp->getParentOfType<ModuleOp>());
+  auto loadOpToIndLevel = getIndirectLevel(axisInfoAnalysis, forOp, numStages);
+  // Only pipeline loops whose top-level MLS ops are all selected.
+  return llvm::all_of(matrixLoads, [&](tt::MatrixLoadOp matrix) {
+    return loadOpToIndLevel.count(matrix);
+  });
+}
+
 void pipelineLoop(scf::ForOp forOp, int numStages) {
   triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
       forOp->getParentOfType<ModuleOp>());
@@ -593,6 +619,8 @@ struct ScheduleLoops : impl::TritonAMDGPUScheduleLoopsBase<ScheduleLoops> {
         continue;
       }
       int numStagesThis = tt::getNumStagesOrDefault(forOp, numStages);
+      if (!canPipelineMlsLoop(forOp, numStagesThis))
+        continue;
       pipelineLoop(forOp, numStagesThis);
     }
   }

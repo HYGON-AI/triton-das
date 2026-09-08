@@ -83,8 +83,9 @@ public:
     // 2. create matrix_load_to_local load op and insert synchronization primitives
     auto matrixLoadToLocalOp = rewriter.create<tta::MatrixLoadToLocalOp>(
         loc, matrixOp.getBase(), matrixOp.getShape(), matrixOp.getStrides(),
-        matrixOp.getTensorShape(), matrixOp.getIndices(), matrixOp.getBoundaryCheck(), matrixOp.getCache(),
-        matrixOp.getEvict(), matrixOp.getIsVolatile(), localAllocOp);
+        matrixOp.getTensorShape(), matrixOp.getIndices(),
+        matrixOp.getBoundaryCheck(), matrixOp.getCache(), matrixOp.getEvict(),
+        matrixOp.getIsVolatile(), localAllocOp, Value());
     matrixLoadToLocalOp->setAttr(tta::MlsEncodingAttr::getMnemonic(), mlsAttr);
 
     auto commitOp = rewriter.create<ttg::AsyncCommitGroupOp>(loc,

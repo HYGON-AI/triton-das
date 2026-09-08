@@ -186,7 +186,8 @@ AsyncCopyChainOps createAsyncCopy(tt::MatrixLoadOp loadOp, Value alloc,
   auto copyOp = builder.create<tta::MatrixLoadToLocalOp>(
       loc, loadOp.getBase(), loadOp.getShape(), loadOp.getStrides(),
       loadOp.getTensorShape(), loadOp.getIndices(), loadOp.getBoundaryCheck(),
-      loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile(), viewLoad);
+      loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile(), viewLoad,
+      Value());
 
   auto mlsAttr = loadOp->getAttrOfType<tta::MlsEncodingAttr>(
                                                         tta::MlsEncodingAttr::getMnemonic());
@@ -1157,18 +1158,6 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
 
   void runOnOperation() override {
     ModuleOp moduleOp = getOperation();
-    // check numStages
-    if (numStages == 1)
-      return;
-
-    // check numStages
-    if (globalPrefetch < 0 || globalPrefetch >= numStages) {
-      moduleOp.emitWarning("global prefetch control must be in [0, ")
-          << numStages << "); " << globalPrefetch
-          << " is out of range, fallback to 0";
-      globalPrefetch = 0;
-    }
-
     constexpr int localPrefetch = 0;
     constexpr bool mlsUsesDirectToLds = true;
 
@@ -1178,6 +1167,10 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
       if (tt::getNumStagesOrDefault(forOp, numStages) > 1)
         loops.push_back(forOp);
     });
+    // A loop's tt.num_stages can enable MLS pipelining even when the kernel
+    // default is one stage. Leave only loops with an effective depth <= 1.
+    if (loops.empty())
+      return;
 
     for (scf::ForOp forOp : loops) {
       if (!triton::gpu::isSafeToPipeline(forOp)) {
@@ -1193,10 +1186,17 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
       // i.e., we can still disable `waitAtTail` by explicitly disabling
       // pingpong, which is the only use case of this scheduling variant.
       int numStagesThis = tt::getNumStagesOrDefault(forOp, numStages);
+      int globalPrefetchThis = globalPrefetch;
+      if (globalPrefetchThis < 0 || globalPrefetchThis >= numStagesThis) {
+        forOp.emitWarning("global prefetch control must be in [0, ")
+            << numStagesThis << "); " << globalPrefetchThis
+            << " is out of range, fallback to 0";
+        globalPrefetchThis = 0;
+      }
       bool waitAtTail = false;
       bool useSingleBuffer = !useAsyncCopy && numStagesThis == 2 &&
-                             globalPrefetch == 0;
-      (void)pipelineLoop(forOp, numStagesThis, globalPrefetch, localPrefetch,
+                             globalPrefetchThis == 0;
+      (void)pipelineLoop(forOp, numStagesThis, globalPrefetchThis, localPrefetch,
                          mlsUsesDirectToLds, waitAtTail, useSingleBuffer);
     }
 
@@ -1204,9 +1204,20 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
     DenseSet<ttg::MaskOp> peeledMaskOps;
     tt::resolveMaskOp(moduleOp);
 
-    llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
-    moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
-    tt::combineRedundantWaitOps(waitOps);
+    auto arch = getAMDArch(moduleOp);
+    if (arch && tt::AMD::TargetInfo(arch->str()).useAsyncMarks()) {
+      // MLS uses direct-to-LDS independently of useAsyncCopy. After expansion,
+      // derive outstanding commit-group counts from the loop-carried tokens:
+      // retaining the initial num=0 would also wait for newer prefetched tiles.
+      // The AMD pipeline only updates waits when useAsyncCopy is enabled, and
+      // HCU UpdateAsyncWaitCount preserves num on asyncmark targets.
+      tt::updateWaits(moduleOp);
+    } else {
+      // Legacy targets still derive instruction counts downstream.
+      llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
+      moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
+      tt::combineRedundantWaitOps(waitOps);
+    }
   }
 };
 

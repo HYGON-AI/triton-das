@@ -242,6 +242,14 @@ struct TritonHCUUpdateAsyncWaitCountPass
         targetInfo.getISAFamily() != tt::AMD::ISAFamily::GFX1250)
       return;
 
+    // asyncmark/wait_asyncmark preserves the number of outstanding commit
+    // groups in ttg.async_wait. LLVM then derives the final hardware waitcnt
+    // from all async operations in those groups, including HCU matrix loads.
+    // Rewriting the wait to amdg.async_wait here would instead reinterpret the
+    // group count as an instruction count and lose that dependency structure.
+    if (targetInfo.useAsyncMarks())
+      return;
+
     bool supportsAsyncLoads = true;
     switch (targetInfo.getISAFamily()) {
     case tt::AMD::ISAFamily::CDNA3:

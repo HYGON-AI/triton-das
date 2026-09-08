@@ -1234,6 +1234,36 @@ def test_mls_bit8_asymmetric_bk128_block_pingpong(
         config=config,
     )
 
+@pytest.mark.parametrize("mix_load", [0b00, 0b01, 0b10, 0b11])
+def test_mls_int8_kpack2_uses_compatible_dot_width(mix_load):
+    """kpack=2 must not widen only the non-MLS side of a mixed dot."""
+    if not is_hcu_support_mls():
+        pytest.skip("skip: not support mls")
+
+    M, N, K = 256, 256, 512
+    a, b = create_test_matrices(M, K, N, "row", "col", torch.int8)
+    config = {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "kpack": 2,
+    }
+    assert run_layout_combination_test(
+        a,
+        b,
+        "row",
+        "col",
+        mix_load,
+        False,
+        False,
+        case_name=f"INT8 MLS kpack=2 mix_load={mix_load:#04b}",
+        config=config,
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("b_layout", ["col", "row"])
 def test_mls_bit16_block_pingpong(dtype, b_layout):

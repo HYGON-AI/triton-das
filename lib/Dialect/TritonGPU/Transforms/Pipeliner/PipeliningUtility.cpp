@@ -1,6 +1,7 @@
 // Modified by Hygon Information Technology Co., Ltd., 2026.
 
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -207,6 +208,12 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     Value mask = getPredMask(rewriter, loadOp.getPtr().getType(),
                              loadOp.getMask(), pred);
     loadOp.getMaskMutable().assign(mask);
+    return op;
+  }
+  if (auto copyOp = dyn_cast<tt::amdgpu::MatrixLoadToLocalOp>(op)) {
+    rewriter.setInsertionPoint(copyOp);
+    Value mask = getPredMask(rewriter, pred.getType(), copyOp.getPred(), pred);
+    copyOp.getPredMutable().assign(mask);
     return op;
   }
   if (auto copyOp = dyn_cast<ttng::AsyncTMACopyGlobalToLocalOp>(op)) {

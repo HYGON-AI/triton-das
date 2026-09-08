@@ -17,6 +17,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
+#include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
@@ -2454,6 +2455,7 @@ struct TritonHCUBlockPingpongPass
     SmallVector<scf::ForOp> loops;
     module.walk([&](scf::ForOp loop) { loops.push_back(loop); });
 
+    bool transformed = false;
     for (scf::ForOp loop : loops) {
       if (!loop->hasAttr(kCandidateAttr))
         continue;
@@ -2487,7 +2489,13 @@ struct TritonHCUBlockPingpongPass
 
       loop->replaceAllUsesWith(clonedLoop.getResults());
       loop.erase();
+      transformed = true;
     }
+
+    // Recompute wait counts after reordering, as in AMD BlockPingpong. Current
+    // HCU candidates exclude async copies; keep this for future async support.
+    if (transformed)
+      tt::updateWaits(module);
   }
 };
 

@@ -1,3 +1,4 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/MMAv5PipelineUtility.h"
@@ -107,7 +108,7 @@ public:
         return false;
       }
     }
-    if (isa<tt::DescriptorLoadOp, tt::DescriptorGatherOp>(op))
+    if (isa<tt::MatrixLoadOp, tt::DescriptorLoadOp, tt::DescriptorGatherOp>(op))
       return true;
     if (!canHaveSharedEncoding(cast<tt::LoadOp>(op))) {
       LDBG("Load " << *op << " cannot have shared encoding");
@@ -279,7 +280,8 @@ loadOpsToIndirectionLevel(scf::ForOp forOp, bool pipelineWithoutDot,
       [&](Operation *op, Operation *finalUser, int distance) {
         if (!seen.insert(op).second || excluded.count(op))
           return;
-        if (isa<tt::LoadOp, tt::DescriptorLoadOp, tt::DescriptorGatherOp>(op)) {
+        if (isa<tt::LoadOp, tt::MatrixLoadOp, tt::DescriptorLoadOp,
+                tt::DescriptorGatherOp>(op)) {
           if (!AssignLoadLatencies::isPipeliningBeneficial(
                   op, finalUser, axisInfoAnalysis, filterSmall))
             return;

@@ -127,6 +127,9 @@ class HIPOptions:
     # ordinary or small kernels may regress.
     utc_warmup: bool = False
 
+    # Per-kernel/autotune choice. Explicit options override the legacy env knob.
+    use_async_copy: bool = False
+
     # wasp options
     wasp_enabled: bool = False
     wdra_enabled: bool = False
@@ -213,6 +216,9 @@ class HIPBackend(BaseBackend):
 
         if "enable_fp_fusion" not in opts:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
+
+        if opts.get("use_async_copy") is None:
+            args["use_async_copy"] = knobs.amd.use_async_copy
 
         # dtk triton compatibility: consume legacy compiler.py options and ignore.
         opts.pop("num_ldmatrixes", None)
@@ -634,7 +640,7 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
 
-        use_async_copy = knobs.amd.use_async_copy
+        use_async_copy = options.use_async_copy
 
         # Preserve the old triton stream-prefetch behavior for MLS:
         # separate global load and LDS consumption by one pipeline stage.
@@ -644,7 +650,9 @@ class HIPBackend(BaseBackend):
         # skipping amd stream_pipeline): WASP owns multi-buffering / sync for
         # matrix_load_to_local. Running mls_stream_pipeline first injects scf.if
         # epilogue peeling that PartitionLoopsHCU cannot handle.
-        if not options.wasp_enabled:
+        # With async copy enabled, AMD ScheduleLoops/Pipeline owns both MLS
+        # and ordinary copies; do not pipeline MLS a second time here.
+        if not options.wasp_enabled and not use_async_copy:
             hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, use_async_copy)
 
         use_block_pingpong = (options.use_block_pingpong and not use_async_copy
@@ -655,9 +663,8 @@ class HIPBackend(BaseBackend):
         buffer_cache_swizzle = options.buffer_cache_swizzle or use_block_pingpong
         if use_block_pingpong:
             hcu.passes.ttgpuir.add_prepare_block_pingpong(pm)
-        amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
-
         if not options.wasp_enabled:
+            amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
             amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, False)
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
