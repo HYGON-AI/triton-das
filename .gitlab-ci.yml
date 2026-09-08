@@ -1,6 +1,7 @@
 stages:
   - build
   - publish
+  - mirror
 
 variables:
   FILE_SERVER_IP: "10.16.1.27"
@@ -11,6 +12,9 @@ variables:
   DEVPI_URL: "http://10.16.1.201:9929/"
   CISMI_TIMEOUT: "3600"
   TORCH_VERSION: "2.11.0"
+  # GitHub mirror target (override in CI Variables if needed).
+  # Auth: set masked CI Variable GITHUB_MIRROR_TOKEN (fine-grained PAT with contents:write).
+  GITHUB_MIRROR_REPO: "github.com/HYGON-AI/triton-das.git"
 
 build:triton-wheel:
   stage: build
@@ -123,3 +127,24 @@ publish:
     paths:
       - output/*.whl
     expire_in: 30 days
+
+# Mirror only release/3.6.x to GitHub (read-mostly public mirror).
+mirror:github:
+  stage: mirror
+  timeout: 30m
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME == "release/3.6.x"'
+  tags:
+    - nmz
+  script:
+    - test -n "${GITHUB_MIRROR_TOKEN}" || (echo "GITHUB_MIRROR_TOKEN is not set in CI Variables" && exit 1)
+    - test -n "${GITHUB_MIRROR_REPO}" || (echo "GITHUB_MIRROR_REPO is not set" && exit 1)
+    # Ensure full branch history is available for a non-shallow push.
+    - git fetch --unshallow origin "${CI_COMMIT_REF_NAME}" 2>/dev/null || git fetch origin "${CI_COMMIT_REF_NAME}"
+    - git remote remove github 2>/dev/null || true
+    - git remote add github "https://x-access-token:${GITHUB_MIRROR_TOKEN}@${GITHUB_MIRROR_REPO}"
+    # Fetch tip so --force-with-lease has a local expectation to compare against.
+    - git fetch github "${CI_COMMIT_REF_NAME}:refs/remotes/github/${CI_COMMIT_REF_NAME}" || true
+    # One-way mirror: GitLab is source of truth; refuse if GitHub moved since fetch.
+    - git push --force-with-lease=refs/heads/${CI_COMMIT_REF_NAME}:refs/remotes/github/${CI_COMMIT_REF_NAME} github "HEAD:refs/heads/${CI_COMMIT_REF_NAME}"
+    - 'echo "Mirrored ${CI_COMMIT_REF_NAME}@$(git rev-parse --short HEAD) -> ${GITHUB_MIRROR_REPO}"'
