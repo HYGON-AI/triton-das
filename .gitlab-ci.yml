@@ -1,4 +1,5 @@
 stages:
+  - quality-gate
   - build
   - publish
   - mirror
@@ -16,6 +17,20 @@ variables:
   # Auth: set masked CI Variable GITHUB_MIRROR_TOKEN (fine-grained PAT with contents:write).
   GITHUB_MIRROR_REPO: "github.com/HYGON-AI/triton-das.git"
 
+quality-gate:
+  stage: quality-gate
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
+  tags:
+    - nmz
+  script:
+    - pip install hygon_quality_gate[scanners]
+    - python -m hygon_pr_gate.install_tools
+    # 拉取目标分支，供 --base 对比
+    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - quality-pr-scan --base origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --head ${CI_COMMIT_SHA}
+
 build:triton-wheel:
   stage: build
   timeout: 3h
@@ -29,10 +44,8 @@ build:triton-wheel:
     - cd /opt && tar -xzf $(basename ${DTK_PKG}) && mv dtk-* dtk
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
     # 安装 AICC
-    - src_dir="/ArchivedFile/ai_cc/nightly"
-    - latest_run=$(cd "$src_dir" && ls dtk_llvm_*.run 2>/dev/null | sed 's/\.run$//' | sort -t '_' -k4 -nr | head -n1)
-    - 'echo "完整安装包路径: ${src_dir}/${latest_run}.run"'
-    - test -n "${latest_run}" && cp "${src_dir}/${latest_run}.run" ./ && chmod +x "${latest_run}.run" && yes | bash "${latest_run}.run" && echo "AICC 安装完成" || echo "跳过 AICC 安装"
+    - wget http://42.228.13.241:18000/ai_cc/Nightly/hcu_llvm_installer.sh
+    - bash hcu_llvm_installer.sh  --major 1.0.0
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'
