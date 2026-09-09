@@ -23,7 +23,7 @@ quality-gate:
   stage: quality-gate
   allow_failure: true
   rules:
-    - when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
   tags:
     - nmz
   script:
@@ -37,7 +37,7 @@ build:triton-wheel:
   stage: build
   timeout: 3h
   rules:
-    - when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
   tags:
     - nmz
   before_script:
@@ -96,7 +96,7 @@ publish:
   image: ${BASE_COMPILE_IMAGE}
   timeout: 3h
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME =~ /^(release\/|staging)/'
   tags:
     - nmz
   parallel:
