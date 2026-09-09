@@ -1329,6 +1329,29 @@ static Value convertBf16ToFp32(Location loc,
   return b.bitcast(shifted, f32_ty);
 }
 
+static SmallVector<Value>
+convertFp32ToBf16PairRTNE(Location loc, ConversionPatternRewriter &rewriter,
+                          Value v0, Value v1) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  // Match the scalar software RTNE and canonical NaN (0x7fff), but retain
+  // the rounded bits in the upper half for direct pair packing.
+  auto roundToBf16Bits = [&](Value v) {
+    Value bits = b.bitcast(v, i32_ty);
+    Value lsb = b.and_(i32_ty, b.lshr(i32_ty, bits, b.i32_val(16)), b.i32_val(1));
+    Value rounded = b.add(b.add(bits, lsb), b.i32_val(0x7FFF));
+    return b.select(checkIsNan(b, v), b.i32_val(0x7FFF0000), rounded);
+  };
+  Value lo = roundToBf16Bits(v0);
+  Value hi = roundToBf16Bits(v1);
+  // Extract bytes 2/3 from each rounded value directly, rather than shifting
+  // each value by 16 and then packing its low half. No lane exchange is needed.
+  // permute expands the nibble selector 0x7632 to byte selector 0x07060302.
+  Value packed = LLVM::AMD::permute(loc, rewriter, hi, lo, b.i32_val(0x7632));
+  Value pair = b.bitcast(packed, vec_ty(bf16_ty, 2));
+  return {b.extract_element(bf16_ty, pair, b.i32_val(0)),
+          b.extract_element(bf16_ty, pair, b.i32_val(1))};
+}
+
 static Value convertFp32ToBf16(Location loc,
                                ConversionPatternRewriter &rewriter,
                                const Value &v, const RoundingMode rounding,
@@ -1390,6 +1413,11 @@ static SmallVector<Value> Fp32_to_F16_RTNE(Location loc,
 
   if (outElemTy.isBF16()) {
     assert(inElemTy.isF32() && "unsupported conversion");
+    // Pair consecutive per-thread elements, not lanes. Returning two values
+    // advances ElementwiseOpConversionBase by two; a remaining scalar falls back.
+    if (!capBF16F32 && operands.size() >= 2)
+      return convertFp32ToBf16PairRTNE(loc, rewriter, operands[0][0],
+                                       operands[1][0]);
     return {convertFp32ToBf16(loc, rewriter, operands[0][0],
                                RoundingMode::RTNE, capBF16F32)};
   }
@@ -2096,6 +2124,10 @@ struct FpToFpOpConversion
     if (srcElementType.isF32() && dstElementType.isBF16()) {
       assert(roundingMode.has_value() &&
              "rounding mode must be specified for fp32->bf16 conversion");
+      if (!capBF16F32 && roundingMode == RoundingMode::RTNE &&
+          operands.size() >= 2)
+        return convertFp32ToBf16PairRTNE(loc, rewriter, operands[0][0],
+                                         operands[1][0]);
       SmallVector<Value> outVals;
       outVals.reserve(operands[0].size());
       for (Value v : operands[0]) {
