@@ -5,8 +5,6 @@ stages:
   - mirror
 
 variables:
-  FILE_SERVER_IP: "10.16.1.27"
-  FILE_SERVER_USER: "fileowner"
   PIP_INDEX_URL: "http://10.16.1.201:9929/nightly/dtk2604/+simple/"
   PIP_TRUSTED_HOST: "10.16.1.201"
   DTK_PKG: "/ArchivedFile/dtk-pkg/dtk26.04/DTK-26.04-rc4-centos8-x86_64.tar.gz"
