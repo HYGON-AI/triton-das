@@ -13,6 +13,8 @@ variables:
   DEVPI_URL: "http://10.16.1.201:9929/"
   CISMI_TIMEOUT: "3600"
   TORCH_VERSION: "2.11.0"
+  BASE_COMPILE_IMAGE_ROCKY_PY310: "harbor.sourcefind.cn:5443/dcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.10-mkl2020.4.304"
+  BASE_COMPILE_IMAGE_ROCKY_PY312: "harbor.sourcefind.cn:5443/dcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.12-mkl2020.4.304"
   # GitHub mirror target (override in CI Variables if needed).
   # Auth: set masked CI Variable GITHUB_MIRROR_TOKEN (fine-grained PAT with contents:write).
   GITHUB_MIRROR_REPO: "github.com/HYGON-AI/triton-das.git"
@@ -91,6 +93,7 @@ build:triton-wheel:
 
 publish:
   stage: publish
+  image: ${BASE_COMPILE_IMAGE}
   timeout: 3h
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -99,6 +102,9 @@ publish:
   parallel:
     matrix:
       - TORCH_VERSION: ["2.10.0", "2.11.0"]
+        BASE_COMPILE_IMAGE:
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
   before_script:
     # 安装 DTK
     - cp -f ${DTK_PKG} /opt/
@@ -132,8 +138,8 @@ publish:
         --file_server_pwd "${FILE_SERVER_PWD_DECODED}"
     # manylinux repair
     - bash scripts/hcu/repair_manylinux.sh
-    # repair wheel
-    - CIUpload REPAIR --dtk_version $(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.') --torch_version ${TORCH_VERSION} --git_commit $(git rev-parse --short=6 HEAD) --outputdir output -f dist/*.whl
+    # repair wheel (only manylinux wheels, plain linux_x86_64 is not uploaded)
+    - CIUpload REPAIR --dtk_version $(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.') --torch_version ${TORCH_VERSION} --git_commit $(git rev-parse --short=6 HEAD) --outputdir output -f dist/*manylinux*.whl
     # upload
     - CIUpload NIGHTLY --password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl --record
   artifacts:
