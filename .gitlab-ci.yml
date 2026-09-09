@@ -21,7 +21,7 @@ quality-gate:
   stage: quality-gate
   allow_failure: true
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
+    - when: never
   tags:
     - nmz
   script:
@@ -35,7 +35,7 @@ build:triton-wheel:
   stage: build
   timeout: 3h
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
+    - when: never
   tags:
     - nmz
   before_script:
@@ -93,7 +93,7 @@ publish:
   stage: publish
   timeout: 3h
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME =~ /^(release\/|staging)/'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   tags:
     - nmz
   parallel:
@@ -135,7 +135,7 @@ publish:
     # repair wheel
     - CIUpload REPAIR --dtk_version $(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.') --torch_version ${TORCH_VERSION} --git_commit $(git rev-parse --short=6 HEAD) --outputdir output -f dist/*.whl
     # upload
-    - CIUpload --devpi_url ${DEVPI_URL} --devpi_user ${devpi_nightly_user} --devpi_password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl
+    - CIUpload NIGHTLY --password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl --record
   artifacts:
     paths:
       - output/*.whl
