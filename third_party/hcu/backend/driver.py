@@ -9,6 +9,7 @@ from triton.backends.compiler import GPUTarget
 from triton.backends.driver import GPUDriver
 from triton.runtime import _allocation
 from triton.runtime.build import compile_module_from_src
+from .xcd import XCDLaunchMetadata
 
 # Editable: backends/hcu is a symlink; joining hcu/../amd walks into
 # third_party/hcu/amd. Build backends/amd/include via the parent instead.
@@ -239,7 +240,36 @@ FLOAT_PACK_FUNCTION = {
     "fp64": "pack_fp64",
 }
 
-_BASE_ARGS_FORMAT = "piiiKKOOOOO"
+_BASE_ARGS_FORMAT = "piiiKKOOOOOO"
+
+
+# BEGIN HCU XCD: Python protocol encoding
+# Keep vendor constants/packing together and separate from generic launch code.
+# The matching enums and union are declared in the bundled hip_runtime_api.h.
+_XCD_MODE_BLOCK, _XCD_MODE_LINEAR, _XCD_MODE_FIXED = 0, 1, 2
+_XCD_MAX_MASK = 0xf
+_XCD_MAX_CHUNK = 0x7fffffff  # Vendor AQL field, not sizeof(unsigned int).
+_XCD_MAX_BLOCK = 0x7ff
+
+
+def _pack_xcd_metadata(config):
+    """Check protocol bounds and encode one request; no device/model state."""
+    if not isinstance(config, XCDLaunchMetadata):
+        raise TypeError("xcd_metadata must be an XCDLaunchMetadata")
+    if config.die_mask > _XCD_MAX_MASK:
+        raise ValueError("die_mask exceeds the vendor ABI's four mask bits")
+    if config.chunk_size > _XCD_MAX_CHUNK:
+        raise ValueError("chunk_size exceeds the vendor AQL 31-bit field")
+    if config.block_x > _XCD_MAX_BLOCK or config.block_y > _XCD_MAX_BLOCK:
+        raise ValueError("block dimensions exceed the vendor AQL 11-bit fields")
+    if config.mode == "block":
+        return (_XCD_MODE_BLOCK, config.die_mask, config.block_x, config.block_y)
+    if config.mode == "fixed":
+        return (_XCD_MODE_FIXED, 0, 0, 0)
+    return (_XCD_MODE_LINEAR, config.die_mask, config.chunk_size, 0)
+
+
+# END HCU XCD: Python protocol encoding
 
 
 def make_launcher(constants, signature, warp_size, tensordesc_meta):
@@ -400,6 +430,13 @@ typedef struct {{
 // code should substitute the search path placeholder.
 static const char *hipLibSearchPaths[] = {{"{libhip_path}"}};
 
+// HCU XCD: optional runtime entry points.
+// Derive the pointer type from the header without linking against the symbol.
+typedef __typeof__(&hipModuleLaunchKernelMultiDie) TritonXCDLaunchFn;
+static TritonXCDLaunchFn xcdLaunch = NULL;
+typedef hipError_t (*TritonStreamIsCapturingFn)(hipStream_t, hipStreamCaptureStatus *);
+static TritonStreamIsCapturingFn streamIsCapturing = NULL;
+
 // The list of HIP dynamic library symbols and their signature we are interested
 // in this file.
 #define HIP_SYMBOL_LIST(FOR_EACH_ERR_FN, FOR_EACH_STR_FN)                     \\
@@ -459,6 +496,9 @@ bool initSymbolTable() {{
     PyErr_SetString(PyExc_RuntimeError, "cannot open HIP runtime library");
     return false;
   }}
+  // Optional: ordinary launches must keep working with runtimes lacking this API.
+  xcdLaunch = (TritonXCDLaunchFn)dlsym(lib, "hipModuleLaunchKernelMultiDie");
+  streamIsCapturing = (TritonStreamIsCapturingFn)dlsym(lib, "hipStreamIsCapturing");
 
   typedef hipError_t (*hipGetProcAddress_fn)(
       const char *symbol, void **pfn, int hipVersion, uint64_t hipFlags,
@@ -511,11 +551,24 @@ static inline void gpuAssert(hipError_t code, const char *file, int line)
 
 #define HIP_CHECK(ans) {{ gpuAssert((ans), __FILE__, __LINE__); }}
 
-static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas, int launch_cooperative_grid, int shared_memory, hipStream_t stream, hipFunction_t function, hipDeviceptr_t profile_scratch{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas, int launch_cooperative_grid, int shared_memory, hipStream_t stream, hipFunction_t function, hipDeviceptr_t profile_scratch, hipLaunchMultiDieConfig *xcd_metadata{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
   if (gridX * gridY * gridZ == 0)
     return;
   hipDeviceptr_t global_scratch = 0;
   void *params[] = {{ {', '.join(params)} }};
+  if (xcd_metadata) {{
+    if (!xcdLaunch) {{
+      PyErr_SetString(PyExc_RuntimeError, "missing hipModuleLaunchKernelMultiDie symbol; XCD launch cannot fall back");
+      return;
+    }}
+    if (num_ctas != 1 || launch_cooperative_grid) {{
+      PyErr_SetString(PyExc_ValueError, "XCD dispatch does not support cluster/cooperative launch");
+      return;
+    }}
+    HIP_CHECK(xcdLaunch(function, gridX, gridY, gridZ, {warp_size}*num_warps, 1, 1,
+                       shared_memory, stream, params, 0, xcd_metadata));
+    return;
+  }}
   if(num_ctas > 1) {{
     if (!hipSymbolTable.hipDrvLaunchKernelEx) {{
         PyErr_SetString(PyExc_RuntimeError, "missing hipDrvLaunchKernelEx symbol; please update HIP runtime");
@@ -647,11 +700,12 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   PyObject *launch_exit_hook = NULL;
   PyObject *kernel_metadata = NULL;
   PyObject *launch_metadata = NULL;
+  PyObject *xcd_metadata_obj = Py_None;
   {' '.join([f"{_extracted_type(ty)} _arg{i}; " for i, ty in signature.items()])}
   if(!PyArg_ParseTuple(args, \"{format}\", &launch_cooperative_grid,
                                            &gridX, &gridY, &gridZ, &_stream, &_function, &profile_scratch_obj,
                                            &kernel_metadata, &launch_metadata,
-                                           &launch_enter_hook, &launch_exit_hook {args_list})) {{
+                                           &launch_enter_hook, &launch_exit_hook, &xcd_metadata_obj {args_list})) {{
     return NULL;
   }}
 
@@ -659,6 +713,49 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   int num_warps, num_ctas, shared_memory;
   if (!PyArg_ParseTuple(kernel_metadata, \"iii\", &num_warps, &num_ctas, &shared_memory)) {{
     return NULL;
+  }}
+  hipLaunchMultiDieConfig xcd_metadata = {{0}};
+  if (xcd_metadata_obj != Py_None) {{
+    int mode;
+    unsigned int mask, chunk_or_x, block_y;
+    if (!PyArg_ParseTuple(xcd_metadata_obj, "iIII", &mode, &mask, &chunk_or_x, &block_y))
+      return NULL;
+    switch (mode) {{
+    case hipDispatchBlockMode:
+      xcd_metadata.blockMode.mode = hipDispatchBlockMode;
+      xcd_metadata.blockMode.dieMask = (hipDieExecMask)mask;
+      xcd_metadata.blockMode.numMcmBlockX = chunk_or_x;
+      xcd_metadata.blockMode.numMcmBlockY = block_y;
+      break;
+    case hipDispatchLinearMode:
+      xcd_metadata.linearMode.mode = hipDispatchLinearMode;
+      xcd_metadata.linearMode.dieMask = (hipDieExecMask)mask;
+      xcd_metadata.linearMode.chunkSize = chunk_or_x;
+      break;
+    case hipDispatchFixedMode:
+      xcd_metadata.fixedMode.mode = hipDispatchFixedMode;
+      break;
+    default:
+      PyErr_SetString(PyExc_ValueError, "invalid XCD dispatch mode");
+      return NULL;
+    }}
+  }}
+  // Validate the actual launch stream before hooks or device work, not the
+  // framework's current stream (which can differ for compiled-kernel calls).
+  if (xcd_metadata_obj != Py_None) {{
+    if (!xcdLaunch || !streamIsCapturing) {{
+      PyErr_SetString(PyExc_RuntimeError,
+          "missing hipModuleLaunchKernelMultiDie or hipStreamIsCapturing symbol; XCD launch cannot fall back");
+      return NULL;
+    }}
+    hipStreamCaptureStatus capture = hipStreamCaptureStatusNone;
+    HIP_CHECK(streamIsCapturing((hipStream_t)_stream, &capture));
+    if (PyErr_Occurred())
+      return NULL;
+    if (capture != hipStreamCaptureStatusNone) {{
+      PyErr_SetString(PyExc_ValueError, "XCD dispatch does not support graph capture yet");
+      return NULL;
+    }}
   }}
   // extract launch metadata
   if (launch_enter_hook != Py_None){{
@@ -681,7 +778,9 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   {newline.join(tensor_desc_decls)}
   {newline.join(ptr_decls)}
   {newline.join(float_storage_decls)}
-  _launch(gridX, gridY, gridZ, num_warps, num_ctas, launch_cooperative_grid, shared_memory, (hipStream_t)_stream, (hipFunction_t)_function, (hipDeviceptr_t)profile_scratch{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch(gridX, gridY, gridZ, num_warps, num_ctas, launch_cooperative_grid, shared_memory, (hipStream_t)_stream, (hipFunction_t)_function, (hipDeviceptr_t)profile_scratch, xcd_metadata_obj == Py_None ? NULL : &xcd_metadata{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  if (PyErr_Occurred())
+    return NULL;
 
   if(launch_exit_hook != Py_None){{
     PyObject* ret = PyObject_CallOneArg(launch_exit_hook, launch_metadata);
@@ -836,7 +935,12 @@ class HCULauncher(object):
         self.profile_scratch_size = metadata.profile_scratch_size
         self.profile_scratch_align = metadata.profile_scratch_align
 
-    def __call__(self, gridX, gridY, gridZ, stream, function, *args):
+    def __call__(self, gridX, gridY, gridZ, stream, function, *args, xcd_metadata=None):
+        packed_xcd = None
+        if xcd_metadata is not None:
+            packed_xcd = _pack_xcd_metadata(xcd_metadata)
+            if any(type(n) is not int or not 0 <= n <= 0x7fffffff for n in (gridX, gridY, gridZ)):
+                raise ValueError("XCD grid must contain three nonnegative C int values")
 
         def allocate_scratch(size, align, allocator):
             if size > 0:
@@ -849,7 +953,8 @@ class HCULauncher(object):
         profile_scratch = allocate_scratch(self.profile_scratch_size, self.profile_scratch_align,
                                            _allocation._profile_allocator)
 
-        self.launch(self.launch_cooperative_grid, gridX, gridY, gridZ, stream, function, profile_scratch, *args)
+        self.launch(self.launch_cooperative_grid, gridX, gridY, gridZ, stream, function, profile_scratch,
+                    *args[:4], packed_xcd, *args[4:])
 
 
 class HCUDriver(GPUDriver):

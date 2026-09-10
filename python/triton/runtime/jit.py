@@ -357,6 +357,14 @@ def mangle_type(arg, specialize=False):
     return native_specialize_impl(BaseBackend, arg, is_const, specialize, align)[0]
 
 
+def separate_xcd_metadata(kwargs, arg_names):
+    """Separate per-launch XCD metadata before binding and cache lookup."""
+    # A real kernel argument with this name retains its original meaning.
+    if "xcd_metadata" in arg_names:
+        return None
+    return kwargs.pop("xcd_metadata", None)
+
+
 class KernelInterface(Generic[T]):
     run: T
 
@@ -698,6 +706,7 @@ class JITFunction(JITCallable, KernelInterface[T]):
         return options, signature, constexprs, attrs
 
     def run(self, *args, grid, warmup, **kwargs):
+        xcd_metadata = separate_xcd_metadata(kwargs, self.arg_names)
         kwargs["debug"] = kwargs.get("debug", self.debug) or knobs.runtime.debug
         kwargs["instrumentation_mode"] = knobs.compilation.instrumentation_mode
 
@@ -747,7 +756,8 @@ class JITFunction(JITCallable, KernelInterface[T]):
             # launch kernel
             launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
             kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
-                       knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *bound_args.values())
+                       knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *bound_args.values(),
+                       **({"xcd_metadata": xcd_metadata} if xcd_metadata is not None else {}))
         return kernel
 
     def repr(self, _):

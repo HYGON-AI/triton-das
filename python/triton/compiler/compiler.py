@@ -513,12 +513,13 @@ class CompiledKernel:
     def __getitem__(self, grid):
         self._init_handles()
 
-        def runner(*args, stream=None):
+        def runner(*args, stream=None, xcd_metadata=None):
             if stream is None:
                 device = driver.active.get_current_device()
                 stream = driver.active.get_current_stream(device)
             launch_metadata = self.launch_metadata(grid, stream, *args)
             self.run(grid[0], grid[1], grid[2], stream, self.function, self.packed_metadata, launch_metadata,
-                     knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *args)
+                     knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *args,
+                     **({"xcd_metadata": xcd_metadata} if xcd_metadata is not None else {}))
 
         return runner

@@ -1419,6 +1419,44 @@ typedef struct hipExternalSemaphoreWaitParams_st {
   unsigned int reserved[16];
 } hipExternalSemaphoreWaitParams;
 
+/**
+ * Multi-die dispatch mode
+ */
+typedef enum hipDispatchMode {
+    hipDispatchBlockMode = 0,
+    hipDispatchLinearMode = 1,
+    hipDispatchFixedMode = 2,
+} hipDispatchMode;
+/**
+ * Multi-die exec mask
+ */
+typedef enum hipDieExecMask {
+    hipDieAll = 0,
+    hipDie0 = 1,
+    hipDie1 = 2,
+    hipDie2 = 4,
+    hipDie3 = 8,
+} hipDieExecMask;
+/**
+ * Multi-Die launch kernel config for hipLaunchKernelMultiDie
+ */
+typedef union hipLaunchMultiDieConfig_t {
+    struct {
+        hipDispatchMode mode;
+        hipDieExecMask dieMask;
+        unsigned int numMcmBlockX;
+        unsigned int numMcmBlockY;
+    } blockMode;
+    struct {
+        hipDispatchMode mode;
+        hipDieExecMask dieMask;
+        unsigned int chunkSize;
+    } linearMode;
+    struct {
+        hipDispatchMode mode;
+    } fixedMode;
+} hipLaunchMultiDieConfig;
+
 #if __HIP_HAS_GET_PCH
 /**
  * Internal use only. This API may change in the future
@@ -6620,6 +6658,19 @@ hipError_t hipModuleLaunchKernel(hipFunction_t f, unsigned int gridDimX, unsigne
                                  unsigned int blockDimY, unsigned int blockDimZ,
                                  unsigned int sharedMemBytes, hipStream_t stream,
                                  void** kernelParams, void** extra);
+
+/**
+ * @brief Launch a module kernel with a multi-die dispatch configuration.
+ * @param [in] dieConfig Multi-die dispatch configuration.
+ * Other arguments have the same meaning as in hipModuleLaunchKernel.
+ * This HCU extension must be resolved dynamically on older runtimes.
+ */
+hipError_t hipModuleLaunchKernelMultiDie(hipFunction_t f, unsigned int gridDimX, unsigned int gridDimY,
+                                         unsigned int gridDimZ, unsigned int blockDimX,
+                                         unsigned int blockDimY, unsigned int blockDimZ,
+                                         unsigned int sharedMemBytes, hipStream_t stream,
+                                         void** kernelParams, void** extra,
+                                         hipLaunchMultiDieConfig* dieConfig);
 /** \addtogroup ModuleCooperativeG Cooperative groups kernel launch of Module management.
  * \ingroup Module
  *  @{ */

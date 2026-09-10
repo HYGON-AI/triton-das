@@ -9,7 +9,7 @@ from pathlib import Path
 from collections import namedtuple, defaultdict
 from typing import Callable, Iterable, Optional, Union
 from triton.runtime.driver import driver
-from triton.runtime.jit import JITFunction as _JITFunction
+from triton.runtime.jit import JITFunction as _JITFunction, separate_xcd_metadata
 
 from triton.runtime.cache import FileCacheManager
 from triton.compiler.compiler import CompiledKernel, ASTSource
@@ -101,6 +101,7 @@ class FastJITFunction(_JITFunction):
         return res
 
     def run(self, *args, grid, warmup, **kwargs):
+        xcd_metadata = separate_xcd_metadata(kwargs, self.arg_names)
         bound_args, non_constexpr_vals, kernel_key, set_dns = _cy_binder(
             torch.Tensor, self._param_names, self._param_is_constexpr, self._param_has_default,
             self._param_defaults, args, kwargs, self._dns_set, self._auto_dns, self._dns_threshold,
@@ -120,6 +121,8 @@ class FastJITFunction(_JITFunction):
         if kernel_key not in self.saved_kernel_cache:
             logger.warning(f"{self.saved_cache_key}: Not found saved kernel {kernel_key} in cache, "
                            "fallback to triton.jit")
+            if xcd_metadata is not None:
+                kwargs["xcd_metadata"] = xcd_metadata
             return self.fallback(*args, grid=grid, warmup=warmup, key=kernel_key, **kwargs)
         path = self.saved_kernel_cache[kernel_key]
 
@@ -186,6 +189,8 @@ class FastJITFunction(_JITFunction):
             metadata_path = metadata_group.get(metadata_filename)
             if not metadata_path:
                 logger.warning(f"{self.saved_cache_key}: Not found metadata in {get_cache_dir()}/{path}, fallback to triton.jit")
+                if xcd_metadata is not None:
+                    kwargs["xcd_metadata"] = xcd_metadata
                 return self.fallback(*args, grid=grid, warmup=warmup, key=kernel_key, overwrite=True, **kwargs)
             self.kernel_cache[path] = CompiledKernel(src, metadata_group, None)
 
@@ -210,10 +215,12 @@ class FastJITFunction(_JITFunction):
             launch_metadata = kernel.launch_metadata(grid, stream, *non_constexpr_vals)
             if triton_version_float >= 3.3:
                 kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
-                           knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *bound_args.values())
+                           knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *bound_args.values(),
+                           **({"xcd_metadata": xcd_metadata} if xcd_metadata is not None else {}))
             else:
                 kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
-                           kernel.launch_enter_hook, kernel.launch_exit_hook, *non_constexpr_vals)
+                           kernel.launch_enter_hook, kernel.launch_exit_hook, *non_constexpr_vals,
+                           **({"xcd_metadata": xcd_metadata} if xcd_metadata is not None else {}))
 
         return kernel
 
