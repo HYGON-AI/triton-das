@@ -1,3 +1,4 @@
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm="arch=gfx942 ftz=True" | FileCheck %s --check-prefixes=COMMON,LLVM_FTZ
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm="arch=gfx942 ftz=False" | FileCheck %s --check-prefixes=COMMON,LLVM_NO_FTZ
 
@@ -50,8 +51,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
     // LLVM_NO_FTZ-LABEL: test_sqrt_f32
     // LLVM_NO_FTZ: llvm.fcmp "ogt"
     // LLVM_NO_FTZ: llvm.fmul
-    // LLVM_NO_FTZ-NEXT: llvm.select
-    // LLVM_NO_FTZ-NEXT: llvm.amdgcn.sqrt.f32
+    // LLVM_NO_FTZ-NEXT: %[[SCALED:.*]] = llvm.select
+    // LLVM_NO_FTZ-NEXT: llvm.call @llvm.amdgcn.sqrt.f32(%[[SCALED]])
     // LLVM_NO_FTZ: llvm.fmul
     // LLVM_NO_FTZ-NEXT: llvm.select
     %0 = math.sqrt %arg0 : tensor<64xf32, #blocked>
@@ -64,22 +65,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
 #blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx942", "ttg.threads-per-warp" = 64 : i32} {
   tt.func public @test_sqrt_rn_f32(%arg0: tensor<64xf32, #blocked>) {
-    // LLVM_FTZ-LABEL: test_sqrt_rn_f32
-    // LLVM_FTZ: llvm.amdgcn.rsq.f32
-    // LLVM_FTZ: llvm.fmul
-    // LLVM_FTZ: llvm.fmul
-    // LLVM_FTZ: llvm.fneg
-    // LLVM_FTZ: llvm.intr.fma
-    // LLVM_FTZ-NEXT: llvm.intr.fma
-    // LLVM_FTZ-NEXT: llvm.intr.fma
-    // LLVM_FTZ-NEXT: llvm.fneg
-    // LLVM_FTZ-NEXT: llvm.intr.fma
-    // LLVM_FTZ-NEXT: llvm.intr.fma
-    // LLVM_FTZ-NEXT: llvm.intr.is.fpclass
-    // LLVM_FTZ-NEXT: llvm.select
-    //
-    // LLVM_NO_FTZ-LABEL: test_sqrt_rn_f32
-    // LLVM_NO_FTZ: llvm.intr.sqrt
+    // COMMON-LABEL: test_sqrt_rn_f32
+    // COMMON-NOT: llvm.call
+    // COMMON: llvm.intr.sqrt
+    // COMMON-NOT: llvm.intr.fma
+    // COMMON: llvm.return
     %0 = tt.precise_sqrt %arg0 : tensor<64xf32, #blocked>
     tt.return
   }
