@@ -49,6 +49,9 @@ class HIPOptions:
     matrix_instr_nonkdim: int = 0
     kpack: int = 1
     allow_flush_denorm: bool = False
+    # Whether the user explicitly supplied allow_flush_denorm,
+    # regardless of whether its value is True or False.
+    allow_flush_denorm_explicitly_set: bool = False
     max_num_imprecise_acc_default: int = 0
     backend_name: str = 'hip'
     instrumentation_mode: str = ""
@@ -227,6 +230,14 @@ class HIPBackend(BaseBackend):
 
         args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() \
                      if k in opts and opts[k] is not None})
+
+        # Preserve the marker when reparsing serialized options.
+        # User input                     -> allow_flush_denorm_explicitly_set
+        # allow_flush_denorm omitted      -> False
+        # allow_flush_denorm=False        -> True
+        # allow_flush_denorm=True         -> True
+        if opts.get("allow_flush_denorm_explicitly_set") is None:
+            args["allow_flush_denorm_explicitly_set"] = opts.get("allow_flush_denorm") is not None
 
         cluster = int(args.get("enable_v_mmac_cluster", 0))
         if cluster not in (0, 1, 2):
@@ -770,6 +781,9 @@ class HIPBackend(BaseBackend):
         ## 3. __HIP_FTZ is default to 1 and not exposed as a kernel argument.
         ##    For now it is used as a controller for developers only.
         __HIP_FTZ = True
+        # Honor the user policy only when explicitly supplied.
+        if options.allow_flush_denorm_explicitly_set:
+            __HIP_FTZ = options.allow_flush_denorm
         # Before TTGIR->LLVMIR: materialize func.* (noalias / attr passthrough)
         # and drop FuncOp/ModuleOp tt.hint.* (incl. mod.flag.*).
         hcu.passes.ttgpuir.add_apply_func_hints_and_clean(pm)
