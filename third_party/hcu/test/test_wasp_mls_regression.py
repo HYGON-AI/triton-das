@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 """
 HCU WASP / WASP+WDRA regression matrix: GEMM & FA × MLS & non-MLS.
 
@@ -613,6 +617,42 @@ def _mode_tag(wasp: bool, wdra: bool, load_warps: int, mma_warps: int,
     return tag
 
 
+def run_dense_fa(sequence: int, stages: int, dim: int, causal: bool,
+                 *, compile_only: bool = False) -> None:
+    """Exercise transposed K and repeated barrier epochs with distinct Q/K/V."""
+    kernel = _load_sibling("fa_dense_regression", "fa_dense.py")._flash_attention_fwd_kernel
+
+    if compile_only:
+        print("  (dense FA has no compile-only mode; running full accuracy check)")
+    generator = torch.Generator().manual_seed(2026)
+    q, k, v = [torch.randn((1, 1, sequence, dim), dtype=torch.float16,
+                          generator=generator) for _ in range(3)]
+    scores = q.float() @ k.float().transpose(-1, -2) / math.sqrt(dim)
+    if causal:
+        scores.masked_fill_(torch.ones(sequence, sequence, dtype=torch.bool).triu(1),
+                            float("-inf"))
+    ref_out = scores.softmax(-1) @ v.float()
+    ref_lse = scores.logsumexp(-1)
+    q, k, v = q.cuda(), k.cuda(), v.cuda()
+    out = torch.empty_like(q)
+    lse = torch.empty((1, 1, sequence), device=q.device, dtype=torch.float32)
+    block_m = 32 if dim == 128 else 64
+    kernel[(triton.cdiv(sequence, block_m),)](
+        q, k, v, out, lse, dim ** -0.5,
+        *q.stride(), *k.stride(), *v.stride(), *out.stride(), *lse.stride(),
+        N_CTX=sequence, NUM_HEADS=1, NUM_Q_BLOCKS=triton.cdiv(sequence, block_m),
+        HEAD_DIM=dim, BLOCK_M=block_m, BLOCK_N=32, CAUSAL=causal,
+        WARP_SPECIALIZE=True, num_stages=stages, num_warps=4,
+        waves_per_eu=1, matrix_instr_nonkdim=16, kpack=2,
+        wasp_enabled=True, wdra_enabled=True, wasp_num_load_warps=4,
+        wasp_num_mma_warps=8, wdra_num_load_regs=32,
+        wdra_num_mma_regs_main=164, wdra_num_mma_regs_tail=164,
+        enable_v_mmac_cluster=1, enable_consumer_pingpong=True,
+        optimize_epilogue=True, hcu_use_gfx946_sched_model_v2=False)
+    torch.testing.assert_close(out.cpu().float(), ref_out, atol=0.005, rtol=0.005)
+    torch.testing.assert_close(lse.cpu(), ref_lse, atol=0.005, rtol=0.005)
+
+
 def all_cases(*, include_nowrap: bool = False) -> List[Case]:
     """Default matrix is wasp/wdra only; nowrap is opt-in via --mode nowrap.
 
@@ -693,6 +733,19 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
                 name=name, kind="gemm", use_mls=True, wasp=wasp, wdra=wdra,
                 load_warps=load_w, mma_warps=mma_w, run=runner, shape=shape,
                 num_stages=nstages, use_matrix_store=True,
+            ))
+    if not include_nowrap:
+        for sequence, stages, dim, causal in (
+            (160, 2, 64, False), (288, 4, 64, False),
+            (512, 2, 128, False), (1024, 2, 64, True),
+            (1024, 2, 128, True),
+        ):
+            cases.append(Case(
+                name=f"fa/dense/s{sequence}d{dim}/causal{int(causal)}/wdra4+8/ns{stages}",
+                kind="fa", use_mls=False, wasp=True, wdra=True,
+                load_warps=4, mma_warps=8, num_stages=stages,
+                run=lambda co, s=sequence, ns=stages, d=dim, c=causal:
+                    run_dense_fa(s, ns, d, c, compile_only=co),
             ))
     return cases
 

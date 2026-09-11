@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -256,7 +260,9 @@ static std::optional<WarpSchedule> getInitialSchedule(scf::ForOp loop) {
     }
     while (!operandViews.empty()) {
       Operation *op = operandViews.pop_back_val();
-      if (!isa<LocalLoadOp>(op))
+      // Follow dot operand views so consumer synchronization is not assigned
+      // to root and replicated into producer warps.
+      if (!isa<LocalLoadOp, TransOp, ConvertLayoutOp>(op))
         continue;
 
       // Duplicate the op if necessary to ensure that the MMA partition is the only user.
