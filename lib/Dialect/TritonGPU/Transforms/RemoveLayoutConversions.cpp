@@ -1223,10 +1223,14 @@ void LayoutRematerialization::backwardRematerialization(
   // Measure the number of bytes that we're manipulating with the
   // ConvertLayoutOp. We pessimistically assume that we round-trip
   // through shared memory and that we cannot vectorise sub-register
-  // loads/stores, so we set a minimum element count of 32 (the warp
-  // size and number of shared memory banks) and minimum bitwidth of
+  // loads/stores, so we set a minimum element count of threads-per-warp
+  // (ttg.threads-per-warp: 32 on NVIDIA, 64 on HCU) and minimum bitwidth of
   // 32 (the width per bank of the shared memory load/store unit).
-  int64_t convertLayoutBytes = getByteCount(convertOp.getSrc(), 32, 32);
+  auto mod = convertOp->getParentOfType<ModuleOp>();
+  int64_t minElementCount =
+      mod ? TritonGPUDialect::getThreadsPerWarp(mod) : 32;
+  int64_t convertLayoutBytes =
+      getByteCount(convertOp.getSrc(), minElementCount, 32);
 
   // We measure costs in standardised milli-SM-cycles. The smem load
   // and store each cost 8 * convertLayoutBytes, and then we double
