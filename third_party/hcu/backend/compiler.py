@@ -336,6 +336,8 @@ class HIPBackend(BaseBackend):
         if t.numel() == 0:
             return 0
 
+        if t.is_contiguous():
+            return t.numel() * t.element_size()
         offset = sum((size_i - 1) * stride_i for size_i, stride_i in zip(t.shape, t.stride()))
         elements = offset + 1
         return elements * t.element_size()
