@@ -90,16 +90,16 @@ namespace {
 // The private ID survives later cloning and associates only that payload load
 // with the target cache-swizzle stride:
 //
-//   chip      arch     warmup request       matched payload stride
-//   ZhongDa   gfx928   under runtime guard  8 KiB
-//   YueYing   gfx92a   under runtime guard  8 KiB
-//   BMZ       gfx936   under runtime guard  8 KiB
-//   NMZ       gfx938   under runtime guard  32 KiB
-//   ShaoBo    gfx946   under runtime guard  32 KiB
+//   arch     warmup request       matched payload stride
+//   gfx928   under runtime guard  8 KiB
+//   gfx92a   under runtime guard  8 KiB
+//   gfx936   under runtime guard  8 KiB
+//   gfx938   under runtime guard  32 KiB
+//   gfx946   under runtime guard  32 KiB
 //
 // The runtime guard controls whether the translation request executes; it
-// deliberately does not select the descriptor stride. NMZ and early ShaoBo
-// have a known 32 KiB base/offset alias hardware bug (fixed in ShaoBo B1), so
+// deliberately does not select the descriptor stride. gfx938 and early gfx946
+// have a known 32 KiB base/offset alias hardware bug (fixed in gfx946 B1), so
 // this option must remain autotuned and covered by end-to-end correctness
 // tests.
 //

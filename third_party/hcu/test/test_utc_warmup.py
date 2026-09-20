@@ -1,4 +1,4 @@
-"""NMZ/BMZ UTC warmup smoke test."""
+"""gfx938/gfx936 UTC warmup smoke test."""
 
 import os
 import re
@@ -12,7 +12,7 @@ import triton.language as tl
 os.environ.setdefault("AMDGCN_USE_BUFFER_OPS", "1")
 
 
-def _is_nmz_or_bmz():
+def _is_gfx938_or_gfx936():
     try:
         target = triton.runtime.driver.active.get_current_target()
     except Exception:
@@ -25,8 +25,8 @@ def _is_nmz_or_bmz():
 
 
 pytestmark = pytest.mark.skipif(
-    not _is_nmz_or_bmz(),
-    reason="UTC warmup smoke test requires BMZ (gfx936) or NMZ (gfx938)",
+    not _is_gfx938_or_gfx936(),
+    reason="UTC warmup smoke test requires gfx936 or gfx938",
 )
 
 
@@ -143,7 +143,7 @@ def _warmup_loads(amdgcn):
 
 
 def test_utc_warmup():
-    """Check final warmup instructions and GEMM correctness on BMZ/NMZ."""
+    """Check final warmup instructions and GEMM correctness on gfx936/gfx938."""
     torch.manual_seed(0)
     M = N = 256
     K = 8192  # Each compact A/B operand panel spans two complete 2 MiB pages.

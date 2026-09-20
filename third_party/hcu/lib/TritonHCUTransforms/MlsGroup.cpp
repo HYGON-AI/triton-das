@@ -82,7 +82,7 @@ static bool forEachCompatibleMlsVersion(unsigned version, Fn &&fn) {
 
 auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
   static MlsInsnGroupMap MlsInsnMap {
-    // -------------------------------------- NMZ --------------------------------------------------
+    // -------------------------------------- gfx938 --------------------------------------------------
     // b16:
     // matrix_load_32x16_b16: AT/BN(transpose = 1), interleave 0,  mnk required elems tile: [16, 16, 32] -> load tile: [16, 16, 32] -> lds tile: [16, 16, 32]
     {{16, 32, true, 16, MlsElemBitTyKind::None, MlsInterleaveKind::InterleaveNone, 1},
@@ -146,7 +146,7 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
       }
     },
 
-    // -------------------------------------- YY and SB --------------------------------------------
+    // -------------------------------------- gfx92a and gfx946 --------------------------------------------
     // b16:
     // matrix_load_32x16_b16: AT/BN(transpose = 1), interleave 0,  mnk required elems tile: [16, 16, 32] -> load tile: [16, 16, 32] -> lds tile [16, 16, 32]
     {{16, 32, true, 16, MlsElemBitTyKind::None, MlsInterleaveKind::InterleaveNone, 2},
@@ -219,7 +219,7 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
     },
 
     // situation1: U4I4F4(Global 4bit -> Shared 8bit -> DotOperand 8bit)
-    // b4 u4 padding:    YY don't have ds_pad_b4 insts, but have ds_pad_b6 insts
+    // b4 u4 padding:    gfx92a don't have ds_pad_b4 insts, but have ds_pad_b6 insts
     // matrix_load_64x16_u4: AT/BN(transpose = 1), interleave 0,  mnk required elems tile: [16, 16, 64] -> load tile: [16, 16, 32] -> lds tile [16, 16, 64]
     {{16, 64, true, 8, MlsElemBitTyKind::U4, MlsInterleaveKind::InterleaveNone, 2},
       {{16, 64, ROCDL::hcu_matrix_load_64X16_u4::getOperationName(), {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
@@ -280,7 +280,7 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
       }
     },
 
-    // -------------------------------------- SB ---------------------------------------------------
+    // -------------------------------------- gfx946 ---------------------------------------------------
     // situation2: B4Mix(Global 4bit -> Shared 4bit -> DotOperand 8bit)
     // b4 f4 ds_read padding for scaled_f8f6f4xf8f6f4:
     // matrix_load_128x16_b4: AT/BN(transpose = 1), interleave 0,  mnk required elems tile: [32, 32, 128] -> load tile: [32, 32, 64] -> lds tile: [32, 32, 64]

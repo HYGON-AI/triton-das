@@ -147,15 +147,15 @@ inline MlsElemBitTyKind scaleDotElemTypeToMlsElemBitTyKind(
 }
 
 // Determine MLS version based on HCU ISA features
-// Returns: 1 for NMZ, 2 for YY, 3 for SB
+// Returns: 1 for gfx938, 2 for gfx92a, 3 for gfx946
 inline unsigned getMlsVersionFromFeatures(HCUISAFeature features) {
-  if (features & HCUISAFeature::MLS_B4)     // SB supports MLS_B4 (fp4 non-padded)
+  if (features & HCUISAFeature::MLS_B4)     // gfx946 supports MLS_B4 (fp4 non-padded)
     return 3;
 
-  if (features & HCUISAFeature::MLS_FP6FP4) // YY supports MLS_FP6FP4 (fp6 and fp4 padded)
+  if (features & HCUISAFeature::MLS_FP6FP4) // gfx92a supports MLS_FP6FP4 (fp6 and fp4 padded)
     return 2;
 
-  if (features & HCUISAFeature::MLS) // NMZ supports basic MLS
+  if (features & HCUISAFeature::MLS) // gfx938 supports basic MLS
     return 1;
 
   return 0;
@@ -169,7 +169,7 @@ struct MlsInsnAttr {
   unsigned elemBitWidth;           // 8, 16, 32
   MlsElemBitTyKind elemBitTyKind;
   MlsInterleaveKind interleaveKind;
-  unsigned mlsVersion;             // 1: NMZ, 2: YY, 3: SB
+  unsigned mlsVersion;             // 1: gfx938, 2: gfx92a, 3: gfx946
 
   struct Mlnsn{
     std::array<unsigned, 2> instrShape;

@@ -5,7 +5,7 @@
 
 namespace mlir::triton::HCU {
 
-// HCU Note: Starting with ZD and newer chips, s_barrier no longer implies
+// HCU Note: Starting with gfx928 and newer chips, s_barrier no longer implies
 // s_waitcnt vmcnt(0). For patterns that require this ordering guarantee,
 // we detect them explicitly and insert s_waitcnt vmcnt(0) in IR.
 void addWaitCntHCU(ModuleOp mod);

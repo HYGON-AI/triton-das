@@ -85,13 +85,13 @@ inline constexpr HCUISAFeature &operator&=(HCUISAFeature &lhs, HCUISAFeature rhs
 HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch);
 bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature);
 
-// Buffer cache swizzle: kongming (gfx926), zhongda (gfx928), bmz (gfx936),
-// nmz (gfx938), yueying (gfx92a), shaobo (gfx946). Ordinary inference remains
+// Buffer cache swizzle: gfx926, gfx928, gfx936,
+// gfx938, gfx92a, gfx946. Ordinary inference remains
 // capped at 8 KiB; target-specific callers may request extended stride bits.
 bool supportsBufferCacheSwizzle(llvm::StringRef arch);
 
-// NMZ and ShaoBo carry cache-swizzle stride high bits in the resource
-// descriptor and can encode the UTC warmup 32 KiB policy. Yueying remains on
+// gfx938 and gfx946 carry cache-swizzle stride high bits in the resource
+// descriptor and can encode the UTC warmup 32 KiB policy. gfx92a remains on
 // the legacy 8 KiB policy.
 bool supports32KiBCacheSwizzle(llvm::StringRef arch);
 

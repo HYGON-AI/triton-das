@@ -1078,7 +1078,7 @@ def test_mls_f8f6f4_scaled_values(layout_case, with_a_scale, with_b_scale, confi
 torch.manual_seed(0)
 
 # ##################################################################################################
-# ## case 1: sb b4xb4 test
+# ## case 1: gfx946 b4xb4 test
 # M = 32
 # N = 32
 # K = 256
@@ -1118,7 +1118,7 @@ torch.manual_seed(0)
 
 
 # ###################################################################################################
-# ## case 2: sb b4xf8 test
+# ## case 2: gfx946 b4xf8 test
 # M = 32
 # N = 64
 # K = 256

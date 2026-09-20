@@ -48,7 +48,7 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
   // bit 23: Add thread ID (0)
   // bits 24-26: Reserved on RDNA/legacy CDNA. RDNA requires bit 24 to be 1;
   //             legacy CDNA requires all three bits to be 0.
-  //             On NMZ and ShaoBo these are descriptor bits 120-122,
+  //             On gfx938 and gfx946 these are descriptor bits 120-122,
   //             stride_hi_2_0. UTC warmup uses value 0b010 here to encode its
   //             fixed 32 KiB cache-swizzle stride. It does not emit a 16 KiB
   //             mode.
@@ -84,13 +84,13 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
       // stride[14] = swizzle enabling bit
       stride = LLVM::OrOp::create(rewriter, loc, enableSwizzle, strideSat);
 
-      // NMZ and ShaoBo encode the UTC warmup 32 KiB stride by setting
+      // gfx938 and gfx946 encode the UTC warmup 32 KiB stride by setting
       // stride_hi_2_0 to 0b010, i.e. descriptor bit 121 (flags bit 25).
       // Only an explicit constant 32 KiB request takes this path. Ordinary
       // dynamic strides never acquire extended descriptor bits, and there is
       // no 16 KiB software mode.
       //
-      // Known NMZ/ShaoBo 32 KiB correctness restriction: a buffer instruction
+      // Known gfx938/gfx946 32 KiB correctness restriction: a buffer instruction
       // forms its VA as base + offset. If different (base, offset) pairs reach
       // the same VA, cache swizzle may allocate that address in different L1
       // sets. Reads and writes to the alias are then not guaranteed to remain

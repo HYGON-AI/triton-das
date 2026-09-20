@@ -32,12 +32,12 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
 
   // HCU ISA cases
   switch (kind) {
-  case llvm::AMDGPU::GK_GFX928: /* ZD */
-  case llvm::AMDGPU::GK_GFX936: /* BMZ */
-  case llvm::AMDGPU::GK_GFX938: /* NMZ */
-  case llvm::AMDGPU::GK_GFX92A: /* YY */
+  case llvm::AMDGPU::GK_GFX928:
+  case llvm::AMDGPU::GK_GFX936:
+  case llvm::AMDGPU::GK_GFX938:
+  case llvm::AMDGPU::GK_GFX92A:
     return ISAFamily::CDNA3;
-  case llvm::AMDGPU::GK_GFX946: /* SB */
+  case llvm::AMDGPU::GK_GFX946:
     return ISAFamily::CDNA4;
   default:
     break;
@@ -132,18 +132,18 @@ bool supportsHCUISAFeature(llvm::StringRef arch, HCUISAFeature feature) {
   return (uint64_t(hcuIsaFeatures) & featureBits) == featureBits;
 }
 
-// Buffer cache swizzle: kongming (gfx926), zhongda (gfx928), bmz (gfx936),
-// nmz (gfx938), yueying (gfx92a), shaobo (gfx946). The ordinary path remains
+// Buffer cache swizzle: gfx926, gfx928, gfx936,
+// gfx938, gfx92a, gfx946. The ordinary path remains
 // capped at 8 KiB; UTC warmup may explicitly request the extended 32 KiB
 // encoding on gfx938/gfx946.
 bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
   static constexpr llvm::StringRef kCacheSwizzleArchs[] = {
-      "gfx926", // kongming
-      "gfx928", // zhongda
-      "gfx936", // bmz
-      "gfx938", // nmz
-      "gfx92a", // yueying
-      "gfx946", // shaobo
+      "gfx926",
+      "gfx928",
+      "gfx936",
+      "gfx938",
+      "gfx92a",
+      "gfx946",
   };
   for (llvm::StringRef supported : kCacheSwizzleArchs)
     if (arch == supported)
@@ -152,7 +152,7 @@ bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
 }
 
 bool supports32KiBCacheSwizzle(llvm::StringRef arch) {
-  // NMZ/ShaoBo bug in 32 KiB cache-swizzle mode: the cache-set mapping is
+  // gfx938/gfx946 bug in 32 KiB cache-swizzle mode: the cache-set mapping is
   // affected by the buffer descriptor base and instruction offset separately,
   // rather than by the resolved VA alone. Consequently, two different
   // (base, offset) pairs that resolve to the same VA may allocate the address

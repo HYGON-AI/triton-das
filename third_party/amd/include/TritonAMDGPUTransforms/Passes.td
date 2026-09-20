@@ -1,6 +1,6 @@
 #ifndef TRITONGPU_PASSES
 #define TRITONGPU_PASSES
-
+// Modified by Hygon Information Technology Co., Ltd., 2026.
 include "mlir/Pass/PassBase.td"
 
 def TritonAMDGPUScheduleLoops : Pass<"tritonamdgpu-schedule-loops", "mlir::ModuleOp"> {
@@ -165,7 +165,7 @@ def TritonAMDGPUConvertToBufferOps : Pass<"tritonamdgpu-convert-buffer-ops", "ml
            "If true, prove offsets with RangeAnalysis (isByteOffsetWithin4GB). If false (default), use verifyNonNegativeExpr like Triton 3.2.">,
     Option<"bufferCacheSwizzle", "buffer-cache-swizzle",
            "bool", /*default=*/"false",
-           "Enable buffer cache swizzle on kongming/zhongda/bmz/nmz/yueying (14-bit stride heuristics, max 8KB).">
+           "Enable buffer cache swizzle on gfx926/gfx928/gfx936/gfx938/gfx92a (14-bit stride heuristics, max 8KB).">
   ];
 }
 
