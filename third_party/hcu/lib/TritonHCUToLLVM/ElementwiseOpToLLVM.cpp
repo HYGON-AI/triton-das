@@ -1936,12 +1936,17 @@ struct ElementwiseOpConversionWithTargetInfoBase
         gpuKind);
   }
 
-  /* Packed BF16 elementwise instructions (V_PK_{ADD,MUL,FMA}_BF16) on
+  /* Packed BF16 arithmetic instructions (V_PK_{ADD,MUL,FMA}_BF16) on
    * gfx938/gfx946. */
   bool supportsPkBF16() const {
     return llvm::is_contained(
         {llvm::AMDGPU::GPUKind::GK_GFX938, llvm::AMDGPU::GPUKind::GK_GFX946},
         gpuKind);
+  }
+
+  /* Packed BF16 minimum/maximum instructions on gfx936/gfx938/gfx946. */
+  bool supportsPkBF16MinMax() const {
+    return supportsPkBF16() || gpuKind == llvm::AMDGPU::GPUKind::GK_GFX936;
   }
 
   Value convertBf16ToFp32(Location loc,
@@ -2352,7 +2357,8 @@ template <typename OP>
 static SmallVector<Value>
 EmitPackedDualFloatElementwiseOp(Location loc,
                                  ConversionPatternRewriter &rewriter,
-                                 MultipleOperandsRange operands, Type elemTy) {
+                                 MultipleOperandsRange operands, Type elemTy,
+                                 bool negateRhs = false) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   Type pairTy = vec_ty(elemTy, 2);
   Value va = b.undef(pairTy);
@@ -2361,6 +2367,8 @@ EmitPackedDualFloatElementwiseOp(Location loc,
   Value vc = b.undef(pairTy);
   vc = b.insert_element(pairTy, vc, operands[0][1], b.i32_val(0));
   vc = b.insert_element(pairTy, vc, operands[1][1], b.i32_val(1));
+  if (negateRhs)
+    vc = LLVM::FNegOp::create(rewriter, loc, pairTy, vc);
   Value res = OP::create(rewriter, loc, pairTy, va, vc);
   return {b.extract_element(elemTy, res, b.i32_val(0)),
           b.extract_element(elemTy, res, b.i32_val(1))};
@@ -2473,12 +2481,75 @@ struct FSubOpConversion
                                    Location loc) const {
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
-    if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
+    const bool isBf16Op = lhsElemTy.isBF16() && rhsElemTy.isBF16();
+    if (isBf16Op &&
+        !(supportsPkBF16() && operands.size() >= 2)) {
       return {EmitDualBF16ElementwiseOp<LLVM::FSubOp>(loc, rewriter, operands)};
-    } else {
-      return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0],
-                                            operands[0][1])};
     }
+    if (isBf16Op) {
+      // gfx938/gfx946 have packed BF16 add but no packed BF16 sub opcode.
+      // Negating the packed RHS preserves exact a - b behavior.
+      return EmitPackedDualFloatElementwiseOp<LLVM::FAddOp>(
+          loc, rewriter, operands, elemTy, /*negateRhs=*/true);
+    }
+    if (canUsePackedElementwise(elemTy, operands.size())) {
+      return EmitPackedDualFloatElementwiseOp<LLVM::FSubOp>(loc, rewriter,
+                                                            operands, elemTy);
+    }
+    return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0],
+                                          operands[0][1])};
+  }
+};
+
+// Destination LLVM op for the packed/scalar min/max conversions.
+template <typename OpTy>
+struct MinMaxDestOp;
+template <>
+struct MinMaxDestOp<arith::MinimumFOp> {
+  using Type = LLVM::MinimumOp;
+};
+template <>
+struct MinMaxDestOp<arith::MaximumFOp> {
+  using Type = LLVM::MaximumOp;
+};
+template <>
+struct MinMaxDestOp<arith::MinNumFOp> {
+  using Type = LLVM::MinNumOp;
+};
+template <>
+struct MinMaxDestOp<arith::MaxNumFOp> {
+  using Type = LLVM::MaxNumOp;
+};
+
+template <typename OpTy>
+struct MinMaxOpConversion
+    : ElementwiseOpConversionWithTargetInfoBase<OpTy, MinMaxOpConversion<OpTy>> {
+  using Base =
+      ElementwiseOpConversionWithTargetInfoBase<OpTy, MinMaxOpConversion<OpTy>>;
+  using Base::Base;
+  using OpAdaptor = typename Base::OpAdaptor;
+
+  using DestOp = typename MinMaxDestOp<OpTy>::Type;
+
+  bool canUsePackedMinMax(Type elemTy, size_t numOperands) const {
+    return numOperands >= 2 &&
+           ((elemTy.isF32() && this->supportsPkF32()) || elemTy.isF16() ||
+            (elemTy.isBF16() && this->supportsPkBF16MinMax()));
+  }
+
+  SmallVector<Value> createDestOps(OpTy op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    // Pair adjacent lanes and let instruction selection pick the packed
+    // op (v_pk_min/max_*). The destination op preserves the NaN semantics:
+    // fminimum/fmaximum propagate NaN, fminnum/fmaxnum do not.
+    if (canUsePackedMinMax(elemTy, operands.size())) {
+      return EmitPackedDualFloatElementwiseOp<DestOp>(loc, rewriter, operands,
+                                                      elemTy);
+    }
+    return {rewriter.create<DestOp>(loc, elemTy, operands[0][0],
+                                    operands[0][1])};
   }
 };
 
@@ -2890,6 +2961,20 @@ void populateElementwiseOpToLLVMPatterns(
   patterns.add<FSubOpConversion>(typeConverter, axisInfoAnalysis,
                                  targetInfo.getISAFamily(),
                                  targetInfo.getGPUKind(), benefit);
+  // Override the generic min/max patterns: pair adjacent per-thread lanes
+  // to expose the packed ALU to instruction selection.
+  patterns.add<MinMaxOpConversion<arith::MinimumFOp>>(
+      typeConverter, axisInfoAnalysis, targetInfo.getISAFamily(),
+      targetInfo.getGPUKind(), PatternBenefit(benefit.getBenefit() + 1));
+  patterns.add<MinMaxOpConversion<arith::MaximumFOp>>(
+      typeConverter, axisInfoAnalysis, targetInfo.getISAFamily(),
+      targetInfo.getGPUKind(), PatternBenefit(benefit.getBenefit() + 1));
+  patterns.add<MinMaxOpConversion<arith::MinNumFOp>>(
+      typeConverter, axisInfoAnalysis, targetInfo.getISAFamily(),
+      targetInfo.getGPUKind(), PatternBenefit(benefit.getBenefit() + 1));
+  patterns.add<MinMaxOpConversion<arith::MaxNumFOp>>(
+      typeConverter, axisInfoAnalysis, targetInfo.getISAFamily(),
+      targetInfo.getGPUKind(), PatternBenefit(benefit.getBenefit() + 1));
   patterns.add<FAddOpConversion>(typeConverter, axisInfoAnalysis,
                                  targetInfo.getISAFamily(),
                                  targetInfo.getGPUKind(), benefit);
