@@ -6,11 +6,49 @@
 #mma = #ttg.amd_mfma<{version = 3, warpsPerCTA = [2, 4], instrShape = [16, 16, 16], isTransposed = false, mmacLayout = 2, tilesPerWarp = [1, 2]}>
 #mma_n64 = #ttg.amd_mfma<{version = 3, warpsPerCTA = [4, 2], instrShape = [16, 16, 16], isTransposed = false, mmacLayout = 2, tilesPerWarp = [1, 2]}>
 #mma_b8 = #ttg.amd_mfma<{version = 3, warpsPerCTA = [2, 4], instrShape = [16, 16, 32], isTransposed = false, mmacLayout = 2, tilesPerWarp = [1, 2]}>
+#mma_b32 = #ttg.amd_mfma<{version = 3, warpsPerCTA = [8, 1], instrShape = [16, 16, 8], isTransposed = false, mmacLayout = 2, tilesPerWarp = [1, 2]}>
+#flat_b16 = #ttg.swizzled_shared<{vec = 8, perPhase = 2, maxPhase = 2, order = [1, 0]}>
+#flat_b32 = #ttg.swizzled_shared<{vec = 4, perPhase = 1, maxPhase = 1, order = [1, 0]}>
 #panel = #ttg.shared_linear<{offset = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [1, 0], [2, 8], [4, 0], [8, 0], [16, 0], [0, 32], [0, 64]]}, alignment = 16>
 #panel_b8 = #ttg.shared_linear<{offset = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [1, 16], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [1, 48], [2, 64]]}, alignment = 16>
 #smem = #ttg.shared_memory
 
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "hip:gfx938", "ttg.threads-per-warp" = 64 : i32} {
+  // AICC exposes m32x8.b32 for the IEEE-f32 MMAC B fragment. Its complete
+  // N32 x K8 tile uses canonical N-major flat staging.
+  // CHECK-LABEL: llvm.func @flat_b32_staging
+  // CHECK: llvm.call_intrinsic "llvm.hcu.ds.read.m32x8.b32"
+  // CHECK: llvm.return
+  tt.func public @flat_b32_staging() {
+    %tile = ttg.local_alloc : () -> !ttg.memdesc<8x32xf32, #flat_b32, #smem, mutable>
+    %b = ttg.local_load %tile : !ttg.memdesc<8x32xf32, #flat_b32, #smem, mutable> -> tensor<8x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma_b32, kWidth = 2}>>
+    tt.return
+  }
+
+  // Arbitrary outer K/N problems use masked/padded full physical tiles. The
+  // local B staging tile itself must remain a complete, representable 64x128
+  // flat B layout so every K16 x N32 fragment can use matrix reads.
+  // CHECK-LABEL: llvm.func @flat_padded_b16_staging
+  // CHECK-COUNT-4: llvm.call_intrinsic "llvm.hcu.ds.read.m32x16.b16"
+  // CHECK-NOT: llvm.call_intrinsic "llvm.hcu.ds.read.m32x16.b16"
+  // CHECK: }
+  tt.func public @flat_padded_b16_staging() {
+    %tile = ttg.local_alloc : () -> !ttg.memdesc<64x128xf16, #flat_b16, #smem, mutable>
+    %b = ttg.local_load %tile : !ttg.memdesc<64x128xf16, #flat_b16, #smem, mutable> -> tensor<64x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 4}>>
+    tt.return
+  }
+
+  // B16 needs a complete K16 matrix-read tile. A shorter K extent must not
+  // accidentally issue a cooperative read beyond the logical local view.
+  // CHECK-LABEL: llvm.func @short_k_fallback
+  // CHECK-NOT: llvm.call_intrinsic "llvm.hcu.ds.read.m32x16.b16"
+  // CHECK: llvm.return
+  tt.func public @short_k_fallback() {
+    %tile = ttg.local_alloc : () -> !ttg.memdesc<8x128xf16, #flat_b16, #smem, mutable>
+    %b = ttg.local_load %tile : !ttg.memdesc<8x128xf16, #flat_b16, #smem, mutable> -> tensor<8x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 4}>>
+    tt.return
+  }
+
   // CHECK-LABEL: llvm.func @panel_pipeline_view
   // CHECK: llvm.mlir.constant(4096 : i32)
   // CHECK-COUNT-2: llvm.call_intrinsic "llvm.hcu.ds.read.m32x16.b16"

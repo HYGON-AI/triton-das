@@ -35,6 +35,7 @@ struct DsReadMLayoutSpec {
   unsigned vec;
   unsigned perPhase;
   unsigned panelMaxPhase;
+  unsigned flatMaxPhase;
 };
 
 inline std::optional<DsReadMLayoutSpec>
@@ -45,20 +46,32 @@ getDsReadMLayoutSpec(unsigned elementBitWidth) {
                              /*kWidth=*/4,
                              /*vec=*/8,
                              /*perPhase=*/2,
-                             /*panelMaxPhase=*/2};
+                             /*panelMaxPhase=*/2,
+                             /*flatMaxPhase=*/2};
   if (elementBitWidth == 8)
     return DsReadMLayoutSpec{/*elementBitWidth=*/8,
                              /*kPerTile=*/32,
                              /*kWidth=*/8,
                              /*vec=*/16,
                              /*perPhase=*/1,
-                             /*panelMaxPhase=*/2};
+                             /*panelMaxPhase=*/2,
+                             /*flatMaxPhase=*/4};
+  if (elementBitWidth == 32)
+    return DsReadMLayoutSpec{/*elementBitWidth=*/32,
+                             /*kPerTile=*/8,
+                             /*kWidth=*/2,
+                             /*vec=*/4,
+                             /*perPhase=*/1,
+                             /*panelMaxPhase=*/1,
+                             /*flatMaxPhase=*/1};
   return std::nullopt;
 }
 
+// Flat N-major swizzle phases span 16 N elements each; b8's N XOR must stay
+// inside one physical N32 panel, hence the blockN/16 cap.
 inline int64_t getDsReadMFlatMaxPhase(const DsReadMLayoutSpec &spec,
                                      int64_t blockN) {
-  return spec.elementBitWidth == 8 ? std::min<int64_t>(4, blockN / 16) : 2;
+  return std::min<int64_t>(spec.flatMaxPhase, blockN / 16);
 }
 
 inline bool isDsReadMTileShape(int64_t blockK, int64_t blockN,
@@ -131,6 +144,18 @@ inline bool isDsReadMPanelEncoding(gpu::SharedLinearEncodingAttr encoding,
   return encoding && spec && isDsReadMPanelShape(blockK, blockN, *spec) &&
          encoding == getDsReadMPanelEncoding(encoding.getContext(), blockK,
                                              blockN, elementBitWidth);
+}
+
+// Canonical flat N-major staging for the [BK, BN] tile (lds[k*BN + n]); the
+// flat read addressing in DsReadM.cpp decodes this layout. f32 (b32) B has
+// no panel form; AccelerateHCUMatmul materializes this encoding.
+inline gpu::SwizzledSharedEncodingAttr
+getDsReadMFlatEncoding(MLIRContext *context, const DsReadMLayoutSpec &spec,
+                       int64_t blockN, gpu::CTAEncodingAttr ctaLayout) {
+  assert(blockN >= 32 && blockN % 32 == 0 && "invalid ds_read_m flat blockN");
+  return gpu::SwizzledSharedEncodingAttr::get(
+      context, spec.vec, spec.perPhase, getDsReadMFlatMaxPhase(spec, blockN),
+      /*order=*/{1, 0}, ctaLayout);
 }
 
 // Recognize the exact rank-2 physical LDS contract rather than the source-level

@@ -338,9 +338,11 @@ struct DotOpMFMAConversionHelper {
 
     intrinsicName = maybeMfmaIntrinsic->name;
 
-    // If we are using XF32, the kWidth (and kBase) is double that of F32.
-    if (aTensorTy.getElementType().isF32() && allowXF32)
-      kWidth *= 2;
+    // Upstream doubles kWidth here for the XF32 instruction (16x16x32: 2x K
+    // and 2x per-lane fragment of F32). HCU f32 MMAC (mmac_f32_16x16x8tf32/
+    // 8f32) is K=8, kBase=2, so the doubling does not apply:
+    // if (aTensorTy.getElementType().isF32() && allowXF32)
+    //   kWidth *= 2;
 
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
 
