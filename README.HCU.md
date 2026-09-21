@@ -1,5 +1,7 @@
 # Triton-Hygon
 
+
+
 **基于 [Triton](https://github.com/triton-lang/triton) Upstream Commit [`85400f80bf`](https://github.com/triton-lang/triton/commit/85400f80bf859a34ad7a746ffda877faf80312ab)（`release/3.6.x` 分支）的 Hygon HCU 适配版。**
 
 [Triton](https://github.com/triton-lang/triton) 是用于编写高性能 GPU Kernel 的语言与编译器，官方文档见 [triton-lang.org](https://triton-lang.org)。本仓库在 Upstream Commit `85400f80bf` 基线上，为 **Hygon HCU** 扩展编译流水线、运行时与工具链集成，使 Triton DSL 编写的 Kernel 可在 Hygon DTK 环境下运行。
