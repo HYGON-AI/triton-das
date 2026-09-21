@@ -25,7 +25,7 @@
 // expander to generate the prologue and new loop and epilogue.
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "tritonamdgpu-mls-stream-pipeline"
+#define DEBUG_TYPE "tritonhcu-mls-stream-pipeline"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 

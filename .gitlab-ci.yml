@@ -11,8 +11,8 @@ variables:
   DEVPI_URL: "http://10.16.1.201:9929/"
   CISMI_TIMEOUT: "3600"
   TORCH_VERSION: "2.11.0"
-  BASE_COMPILE_IMAGE_ROCKY_PY310: "harbor.sourcefind.cn:5443/dcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.10-mkl2020.4.304"
-  BASE_COMPILE_IMAGE_ROCKY_PY312: "harbor.sourcefind.cn:5443/dcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.12-mkl2020.4.304"
+  BASE_COMPILE_IMAGE_ROCKY_PY310: "harbor.sourcefind.cn:5443/hcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.10-mkl2020.4.304"
+  BASE_COMPILE_IMAGE_ROCKY_PY312: "harbor.sourcefind.cn:5443/hcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.12-mkl2020.4.304"
   # GitHub mirror target (override in CI Variables if needed).
   # Auth: set masked CI Variable GITHUB_MIRROR_TOKEN (fine-grained PAT with contents:write).
   GITHUB_MIRROR_REPO: "github.com/HYGON-AI/triton-das.git"

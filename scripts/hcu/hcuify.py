@@ -460,8 +460,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Copy source tree to destination, then rewrite identifiers and rename "
-            "files/directories for the HCU backend. LLVM amdgcn tokens are left "
-            "unchanged. In file contents, llvm::... chains and selected ttg encoding "
+            "files/directories for the HCU backend. LLVM toolchain-specific "
+            "tokens are left unchanged. In file contents, llvm::... chains and "
+            "selected ttg encoding "
             "attrs are preserved; for mlir::..., only the token immediately following "
             "mlir:: is preserved."
         )
