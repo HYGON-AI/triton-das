@@ -99,7 +99,24 @@ publish:
     - nmz
   parallel:
     matrix:
-      - TORCH_VERSION: ["2.10.0", "2.11.0"]
+      # 版本对应关系: triton 3.4.0 <-> torch 2.8.0, 3.5.1 <-> 2.9.0, 3.6.0 <-> 2.10.0/2.11.0
+      - TRITON_VERSION: ["3.4.0"]
+        TORCH_VERSION: ["2.8.0"]
+        BASE_COMPILE_IMAGE:
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+      - TRITON_VERSION: ["3.5.1"]
+        TORCH_VERSION: ["2.9.0"]
+        BASE_COMPILE_IMAGE:
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+      - TRITON_VERSION: ["3.6.0"]
+        TORCH_VERSION: ["2.10.0"]
+        BASE_COMPILE_IMAGE:
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
+          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+      - TRITON_VERSION: ["3.6.0"]
+        TORCH_VERSION: ["2.11.0"]
         BASE_COMPILE_IMAGE:
           - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
           - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
