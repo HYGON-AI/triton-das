@@ -119,13 +119,9 @@ def matmul(a, b, activation="", json_config_path=None, compile_only=False):
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
-        "wasp_enabled": True,
-        "wasp_num_load_warps": 4,
-        "wasp_num_mma_warps": 8,
-        "wdra_enabled": True,
-        "wdra_num_load_regs": 88,
-        "wdra_num_mma_regs_main": 144,
-        "wdra_num_mma_regs_tail": 140,
+        "wasp_partition_warps": (4, 4, 4),
+        "wasp_wdra": True,
+        "wasp_partition_regs": (88, 144, 140),
     }
     if json_config_path is not None:
         with open(json_config_path, 'r') as f:

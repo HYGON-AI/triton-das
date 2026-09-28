@@ -1,4 +1,8 @@
-"""HCU regression: abarrier/ebarrier PC .mlir fixtures -> LLIR lowering."""
+"""Check saved barrier LLIR snapshots, not the current compiler's output.
+
+Actual lowering is exercised by test/TritonGPU/amd/hcu-{a,e}barrier-pc.mlir
+through triton-opt, mlir-translate and FileCheck.
+"""
 
 import os
 import re

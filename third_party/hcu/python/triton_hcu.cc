@@ -4,6 +4,8 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "TritonHCU/WaitCntHCUUtility.h"
 #include "TritonHCU/Passes.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
@@ -39,10 +41,13 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_4("add_accelerate_matmul",
                             mlir::createTritonHCUAccelerateMatmul,
                             const std::string, int, int, int);
-  ADD_PASS_OPTION_WRAPPER_1("add_prepare_wdra_split_plan",
-                            mlir::createTritonHCUPrepareWdraSplitPlan, int);
+  ADD_PASS_OPTION_WRAPPER_1("add_prepare_wasp_split_plan",
+                            mlir::createTritonHCUPrepareWaspSplitPlan, int);
   ADD_PASS_WRAPPER_0("add_consumer_pingpong",
                      mlir::createTritonHCUConsumerPingpong);
+  ADD_PASS_OPTION_WRAPPER_1("add_optimize_partition_warps",
+                            mlir::triton::gpu::createTritonGPUOptimizePartitionWarpsHCU,
+                            bool);
   // HCU pipeline only: materialize known tt.hint.func.* then clean tt.hint.*.
   ADD_PASS_WRAPPER_0("add_apply_func_hints_and_clean",
                      mlir::createTritonHCUApplyFuncHintsAndClean);
@@ -71,18 +76,10 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
                             mlir::createTritonAMDGPUConvertToBufferOps,
                             const std::string &, bool, bool, bool, bool, bool);
   m.def("add_warp_specialize_to_llvm", [](mlir::PassManager &pm, const std::string &arch,
-      int waspNumLoadWarps, int waspNumMmaWarps, bool wdraEnabled, int wdraNumLoadRegs,
-      int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {
+      bool wdraEnabled) {
     pm.addPass(createHCUConvertWarpSpecializeToLLVM(
-        arch,
-        waspNumLoadWarps,
-        waspNumMmaWarps,
-        wdraEnabled,
-        wdraNumLoadRegs,
-        wdraNumMmaRegsMain,
-        wdraNumMmaRegsTail));
-  });
-}
+        arch, wdraEnabled));
+  });}
 
 } // namespace
 

@@ -12,8 +12,10 @@
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "TritonHCU/Passes.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/TargetUtils.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 
 namespace mlir::triton {
@@ -110,22 +112,6 @@ static void rewriteBarrierOp(Operation *op, unsigned barIdx,
   TritonLLVMIRRewriter b(op->getLoc(), op);
   createBarrier(b, barIdx, numWarps);
   op->erase();
-}
-
-static void lowerHCUAbarrierArriveOp(ROCDL::HCUAbarrierArriveOp bar, unsigned barIdx, unsigned warpStartId, unsigned numWarps) {
-  TritonLLVMIRRewriter b(bar.getLoc(), bar);
-  Value warpId = b.create<ROCDL::HCUGetWaveIdOp>();
-  Value zero = b.i32_val(warpStartId);
-  Value isWarpZero = b.icmp_eq(warpId, zero);
-  Block *currentBlock = bar->getBlock();
-  Block *afterBlock = currentBlock->splitBlock(bar);
-  Block *barrierBlock = b.createBlock(afterBlock);
-  b.setInsertionPointToEnd(currentBlock);
-  createBarrier(b, barIdx, numWarps);
-  b.create<LLVM::CondBrOp>(isWarpZero, barrierBlock, afterBlock);
-  bar->moveBefore(barrierBlock, barrierBlock->begin());
-  b.setInsertionPointToEnd(barrierBlock);
-  b.create<LLVM::BrOp>(afterBlock);
 }
 
 //===----------------------------------------------------------------------===//
@@ -257,8 +243,15 @@ static LogicalResult rewriteWarpGroupBarriers(LLVM::LLVMFuncOp func,
 
 static void rewritePartitionRegions(WarpSpecializeOp ws, SmallVector<Block *> &sinkBlocks,
                                     const AMD::TargetInfo &targetInfo,
-                                    const triton::HCU::WdraTopology &topo) {
+                                    const triton::HCU::WaspTopology &topo) {
   TritonLLVMIRRewriter b(ws.getLoc(), ws.getContext());
+
+  // Generic Gluon partitions may not use abarriers. Only join the teardown
+  // barrier when a Consumer actually invalidates one; otherwise Loads hang.
+  bool hasAbarrierInv = false;
+  for (auto [idx, partition] : llvm::enumerate(ws.getPartitionRegions()))
+    if (topo.isMmaPartition(idx))
+      partition->walk([&](ROCDL::HCUAbarrierInvOp) { hasAbarrierInv = true; });
 
   for (auto [idx, partition] : llvm::enumerate(ws.getPartitionRegions())) {
     Block *sinkBlock = sinkBlocks[idx];
@@ -311,13 +304,13 @@ static void rewritePartitionRegions(WarpSpecializeOp ws, SmallVector<Block *> &s
     partition->walk([&, sink, isLoadPartition](WarpReturnOp op) {
       TritonLLVMIRRewriter b(op.getLoc(), op);
       if (sink != nullptr) {
-        if (isLoadPartition)
+        if (isLoadPartition && hasAbarrierInv)
           createBarrier(b, kAbarrierInvBarrierIdx,
                         /*numWarps=*/std::nullopt);
         createBarrier(b, kReturnBarrierIdx, /*numWarps=*/std::nullopt);
         b.replaceOpWithNewOp<LLVM::ReturnOp>(op, ValueRange{});
       } else {
-        if (isLoadPartition)
+        if (isLoadPartition && hasAbarrierInv)
           createBarrier(b, kAbarrierInvBarrierIdx,
                         /*numWarps=*/std::nullopt);
         createBarrier(b, kReturnBarrierIdx, /*numWarps=*/std::nullopt);
@@ -346,17 +339,33 @@ static void rewritePartitionRegions(WarpSpecializeOp ws, SmallVector<Block *> &s
 
 static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
                                          const AMD::TargetInfo &targetInfo,
-                                         int waspNumLoadWarps,
-                                         int waspNumMmaWarps,
-                                         bool wdraEnabled, 
-                                         int wdraNumLoadRegs, 
-                                         int wdraNumMmaRegsMain,
-                                         int wdraNumMmaRegsTail) {
+                                         bool wdraEnabled) {
   SmallVector<WarpSpecializeOp> wsOps;
   func.walk([&](WarpSpecializeOp op) { wsOps.push_back(op); });
   // Nothing to do. This kernel is not warp specialized.
   if (wsOps.empty())
     return success();
+
+  // Consume the realized partition layout, independent of Module requests.
+  auto topology = triton::HCU::WaspTopology::get(
+      wsOps.front().getPartitionNumWarpsAttr());
+  if (!topology)
+    return func.emitError("invalid HCU WASP partitionNumWarps");
+  const triton::HCU::WaspTopology &topo = *topology;
+  for (WarpSpecializeOp op : wsOps) {
+    // One dispatch header is shared by all specializations in this function.
+    if (op.getPartitionNumWarps() != topo.getPartitionWarps())
+      return op.emitError("HCU WASP requires identical partitionNumWarps "
+                          "across specializations in a function");
+    if (op.getNumResults() ||
+        !llvm::hasSingleElement(op.getDefaultRegion().front()) ||
+        !isa<WarpYieldOp>(op.getDefaultRegion().front().front()))
+      return func.emitError("HCU WASP requires an empty default region; "
+                            "put all work in explicit partitions");
+  }
+  if (wdraEnabled && llvm::any_of(topo.getPartitionWarps(),
+                                 [](int n) { return n != 4; }))
+    return func.emitError("HCU WDRA requires 4 waves per partition");
 
   // wdra requires all warpgroups to synchronize at the end of the kernel.
   func.walk([&](LLVM::ReturnOp op) {
@@ -367,49 +376,40 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   // Before lowering away `ttg.warp_specialize`, lower warp group barriers.
   auto module = cast<ModuleOp>(func->getParentOp());
   unsigned threadsPerWarp = TritonGPUDialect::getThreadsPerWarp(module);
-  auto topo = triton::HCU::getWdraTopologyAttr(module);
-  // If module attr missing (should be set by AutomaticWarpSpecialization),
-  // derive from pass options so Load-first helpers still work.
-  if (topo.kind == triton::HCU::WdraTopoKind::None && wdraEnabled)
-    topo = triton::HCU::deriveWdraTopology(wdraEnabled, waspNumLoadWarps,
-                                           waspNumMmaWarps);
 
   // Default-region / preamble barriers are executed only by partition0 warps
   // (Load-first: the Load group). Sizing them with MMA warps deadlocks WASP
   // when load_warps != mma_warps.
-  unsigned defaultNumWarps = wsOps.front().getPartitionNumWarps()[0];
+  unsigned defaultNumWarps = topo.getPartitionWarps(0);
 
-  // Clang's branch-averaged VGPR check uses BranchAvailable derived from the
-  // per-partition hcu.s.set.vgpr.size sequence (observed as reverse emission
-  // order for TwoPTwoC). WdraInit alone is not enough — pad the live budgets
-  // that feed SetVgpr as well.
-  //
-  // Granularity is 4. Equal-weight branches need sum % (numBranches * 4) == 0
-  // so the average is an integer multiple of the granularity:
-  //   TwoPTwoC (4 branches): multiple of 16
-  //   OnePTwoC (3 branches): multiple of 12
-  // Load-first TwoPTwoC SetVgpr emission: [load, load, main, tail]
-  // ⇒ printed BranchAvailable ≈ [tail, main, load, load].
-  // Pad tail so e.g. [88, 88, 144, 140] → [88, 88, 144, 144]
-  // ⇒ Available [144, 144, 88, 88] (avg 116, %4==0).
-  if (wdraEnabled && topo.kind == triton::HCU::WdraTopoKind::TwoPTwoC) {
-    int sum = wdraNumLoadRegs + wdraNumLoadRegs + wdraNumMmaRegsMain +
-              wdraNumMmaRegsTail;
-    int rem = sum % 16;
-    if (rem != 0)
-      wdraNumMmaRegsTail += 16 - rem;
-  } else if (wdraEnabled && topo.kind == triton::HCU::WdraTopoKind::OnePTwoC) {
-    int sum = wdraNumLoadRegs + wdraNumMmaRegsMain + wdraNumMmaRegsTail;
-    // Do NOT pad to 16 here: e.g. 88+208+208=504 already has avg 168 (%4==0),
-    // but padding to 512 makes sum % 3 != 0 and clang rejects the kernel.
-    int rem = sum % 12;
-    if (rem != 0)
-      wdraNumMmaRegsMain += 12 - rem;
+  SmallVector<int32_t> partitionRegs;
+  if (wdraEnabled) {
+    auto regs = module->getAttrOfType<DenseI32ArrayAttr>("hcu.wasp_partition_regs");
+    if (!regs)
+      return func.emitError("WDRA requires hcu.wasp_partition_regs");
+    partitionRegs.assign(regs.asArrayRef().begin(), regs.asArrayRef().end());
+    if (partitionRegs.size() != wsOps.front().getPartitionNumWarps().size())
+      return func.emitError("WASP partition register count does not match topology");
+    // Validate WDRA quotas for the direct pass entry as well as Python callers.
+    constexpr unsigned granularity = 4, minRegs = 4, maxRegs = 256;
+    auto arch = getAMDArch(module);
+    if (!arch)
+      return func.emitError("WDRA requires a hip target in ttg.target");
+    unsigned vgprSize = triton::HCU::getVgprSize(*arch);
+    unsigned sum = 0;
+    for (int n : partitionRegs) {
+      if (n < minRegs || n > maxRegs ||
+          n % granularity)
+        return func.emitError("invalid WASP partition VGPR quota");
+      sum += n;
+    }
+    if (sum > vgprSize ||
+        sum % (granularity * partitionRegs.size()))
+      return func.emitError("WASP quotas exceed SIMD capacity or violate alignment");
   }
 
   // Replace the s_barrier in each partition with ebarrier.
-  unsigned mmaNumWarps =
-      wdraEnabled ? static_cast<unsigned>(waspNumMmaWarps) : defaultNumWarps;
+  unsigned mmaNumWarps = topo.getTotalConsumerWarps();
   if (failed(rewriteWarpGroupBarriers(func, wsOps, defaultNumWarps,
                                       mmaNumWarps)))
     return failure();
@@ -433,7 +433,7 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   // allocate load VGPRs for the first partition when WDRA is enabled.
   b.setInsertionPointToStart(entry);
   if (wdraEnabled)
-    b.create<ROCDL::HCUSetVgprSizeOp>(wdraNumLoadRegs);
+    b.create<ROCDL::HCUSetVgprSizeOp>(partitionRegs[0]);
 
   // Forward arguments from the header into the old entry block.
   for (auto [arg, oldArg] :
@@ -462,71 +462,57 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   // comment and VGPR allocation is resolved from HSACO metadata.
   //
   // Ordered by ascending wave id (see ROCDL_HCUWdraInitOp):
-  //   TwoPTwoC Load-first: [load, load, mma_main, mma_tail]
+  //   TwoPTwoC Load-first: [Load0, Load1, MMA0, MMA1]
   if (wdraEnabled) {
-    if (topo.kind == triton::HCU::WdraTopoKind::TwoPTwoC) {
-      b.create<ROCDL::HCUWdraInitOp>(wdraNumLoadRegs, wdraNumLoadRegs,
-                                     wdraNumMmaRegsMain, wdraNumMmaRegsTail);
-    } else if (topo.kind == triton::HCU::WdraTopoKind::OnePTwoC) {
-      b.create<ROCDL::HCUWdraInitOp>(wdraNumLoadRegs, wdraNumMmaRegsMain,
-                                     wdraNumMmaRegsTail, /*branch4=*/0);
-    } else {
-      // Unsplit WDRA [Load, MMA]
-      b.create<ROCDL::HCUWdraInitOp>(wdraNumLoadRegs, wdraNumMmaRegsMain,
-                                     /*branch3=*/0, /*branch4=*/0);
-    }
+    SmallVector<int32_t> initRegs(partitionRegs);
+    initRegs.resize(4, 0);
+    b.create<ROCDL::HCUWdraInitOp>(initRegs[0], initRegs[1],
+                                 initRegs[2], initRegs[3]);
   }
   Value wid = b.create<ROCDL::HCUGetWaveIdOp>();
 
   // First partition (Load) warps land on the entry block.
   unsigned firstPartWarps = firstWsOp.getPartitionNumWarps()[0];
+  unsigned firstPartStart = (*firstWsOp.getWarpGroupStartIds())[0];
   SmallVector<Block *> mmaPartitionVgprSettingBlocks;
   SmallVector<Block *> loadPartitionVgprSettingBlocks;
   SmallVector<Block *> switchBlocks(firstPartWarps, entry);
 
   auto caseValues = llvm::to_vector(llvm::map_range(
       llvm::seq<int8_t>(firstPartWarps),
-      [](int8_t i) { return APInt(8, i); }));
-
-  // Helper: VGPR budget for partition idx under Load-first layout.
-  auto regsForPartition = [&](unsigned idx) -> int {
-    if (topo.isLoadPartition(idx))
-      return wdraNumLoadRegs;
-    if (topo.isMmaMainPartition(idx))
-      return wdraNumMmaRegsMain;
-    return wdraNumMmaRegsTail;
-  };
+      [firstPartStart](int8_t i) { return APInt(8, firstPartStart + i); }));
 
   // Set the rest target blocks for the switch op.
   {
     TritonLLVMIRRewriter b(firstWsOp.getLoc(), firstWsOp);
     // Counter to generate unique block identifiers to prevent block merging
     unsigned blockCounter = 0;
-    unsigned nextCaseValue = firstPartWarps;
     for (auto [idx, tuple] : llvm::enumerate(llvm::zip(
       *firstWsOp.getWarpGroupStartIds(), firstWsOp.getPartitionNumWarps(), firstWsOp.getPartitionRegions()))) {
       auto [startId, numWarps, partition] = tuple;
       // idx 0: first Load partition, already reached via entry block; skip.
       if (idx == 0)
         continue;
-      Block *vgprSettingBlock = b.createBlock(entry);
-      b.setInsertionPointToStart(vgprSettingBlock);
-      int numRegs = regsForPartition(idx);
-      auto vgprOp = b.create<ROCDL::HCUSetVgprSizeOp>(numRegs);
-      vgprOp->setAttr("block_id", b.getI32IntegerAttr(blockCounter));
-      auto brOp = b.create<LLVM::BrOp>(&partition->front());
-      brOp->setAttr("block_id", b.getI32IntegerAttr(blockCounter));
-      blockCounter++;
-      if (topo.isLoadPartition(idx))
-        loadPartitionVgprSettingBlocks.push_back(vgprSettingBlock);
-      else
-        mmaPartitionVgprSettingBlocks.push_back(vgprSettingBlock);
+      Block *vgprSettingBlock = nullptr;
+      if (wdraEnabled) {
+        vgprSettingBlock = b.createBlock(entry);
+        b.setInsertionPointToStart(vgprSettingBlock);
+        int numRegs = partitionRegs[idx];
+        auto vgprOp = b.create<ROCDL::HCUSetVgprSizeOp>(numRegs);
+        vgprOp->setAttr("block_id", b.getI32IntegerAttr(blockCounter));
+        auto brOp = b.create<LLVM::BrOp>(&partition->front());
+        brOp->setAttr("block_id", b.getI32IntegerAttr(blockCounter));
+        blockCounter++;
+        if (topo.isLoadPartition(idx))
+          loadPartitionVgprSettingBlocks.push_back(vgprSettingBlock);
+        else
+          mmaPartitionVgprSettingBlocks.push_back(vgprSettingBlock);
+      }
       for (auto i : llvm::seq(numWarps)) {
         Block *targetBlock = wdraEnabled ? vgprSettingBlock : &partition->front();
-        caseValues.push_back(APInt(8, nextCaseValue + i));
+        caseValues.push_back(APInt(8, startId + i));
         switchBlocks.push_back(targetBlock);
       }
-      nextCaseValue += numWarps;
     }
   }
 
@@ -623,7 +609,7 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   unsigned loadVgprIdx = 0;
   for (unsigned p = 0; p < numPartitions; ++p) {
     bool isLoad = topo.isLoadPartition(p);
-    if (p != 0) {
+    if (wdraEnabled && p != 0) {
       Block *vgprBlock = nullptr;
       if (isLoad) {
         assert(loadVgprIdx < loadPartitionVgprSettingBlocks.size());
@@ -661,17 +647,10 @@ namespace {
 struct HCUConvertWarpSpecializeToLLVM
     : public mlir::triton::impl::HCUConvertWarpSpecializeToLLVMBase<
           HCUConvertWarpSpecializeToLLVM> {
-  explicit HCUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, 
-      int waspNumMmaWarps, bool wdraEnabled, int wdraNumLoadRegs, 
-      int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {
+  explicit HCUConvertWarpSpecializeToLLVM(StringRef targetArch, bool wdraEnabled) {
 
     this->arch = targetArch.str();
-    this->waspNumLoadWarps = waspNumLoadWarps;
-    this->waspNumMmaWarps = waspNumMmaWarps;
     this->wdraEnabled = wdraEnabled;
-    this->wdraNumLoadRegs = wdraNumLoadRegs;
-    this->wdraNumMmaRegsMain = wdraNumMmaRegsMain;
-    this->wdraNumMmaRegsTail = wdraNumMmaRegsTail;
   }
 
   void runOnOperation() override {
@@ -703,9 +682,7 @@ struct HCUConvertWarpSpecializeToLLVM
     }
 
     for (LLVM::LLVMFuncOp kernel : kernels)
-      if (failed(lowerWarpSpecialize(kernel, targetInfo, 
-        this->waspNumLoadWarps, this->waspNumMmaWarps, this->wdraEnabled,
-        this->wdraNumLoadRegs, this->wdraNumMmaRegsMain, this->wdraNumMmaRegsTail)))
+      if (failed(lowerWarpSpecialize(kernel, targetInfo, this->wdraEnabled)))
         return signalPassFailure();
 
     // Convert GPU dialect to ROCDL dialect
@@ -769,10 +746,8 @@ struct HCUConvertWarpSpecializeToLLVM
 namespace mlir::triton {
 
   std::unique_ptr<OperationPass<ModuleOp>>
-  createHCUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, int waspNumMmaWarps, 
-     bool wdraEnabled, int wdraNumLoadRegs, int wdraNumMmaRegsMain, int wdraNumMmaRegsTail) {
-    return std::make_unique<HCUConvertWarpSpecializeToLLVM>(targetArch, waspNumLoadWarps, waspNumMmaWarps,
-      wdraEnabled, wdraNumLoadRegs, wdraNumMmaRegsMain, wdraNumMmaRegsTail);
+  createHCUConvertWarpSpecializeToLLVM(StringRef targetArch, bool wdraEnabled) {
+    return std::make_unique<HCUConvertWarpSpecializeToLLVM>(targetArch, wdraEnabled);
   }
   
   } // namespace mlir::triton

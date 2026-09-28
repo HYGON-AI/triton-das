@@ -1,4 +1,4 @@
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -6,34 +6,6 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 namespace mlir::triton::HCU {
-
-WdraTopology deriveWdraTopology(bool wdraEnabled, int waspNumLoadWarps,
-                                int waspNumMmaWarps) {
-  WdraTopology topo;
-  if (!wdraEnabled)
-    return topo;
-  topo.warpsPerPartition = 4;
-  if (waspNumLoadWarps == 8 && waspNumMmaWarps == 8) {
-    topo.kind = WdraTopoKind::TwoPTwoC;
-    topo.numConsumerGroups = 2;
-    topo.numLoadGroups = 2;
-    return topo;
-  }
-  if (waspNumLoadWarps == 4 && waspNumMmaWarps == 8) {
-    topo.kind = WdraTopoKind::OnePTwoC;
-    topo.numConsumerGroups = 2;
-    topo.numLoadGroups = 1;
-    return topo;
-  }
-  // wdra + 4+4: single MMA partition, no DataPartition split.
-  return topo;
-}
-
-void setWdraTopologyAttr(ModuleOp mod, WdraTopology topo) {
-  mod->setAttr(kWdraTopoAttrName,
-               IntegerAttr::get(IntegerType::get(mod.getContext(), 32),
-                                static_cast<int32_t>(topo.kind)));
-}
 
 static void setModuleBoolAttr(ModuleOp mod, StringRef name, bool enabled) {
   mod->setAttr(name, BoolAttr::get(mod.getContext(), enabled));
@@ -76,42 +48,47 @@ bool getSchedBarrierBetweenABLoadsAttr(Operation *op, bool defaultVal) {
   return getModuleBoolAttr(op, kSchedBarrierBetweenABLoadsAttrName, defaultVal);
 }
 
-WdraTopology getWdraTopologyAttr(Operation *op) {
+std::optional<WaspTopology> WaspTopology::get(DenseI32ArrayAttr partitionWarps) {
+  if (!partitionWarps || partitionWarps.size() < 2 || partitionWarps.size() > 4)
+    return std::nullopt;
+  auto waves = partitionWarps.asArrayRef();
+  if (llvm::any_of(waves, [](int n) {
+        return n != 1 && n != 2 && n != 4 && n != 8;
+      }))
+    return std::nullopt;
+  unsigned producers = waves.size() == 4 ? 2 : 1;
+  unsigned total = 0;
+  for (auto [i, n] : llvm::enumerate(waves)) {
+    if (n != waves[i < producers ? 0 : producers])
+      return std::nullopt;
+    total += n;
+  }
+  if (total > 16 || waves[producers] < waves.front())
+    return std::nullopt;
+  return WaspTopology(partitionWarps);
+}
+
+std::optional<WaspTopology> getWaspTopologyFromModule(Operation *op) {
   ModuleOp mod = dyn_cast<ModuleOp>(op);
   if (!mod)
     mod = op->getParentOfType<ModuleOp>();
   if (!mod)
-    return {};
-  auto attr = mod->getAttrOfType<IntegerAttr>(kWdraTopoAttrName);
-  if (!attr)
-    return {};
-  WdraTopology topo;
-  topo.kind = static_cast<WdraTopoKind>(attr.getInt());
-  topo.warpsPerPartition = 4;
-  switch (topo.kind) {
-  case WdraTopoKind::TwoPTwoC:
-    topo.numConsumerGroups = 2;
-    topo.numLoadGroups = 2;
-    break;
-  case WdraTopoKind::OnePTwoC:
-    topo.numConsumerGroups = 2;
-    topo.numLoadGroups = 1;
-    break;
-  default:
-    break;
-  }
-  return topo;
+    return std::nullopt;
+  return WaspTopology::get(
+      mod->getAttrOfType<DenseI32ArrayAttr>(kWaspPartitionWarpsAttrName));
 }
 
-std::optional<WdraSplitPlan>
-inferWdraSplitPlan(DotOpInterface dot, unsigned factor) {
+std::optional<WaspSplitPlan> inferWaspSplitPlan(DotOpInterface dot,
+                                                unsigned factor) {
   if (factor < 2)
     return std::nullopt;
 
   auto resultTy = dyn_cast<RankedTensorType>(dot->getResult(0).getType());
   if (!resultTy)
     return std::nullopt;
-  SmallVector<int64_t> shapePerCTA = gpu::getShapePerCTA(resultTy);
+  SmallVector<int64_t> shapePerCTA = resultTy.getEncoding()
+                                       ? gpu::getShapePerCTA(resultTy)
+                                       : llvm::to_vector(resultTy.getShape());
   if (shapePerCTA.size() != 2)
     return std::nullopt;
 
@@ -122,47 +99,44 @@ inferWdraSplitPlan(DotOpInterface dot, unsigned factor) {
     int64_t extent = shapePerCTA[dim];
     if (extent >= static_cast<int64_t>(factor * 16) &&
         extent % static_cast<int64_t>(factor) == 0)
-      return WdraSplitPlan{static_cast<unsigned>(dim), factor, operand};
+      return WaspSplitPlan{static_cast<unsigned>(dim), factor, operand};
   }
   return std::nullopt;
 }
 
-void setWdraSplitPolicy(Operation *loop, unsigned factor) {
-  loop->setAttr(kWdraSplitPolicyAttrName,
-                IntegerAttr::get(IntegerType::get(loop->getContext(), 32),
-                                 factor));
+void setWaspSplitPolicy(Operation *loop, unsigned factor) {
+  loop->setAttr(
+      kWaspSplitPolicyAttrName,
+      IntegerAttr::get(IntegerType::get(loop->getContext(), 32), factor));
 }
 
-bool hasWdraSplitPolicy(Operation *op) {
-  return op && op->hasAttr(kWdraSplitPolicyAttrName);
+bool hasWaspSplitPolicy(Operation *op) {
+  return op && op->hasAttr(kWaspSplitPolicyAttrName);
 }
 
-void setWdraSplitPlan(Operation *dot, WdraSplitPlan plan) {
-  dot->setAttr(kWdraSplitPlanAttrName,
-               DenseI32ArrayAttr::get(dot->getContext(),
-                                      {static_cast<int32_t>(plan.resultDim),
-                                       static_cast<int32_t>(plan.factor),
-                                       static_cast<int32_t>(
-                                           plan.partitionedOperand)}));
+void setWaspSplitPlan(Operation *dot, WaspSplitPlan plan) {
+  dot->setAttr(
+      kWaspSplitPlanAttrName,
+      DenseI32ArrayAttr::get(dot->getContext(),
+                             {static_cast<int32_t>(plan.resultDim),
+                              static_cast<int32_t>(plan.factor),
+                              static_cast<int32_t>(plan.partitionedOperand)}));
 }
 
-std::optional<WdraSplitPlan> getWdraSplitPlan(Operation *dot) {
-  auto attr =
-      dot->getAttrOfType<DenseI32ArrayAttr>(kWdraSplitPlanAttrName);
+std::optional<WaspSplitPlan> getWaspSplitPlan(Operation *dot) {
+  auto attr = dot->getAttrOfType<DenseI32ArrayAttr>(kWaspSplitPlanAttrName);
   if (!attr || attr.size() != 3)
     return std::nullopt;
   auto values = attr.asArrayRef();
-  if (values[0] > 1 || values[1] < 2 || values[2] > 1 ||
-      values[2] != values[0])
+  if (values[0] > 1 || values[1] < 2 || values[2] > 1 || values[2] != values[0])
     return std::nullopt;
-  return WdraSplitPlan{static_cast<unsigned>(values[0]),
+  return WaspSplitPlan{static_cast<unsigned>(values[0]),
                        static_cast<unsigned>(values[1]),
                        static_cast<unsigned>(values[2])};
 }
 
-SmallVector<int64_t>
-getWdraEffectiveResultShape(DotOpInterface dot,
-                            const WdraSplitPlan &plan) {
+SmallVector<int64_t> getWaspEffectiveResultShape(DotOpInterface dot,
+                                                 const WaspSplitPlan &plan) {
   auto resultTy = cast<RankedTensorType>(dot->getResult(0).getType());
   SmallVector<int64_t> shape(resultTy.getShape());
   if (shape.size() >= 2) {

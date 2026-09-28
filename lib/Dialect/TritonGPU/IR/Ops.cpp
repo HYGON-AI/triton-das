@@ -1003,11 +1003,14 @@ LogicalResult WarpSpecializeOp::verify() {
         "cannot be nested inside another `ttg.warp_specialize` op");
   }
 
-  std::optional<int> numWarps = maybeLookupNumWarps(*this);
-  if (numWarps && *numWarps % 4 != 0) {
-    return mlir::emitError(getLoc()) << "warp-specialized kernels requires "
-                                        "num_warps to be a multiple of 4";
-  }
+  // HCU supports non-four-wave WASP partitions without a separate default
+  // group. Leave backend-specific wave constraints (including WDRA's four-wave
+  // requirement) to the backend instead of imposing the upstream check here.
+  // std::optional<int> numWarps = maybeLookupNumWarps(*this);
+  // if (numWarps && *numWarps % 4 != 0) {
+  //   return mlir::emitError(getLoc()) << "warp-specialized kernels requires "
+  //                                     "num_warps to be a multiple of 4";
+  // }
 
   return success();
 }

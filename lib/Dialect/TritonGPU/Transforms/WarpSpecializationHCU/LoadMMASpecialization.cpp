@@ -3,7 +3,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
@@ -377,8 +377,7 @@ struct PipelinedLoadGroup {
   Location getLoc();
   void allocateAref(scf::ForOp &loop, int numStages,
                     SmallVector<int> &availableAbarrierIds,
-                    const hcu::WdraTopology &topo, int waspNumLoadWarps,
-                    int waspNumMmaWarps);
+                    const hcu::WaspTopology &topo);
   LogicalResult lowerLoads(WarpSchedule &schedule, DominanceInfo &domInfo,
                            PostDominanceInfo &postDomInfo);
 
@@ -415,9 +414,7 @@ Location PipelinedLoadGroup::getLoc() {
 
 void PipelinedLoadGroup::allocateAref(scf::ForOp &loop, int numStages,
                                       SmallVector<int> &availableAbarrierIds,
-                                      const hcu::WdraTopology &topo,
-                                      int waspNumLoadWarps,
-                                      int waspNumMmaWarps) {
+                                      const hcu::WaspTopology &topo) {
   assert(loadBuffers.empty() && "already allocated");
 
   // Create buffers for each the loads.
@@ -433,15 +430,20 @@ void PipelinedLoadGroup::allocateAref(scf::ForOp &loop, int numStages,
   // OnePTwoC keeps the historical init counts (all MMA / load warps on one
   // shared barrier). TwoPTwoC uses per-pair barriers sized to one partition.
   int emptyInitCount =
-      topo.kind == hcu::WdraTopoKind::TwoPTwoC
-          ? static_cast<int>(topo.warpsPerPartition)
-          : waspNumMmaWarps;
+      topo.producerSliced() ? topo.getPartitionWarps(topo.numLoadGroups())
+                            : topo.getTotalConsumerWarps();
   int readyInitCount =
-      topo.kind == hcu::WdraTopoKind::TwoPTwoC
-          ? static_cast<int>(topo.warpsPerPartition)
-          : waspNumLoadWarps;
-  int preArrive = topo.enabled() ? static_cast<int>(topo.emptyPreArriveCount())
-                                 : 1;
+      topo.producerSliced() ? topo.getPartitionWarps(0)
+                            : topo.getTotalLoadWarps();
+  // Initialization runs on the first Producer partition, not on Consumers.
+  // Equal-size role groups, power-of-two sizes and Consumer >= Producer
+  // make this an integer even for mixed P/C sizes. Each initializing wave
+  // contributes C/P arrivals, totaling exactly EMPTY's pending count.
+  int initializingWarps = topo.getPartitionWarps(0);
+  assert(emptyInitCount >= initializingWarps &&
+         emptyInitCount % initializingWarps == 0 &&
+         "EMPTY pre-arrival count must divide across the initializing waves");
+  int preArrive = emptyInitCount / initializingWarps;
 
   PartitionBuilder b(getLoc(), loop);
   for (unsigned pair = 0; pair < numBarrierPairs; ++pair) {
@@ -667,7 +669,12 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
       continue;
     }
 
-    b.setInsertionPointAfter(lastProducerAcquire);
+    // A group may contain loads at different positions (e.g. K/V in FA).
+    // The store needs both the acquired slot and this load's value/view.
+    b.setInsertionPointAfter(
+        domInfo.properlyDominates(lastProducerAcquire, load.loadOp)
+            ? load.loadOp
+            : lastProducerAcquire);
     auto storeOp = b.createInto<LocalStoreOp>(loadPartition, stageCluster,
                                               load.getResult(), view);
     storeOps.push_back(storeOp);
@@ -693,8 +700,8 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
       StageCluster userStageCluster = getStageCluster(loadBeforeOp);
       Value loaded = b.createInto<LocalLoadOp>(*partition, userStageCluster,
                                                load.type, view);
-      b.createInto<ttng::FenceAsyncSharedOp>(*partition, userStageCluster,
-                                             /*bCluster=*/false);
+      // These are ordinary LDS reads, not NVIDIA async-proxy accesses.
+      // HCU's backend drains pending DS accesses before the EMPTY arrive.
       for (OpOperand *use : uses)
         use->set(loaded);
     }
@@ -724,15 +731,15 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
 
 LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
                          MutableArrayRef<PipelinedMMA> mmas,
-                         WarpSchedule &schedule, int numLoadStages,
-                         bool wdraEnabled, int waspNumLoadWarps,
-                         int waspNumMmaWarps) {
+                         WarpSchedule &schedule, int numLoadStages) {
   Block &body = *loop.getBody();
   DominanceInfo domInfo(loop);
   PostDominanceInfo postDomInfo(loop);
 
-  hcu::WdraTopology topo =
-      hcu::deriveWdraTopology(wdraEnabled, waspNumLoadWarps, waspNumMmaWarps);
+  auto topology = hcu::getWaspTopologyFromModule(loop);
+  if (!topology)
+    return loop.emitError("missing or invalid hcu.wasp_partition_warps attribute");
+  const hcu::WaspTopology &topo = *topology;
 
   // Group loads by common first user operations. This ensures, for example,
   // that multiple loads feeding into the same MMA op are placed together.
@@ -756,8 +763,7 @@ LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
   llvm::SmallVector<int> availableAbarrierIds =
       getAvailableAbarrierIds(loop, neededAbarrierNum);
   for (PipelinedLoadGroup &group : loadGroups) {
-    group.allocateAref(loop, numLoadStages, availableAbarrierIds, topo,
-                       waspNumLoadWarps, waspNumMmaWarps);
+    group.allocateAref(loop, numLoadStages, availableAbarrierIds, topo);
     availableAbarrierIds.erase(availableAbarrierIds.begin(),
                                availableAbarrierIds.begin() +
                                    2 * numLoadStages * numPairs);
@@ -805,8 +811,7 @@ void LoadMMASpecialization::runOnOperation() {
     if (loads.empty() && mmas.empty())
       continue;
     int loopNumStages = getNumStagesOrDefault(loop, numStages);
-    if (failed(lowerLoops(loop, loads, mmas, *schedule, loopNumStages,
-                          wdraEnabled, waspNumLoadWarps, waspNumMmaWarps)))
-      continue;
+    if (failed(lowerLoops(loop, loads, mmas, *schedule, loopNumStages)))
+      return signalPassFailure();
   }
 }

@@ -3,6 +3,7 @@ from triton._C.libtriton import ir, passes, llvm, amd, hcu, distributed
 from triton import knobs
 from triton.runtime.errors import HSACOError
 from dataclasses import dataclass
+from . import wasp
 from typing import Any, Dict, Tuple
 from types import ModuleType
 import hashlib
@@ -133,14 +134,18 @@ class HIPOptions:
     # Per-kernel/autotune choice. Explicit options override the legacy env knob.
     use_async_copy: bool = False
 
-    # wasp options
-    wasp_enabled: bool = False
-    wdra_enabled: bool = False
-    wasp_num_load_warps: int = None
-    wasp_num_mma_warps: int = None
-    wdra_num_load_regs: int = None
-    wdra_num_mma_regs_main: int = None
-    wdra_num_mma_regs_tail: int = None
+    # Logical partition wave counts, Producers (Load) first, Consumers (MMA) last.
+    # Tuple length selects 1P1C (P,C), 1P2C (P,C0,C1), or 2P2C (P0,P1,C0,C1).
+    # Without WDRA: each partition has 1/2/4/8 waves; two partitions of the
+    # same role have equal sizes, and each Consumer has at least as many waves
+    # as a Producer. Examples: (1,4,4), (1,8), (2,2,4,4).
+    # With WDRA: every partition must still have exactly 4 waves.
+    # Total waves <= 16; synchronization, resource and tile-split limits still apply.
+    # num_warps only seeds the initial layouts; launch waves are sum(tuple).
+    wasp_partition_warps: Tuple[int, ...] = (4, 4, 4)
+    wasp_wdra: bool = True
+    wasp_partition_regs: Tuple[int, ...] = None
+
     # Delay empty abarrier arrive until after mmac (+ SchedBarrier fence).
     # Autotune-friendly; hashed into the kernel cache via HIPOptions.hash().
     empty_arrive_after_mmac: bool = False
@@ -149,9 +154,6 @@ class HIPOptions:
     #   1 — enable cluster (+ SchedBarrier before mmac and between A/B loads)
     #   2 — enable cluster + cross-region A/B load analysis (implies 1)
     enable_v_mmac_cluster: int = 0
-    # Offset the two WDRA MMA consumers (BlockPingpong-style) so they do not
-    # lockstep-contend for matrix pipes. No-op unless OnePTwoC / TwoPTwoC.
-    enable_consumer_pingpong: bool = True
 
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
@@ -202,6 +204,8 @@ class HIPBackend(BaseBackend):
         return f"hip:{options.arch}"
 
     def parse_options(self, opts) -> Any:
+        if "wasp_total_num_warps" in opts:
+            raise ValueError("wasp_total_num_warps was removed; use wasp_partition_warps")
         legacy_sched_variant = opts.pop("instruction_sched_variant", None)
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
@@ -266,41 +270,11 @@ class HIPBackend(BaseBackend):
                 and knobs.amd.use_block_pingpong is not None):
             args["use_block_pingpong"] = knobs.amd.use_block_pingpong
 
-        if args.get("wasp_enabled"):
-            # WASP owns LDS multi-buffering via LoadMMASpecialization; only
-            # depths 2 and 4 are supported (selectStageBarId / abarrier budget).
-            num_stages = args.get("num_stages", 2)
-            if num_stages not in (2, 4):
-                raise ValueError(
-                    f"wasp requires num_stages in (2, 4); got {num_stages}")
-            if args.get("wdra_enabled"):
-                # WDRA topologies (Load-first after OptimizePartitionWarps):
-                #   load=4, mma=8 → 1P+2C (12-wave): [Load, MMA_main, MMA_tail]
-                #   load=8, mma=8 → 2P+2C (16-wave): [Load0, Load1, MMA0, MMA1]
-                #   load=4, mma=4 → [Load, MMA] (no DataPartition)
-                assert args["wasp_num_load_warps"] in [4, 8]
-                assert args["wasp_num_mma_warps"] in [4, 8]
-                if args["wasp_num_load_warps"] == 8:
-                    assert args["wasp_num_mma_warps"] == 8, (
-                        "wdra 2P+2C requires wasp_num_mma_warps == 8")
-                    # 2 load groups × 2 (empty+ready) × stages × 2 pairs = 8*stages
-                    # exceeds the 16-abarrier ID hard limit when stages=4.
-                    if num_stages == 4:
-                        raise ValueError(
-                            "wdra TwoPTwoC (wasp_num_load_warps=8, "
-                            "wasp_num_mma_warps=8) does not support "
-                            "num_stages=4 (abarrier ID limit)")
-            else:
-                args.pop("wdra_num_load_regs", None)
-                args.pop("wdra_num_mma_regs_main", None)
-                args.pop("wdra_num_mma_regs_tail", None)
-        else:
-            assert not args.get("wdra_enabled"), "wdra_enabled is only supported when wasp_enabled is True"
-            args.pop("wasp_num_load_warps", None)
-            args.pop("wasp_num_mma_warps", None)
-            args.pop("wdra_num_load_regs", None)
-            args.pop("wdra_num_mma_regs_main", None)
-            args.pop("wdra_num_mma_regs_tail", None)
+        # Unlike optional tuning knobs, an explicitly supplied partition list
+        # must not silently become the default when its value is None.
+        if "wasp_partition_warps" in opts:
+            args["wasp_partition_warps"] = opts["wasp_partition_warps"]
+        wasp.check_options(args)
 
         return HIPOptions(**args)
 
@@ -553,12 +527,12 @@ class HIPBackend(BaseBackend):
             "-mllvm=-disable-cluster-lds-memops=true",
             # Note: when register spill after ds_read_matrix, result is wrong for compiler backend. disable current.
             "-mllvm=-hcu-pre-emit-load-store-opt=false",
-            "-mllvm=-vgpr-greedy-alloc-mode=local-wave" if options.wdra_enabled else "",
+            "-mllvm=-vgpr-greedy-alloc-mode=local-wave" if metadata.get("wasp_wdra", False) else "",
             # On the model (PMD/gem5), s_trap is not implemented; this tells the
             # HCUInsertWDRAInit pass to skip emitting the s_trap-based wdra init
             # prologue while keeping the rest of the WDRA setup.
             "-mllvm=-turn-off-wdra-trap-handler=true"
-            if (options.wdra_enabled and os.environ.get("PMD_PATH")) else "",
+            if (metadata.get("wasp_wdra", False) and os.environ.get("PMD_PATH")) else "",
             *options_args,
             "-O3",
         ]
@@ -584,6 +558,7 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def make_ttgir(mod, metadata, options):
+        wasp.configure_wasp(mod, metadata, options)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(pm, f"hip:{options.arch}", options.num_warps, options.warp_size,
@@ -602,19 +577,6 @@ class HIPBackend(BaseBackend):
                      b.get_bool_attr(bool(options.empty_arrive_after_mmac)))
         mod.set_attr("hcu.sched_barrier_between_a_b_loads",
                      b.get_bool_attr(mmac_cluster_on))
-        # Publish WDRA topology early so MlsEncodingInsertion can pick full-tile
-        # MLS for OnePTwoC (vs half-tile for TwoPTwoC). AWS re-sets the same attr.
-        if options.wasp_enabled and options.wdra_enabled:
-            load_w = int(options.wasp_num_load_warps or 4)
-            mma_w = int(options.wasp_num_mma_warps or 4)
-            # WdraTopoKind: None=0, OnePTwoC=1, TwoPTwoC=2
-            if load_w >= 8:
-                topo_kind = 2
-            elif mma_w >= 8:
-                topo_kind = 1
-            else:
-                topo_kind = 0
-            mod.set_attr("hcu.wdra_topo", b.get_int32_attr(topo_kind))
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         emuTF32 = False
@@ -628,12 +590,12 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        # Record the same per-dot WDRA split intent that DataPartition will
+        # Record the same per-dot WASP split intent that DataPartition will
         # execute later. Accelerate/MLS consume it while their inputs are
         # still full-tile IR, so selection is constrained by the eventual
         # per-consumer shape rather than repaired after partitioning.
-        if options.wasp_enabled and options.wdra_enabled:
-            hcu.passes.ttgpuir.add_prepare_wdra_split_plan(pm, 2)
+        if metadata.get("wasp_enabled", False):
+            hcu.passes.ttgpuir.add_prepare_wasp_split_plan(pm, 2)
         hcu.passes.ttgpuir.add_accelerate_matmul(pm, options.arch,
                                                  options.matrix_instr_nonkdim,
                                                  options.kpack,
@@ -665,18 +627,18 @@ class HIPBackend(BaseBackend):
         # epilogue peeling that PartitionLoopsHCU cannot handle.
         # With async copy enabled, AMD ScheduleLoops/Pipeline owns both MLS
         # and ordinary copies; do not pipeline MLS a second time here.
-        if not options.wasp_enabled and not use_async_copy:
+        if not metadata.get("wasp_enabled", False) and not use_async_copy:
             hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, use_async_copy)
 
         use_block_pingpong = (options.use_block_pingpong and not use_async_copy
-                              and not options.wasp_enabled)
+                              and not metadata.get("wasp_enabled", False))
         # BlockPingpong relies on the buffer-op cache swizzle to distribute
         # neighboring workgroups across cache slices. Keep an explicit user
         # request effective as well, but force it on whenever PP is active.
         buffer_cache_swizzle = options.buffer_cache_swizzle or use_block_pingpong
         if use_block_pingpong:
             hcu.passes.ttgpuir.add_prepare_block_pingpong(pm)
-        if not options.wasp_enabled:
+        if not metadata.get("wasp_enabled", False):
             amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
             amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, False)
         if use_async_copy:
@@ -699,20 +661,19 @@ class HIPBackend(BaseBackend):
             # amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
             hcu.passes.ttgpuir.add_block_pingpong(pm)
 
-        if options.wasp_enabled:
+        if metadata.get("wasp_enabled", False):
             # Under WASP, num_stages is the LDS buffer depth (2 or 4), not AMD
             # stream-pipeline depth (MLS/AMD SWP are skipped above).
             passes.ttgpuir.add_warp_specialize_hcu(
-                pm, options.num_stages, options.wdra_enabled,
-                options.wasp_num_load_warps, options.wasp_num_mma_warps)
+                pm, options.num_stages, metadata["wasp_wdra"])
             hcu.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack, options.mmac_layout_force)
             passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)
             if options.optimize_epilogue:
                 amd.passes.ttgpuir.add_optimize_epilogue(pm)
             passes.ttgpuir.add_optimize_dot_operands(pm, True)
             amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
-            if options.enable_consumer_pingpong:
-                hcu.passes.ttgpuir.add_consumer_pingpong(pm)
+            # Offset both consumers; the pass is a no-op for single-consumer topologies.
+            hcu.passes.ttgpuir.add_consumer_pingpong(pm)
 
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
@@ -750,12 +711,21 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
 
         pm.run(mod, 'gluon_to_ttgir')
+        wasp.configure_wasp(mod, metadata, options)
+        if metadata["wasp_enabled"]:
+            # Gluon already supplies the partitions. HCU counts only their
+            # waves (no separate default group), and assigns start IDs/quotas.
+            pm = ir.pass_manager(mod.context)
+            hcu.passes.ttgpuir.add_optimize_partition_warps(
+                pm, metadata["wasp_wdra"])
+            pm.run(mod, 'gluon_wasp_partitions')
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
     @staticmethod
     def make_llir(src, metadata, options):
         mod = src
+        wasp.configure_partitions(mod, metadata, options)
         # TritonGPU -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
@@ -803,10 +773,9 @@ class HIPBackend(BaseBackend):
             hcu.passes.ttgpuir.add_pack_block_pingpong_bit8(pm)
         passes.common.add_symbol_dce(pm)
 
-        if options.wasp_enabled:
-            hcu.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch, options.wasp_num_load_warps,
-                options.wasp_num_mma_warps, options.wdra_enabled, options.wdra_num_load_regs or 0,
-                options.wdra_num_mma_regs_main or 0, options.wdra_num_mma_regs_tail or 0)
+        if metadata.get("wasp_enabled", False):
+            hcu.passes.ttgpuir.add_warp_specialize_to_llvm(
+                pm, options.arch, metadata["wasp_wdra"])
             passes.convert.add_arith_to_llvmir(pm)
             passes.common.add_canonicalizer(pm)
             passes.common.add_cse(pm)
@@ -871,7 +840,7 @@ class HIPBackend(BaseBackend):
         # Set kernel attributes first given this may affect later optimizations.
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
         # If wdra is enabled, this attribute is required by the LLVM backend.
-        if options.wdra_enabled:
+        if metadata["wasp_wdra"]:
             fns[0].add_fn_attr("hcu-wdra-waves-per-tg", str(total_num_warps))
         mmac_cluster = int(options.enable_v_mmac_cluster)
         if mmac_cluster >= 1:
@@ -1002,15 +971,36 @@ class HIPBackend(BaseBackend):
             clang_path = HIPBackend.path_to_rocm_clang()
             clang_args = HIPBackend._get_clang_args(metadata, options) + flags
 
-            # Compile to ASM
             asm_command = [clang_path] + clang_args + [llir_file, "-S", "-o", asm_file]
-            result = subprocess.run(asm_command, check=True, capture_output=True, text=True)
-            if options.wdra_enabled:
-                log = result.stdout + result.stderr
-                print(log, flush=True)
 
-            with open(asm_file, "r") as fd_out:
-                gcn = fd_out.read()
+            subprocess.run(asm_command, check=True, capture_output=True, text=True)
+            with open(asm_file, "r") as f:
+                gcn = f.read()
+
+            if metadata.get("wasp_wdra", False):
+                # Initial quotas are estimates; demand can shift after allocation.
+                # Allow two adjustments using fresh feedback (three compilations
+                # total), checking the final output as well.
+                max_adjustments = 2
+                # range(max_adjustments + 1) yields 0, 1, 2. The counter is the
+                # number of adjustments ALREADY applied, not a request to retry:
+                #   0: check initial output; spill permits adjustment #1.
+                #   1: check output after #1; spill permits adjustment #2.
+                #   2: check output after #2; spill fails without another retry.
+                # A no-spill result exits immediately at any of these checks.
+                for adjustment in range(max_adjustments + 1):
+                    regs = wasp.check_and_adjust_wasp_wdra_regs(gcn, src, metadata, options)
+                    if regs is None:
+                        break
+                    if adjustment == max_adjustments:
+                        raise RuntimeError(f"Backend register demand still exceeds adjusted WASP quotas after {max_adjustments} adjustments")
+                    src = wasp.update_llir_regs(str(src), metadata["wasp_partition_regs"], regs)
+                    metadata["wasp_partition_regs"] = regs
+                    with open(llir_file, "w") as f:
+                        f.write(src)
+                    subprocess.run(asm_command, check=True, capture_output=True, text=True)
+                    with open(asm_file, "r") as f:
+                        gcn = f.read()
 
         except subprocess.CalledProcessError as e:
             HIPBackend._archive_failed_compilation(

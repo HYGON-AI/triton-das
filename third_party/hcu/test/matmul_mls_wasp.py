@@ -102,10 +102,8 @@ def default_wasp_config():
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
-        "wasp_enabled": True,
-        "wasp_num_load_warps": 4,
-        "wasp_num_mma_warps": 4,
-        "wdra_enabled": False,
+        "wasp_partition_warps": (4, 4),
+        "wasp_wdra": False,
     }
 
 

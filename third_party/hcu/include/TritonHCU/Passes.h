@@ -17,9 +17,7 @@ std::unique_ptr<OperationPass<ModuleOp>>
 createConvertTritonHCUToLLVMPass(StringRef targetArch, bool ftz);
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createHCUConvertWarpSpecializeToLLVM(StringRef targetArch, int waspNumLoadWarps, 
-    int waspNumMmaWarps, bool wdraEnabled, int wdraNumLoadRegs,
-    int wdraNumMmaRegsMain, int wdraNumMmaRegsTail);
+createHCUConvertWarpSpecializeToLLVM(StringRef targetArch, bool wdraEnabled);
 
 } // namespace mlir::triton
 

@@ -7,20 +7,19 @@ HCU WASP / WASP+WDRA regression matrix: GEMM & FA × MLS & non-MLS.
 
 Default scenarios:
   GEMM  × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
-  # GEMM  × {load, mls} × {wdra 8+8}                       # temporarily disabled
+  GEMM  × {load, mls} × {wdra 8+8, wasp 4+8, wasp 8+8}
   GEMM  × {load, mls} × {wdra 4+8} × num_stages=4
   GEMM  × mls_store × {wdra 4+8}                          # mmac_layout_force=3
   FA    × {load, mls} × {wasp 4+4, wdra 4+8}              # num_stages=2
 
-Known limitation: gemm/load/wdra8+8 uses K=512; see the comment near
-WDRA88_LOAD_GEMM_SHAPE below. wdra8+8 does not support num_stages=4
-(abarrier ID limit).
+TwoPTwoC uses K=4096 to exercise repeated LDS-slot reuse. It does not
+support num_stages=4 (abarrier ID limit).
 
 MLS-store GEMM cases use tl.matrix_store for C with mmac_layout_force=3
 (TRANSPOSE) so MFMA-C → store packing stays aligned.
 
 Optional nowrap (no WASP/WDRA) via --mode nowrap:
-  uses plain num_warps (not wasp_num_*), warp_specialize=False on GEMM.
+  uses plain num_warps, warp_specialize=False on GEMM.
 
 IR shape for WASP/WDRA partitions is checked by lit
   (test/TritonGPU/hcu/hcu-gemm-wasp-wdra.mlir), not duplicated here.
@@ -46,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import os
 import re
 import sys
@@ -141,9 +141,8 @@ def gemm_config(
 ) -> dict:
     """Launch/options for GEMM.
 
-    WASP on: wasp_num_load/mma_warps drive total warps (compiler ignores plain
-    num_warps after WS). WASP off: must use plain num_warps and must not pass
-    wasp_num_*; WDRA requires WASP.
+    WASP is enabled only by the loop attribute; wasp_partition_warps
+    selects execution topology. wasp_wdra controls register allocation.
 
     Under WASP, num_stages is the LDS buffer depth (2 or 4). Defaults: wasp
     4+4; wdra OnePTwoC 4+8; pass load/mma=8 for TwoPTwoC 8+8.
@@ -155,7 +154,7 @@ def gemm_config(
     if mma_warps is None:
         mma_warps = 8 if wdra else 4
     # WDRA MLS may retain both full and sliced LDS; keep tiles smaller.
-    default_block = 64 if wdra else 128
+    default_block = 64 if wdra or mma_warps == 8 else 128
     bm = block_m if block_m is not None else default_block
     bn = block_n if block_n is not None else default_block
     bk = block_k if block_k is not None else default_block
@@ -166,28 +165,21 @@ def gemm_config(
         "GROUP_SIZE_M": 1,
         "optimize_epilogue": True,
         "WARP_SPECIALIZE": wasp,
-        "wasp_enabled": wasp,
-        "wdra_enabled": wdra,
+        "wasp_wdra": wdra,
         "num_stages": num_stages,
     }
     if mmac_layout_force is not None:
         cfg["mmac_layout_force"] = mmac_layout_force
     if wasp:
-        cfg.update(
-            {
-                "wasp_num_load_warps": load_warps,
-                "wasp_num_mma_warps": mma_warps,
-            }
-        )
+        cfg["wasp_partition_warps"] = (4,) * ((load_warps + mma_warps) // 4)
         if wdra:
             # TwoPTwoC (4 WDRA branches): load+load+main+tail must be %32==0.
             # 88+88+144+160 = 480.
             mma_tail = 160 if load_warps >= 8 else 140
             cfg.update(
                 {
-                    "wdra_num_load_regs": 88,
-                    "wdra_num_mma_regs_main": 144,
-                    "wdra_num_mma_regs_tail": mma_tail,
+                    "wasp_partition_regs": ((80, 96, 144, mma_tail) if load_warps == 8
+                                            else ((88, 144, mma_tail) if mma_warps == 8 else (88, 144))),
                 }
             )
     else:
@@ -210,30 +202,26 @@ def fa_config(
         load_warps = 4
     if mma_warps is None:
         mma_warps = 8 if wdra else 4
-    block = 32 if wdra else 64
+    block = 32 if wdra or mma_warps == 8 else 64
     cfg = {
         "BLOCK_M": block,
         "BLOCK_N": block,
         "pre_load_v": False,
         "optimize_epilogue": True,
-        # WASP LDS depth must be 2 or 4 (compiler validates when wasp_enabled).
+        # WASP LDS depth must be 2 or 4 (validated after IR request detection).
         "num_stages": 2,
-        "wasp_enabled": wasp,
-        "wdra_enabled": wdra,
+        "wasp_wdra": wdra,
     }
     if wasp:
         cfg.update(
             {
-                "wasp_num_load_warps": load_warps,
-                "wasp_num_mma_warps": mma_warps,
+                "wasp_partition_warps": (4,) * ((load_warps + mma_warps) // 4),
             }
         )
         if wdra:
             cfg.update(
                 {
-                    "wdra_num_load_regs": 52,
-                    "wdra_num_mma_regs_main": 160,
-                    "wdra_num_mma_regs_tail": 160,
+                    "wasp_partition_regs": (52, 160, 160) if mma_warps == 8 else (52, 160),
                 }
             )
     else:
@@ -440,6 +428,28 @@ def gemm_mls_store_kernel(
     )
 
 
+def check_wasp_artifacts(compiled, config):
+    """Check launch topology and quota transfer independently of accuracy."""
+    enabled = config["WARP_SPECIALIZE"]
+    assert compiled.metadata.wasp_enabled == enabled
+    if not enabled:
+        assert not compiled.metadata.wasp_wdra
+        return
+    total = sum(config.get("wasp_partition_warps", (4, 4, 4)))
+    assert compiled.metadata.num_warps == total
+    llir = compiled.asm["llir"]
+    if config.get("wasp_wdra", True):
+        regs = tuple(compiled.metadata.wasp_partition_regs)
+        assert len(regs) == total // 4
+        args = ", ".join(f"i16 {n}" for n in regs + (0,) * (4 - len(regs)))
+        assert f"@llvm.hcu.wdra.init({args})" in llir
+        for n in regs:
+            assert f"@llvm.hcu.s.set.vgpr.size(i16 {n})" in llir
+    else:
+        assert "@llvm.hcu.wdra.init" not in llir
+        assert "@llvm.hcu.s.set.vgpr.size" not in llir
+
+
 def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
              load_warps: Optional[int] = None, mma_warps: Optional[int] = None,
              num_stages: int = 2, compile_only: bool = False,
@@ -483,12 +493,9 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
     )
     if use_matrix_store:
         config.update({
-            "wdra_num_load_regs": 16,
-            "wdra_num_mma_regs_main": 244,
-            "wdra_num_mma_regs_tail": 244,
+            "wasp_partition_regs": (16, 244, 244),
             "empty_arrive_after_mmac": False,
             "enable_v_mmac_cluster": 0,
-            "enable_consumer_pingpong": True,
             "amdgpu_enable_max_ilp_scheduling_strategy": True,
             "hcu_use_gfx946_sched_model_v2": False,
         })
@@ -508,14 +515,16 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
         c.stride(0), c.stride(1),
     )
     if compile_only:
-        kernel.warmup(*args, grid=grid, **config)
+        compiled = kernel.warmup(*args, grid=grid, **config)
+        check_wasp_artifacts(compiled, config)
         return
     check_matrix_store_perf = (use_matrix_store and wdra and
                                load_warps == 4 and mma_warps == 8 and
                                num_stages == 2 and
                                shape == MLS_STORE_GEMM_SHAPE)
     stats_before = _pmd_stats_snapshot() if check_matrix_store_perf else {}
-    kernel[grid](*args, **config)
+    compiled = kernel[grid](*args, **config)
+    check_wasp_artifacts(compiled, config)
     torch.testing.assert_close(c.cpu(), torch.matmul(a, b), atol=1e-2, rtol=1e-2)
     if check_matrix_store_perf:
         cycles, frequency = _latest_pmd_measurement(stats_before)
@@ -574,15 +583,9 @@ MLS_STORE_BLOCK_M = 256
 MLS_STORE_BLOCK_N = 256
 MLS_STORE_BLOCK_K = 64
 
-# TwoPTwoC (WDRA 8+8) slices A for M-split but leaves B shared. The tt.load
-# pipeline currently clones that shared B producer into both Load partitions.
-# Both then local_store to the same B LDS allocation while their MMA consumers
-# wait on separate abarrier pairs, producing a data race with random inputs.
-#
-# K=512 is a known-green workaround; K=4096 is the realistic default that
-# exposes the race. Keep this coverage until the shared producer has a single
-# writer and shared producer/consumer barriers.
-WDRA88_LOAD_GEMM_SHAPE = (128, 128, 512)
+# TwoPTwoC must keep B private to each independent barrier pair, even though
+# B is not sliced along M. Long K exposes accidental sharing across epochs.
+WDRA88_LOAD_GEMM_SHAPE = (128, 128, 4096)
 
 
 @dataclass
@@ -618,7 +621,8 @@ def _mode_tag(wasp: bool, wdra: bool, load_warps: int, mma_warps: int,
 
 
 def run_dense_fa(sequence: int, stages: int, dim: int, causal: bool,
-                 *, compile_only: bool = False) -> None:
+                 *, compile_only: bool = False, wdra: bool = True,
+                 partition_regs=None) -> None:
     """Exercise transposed K and repeated barrier epochs with distinct Q/K/V."""
     kernel = _load_sibling("fa_dense_regression", "fa_dense.py")._flash_attention_fwd_kernel
 
@@ -637,18 +641,19 @@ def run_dense_fa(sequence: int, stages: int, dim: int, causal: bool,
     out = torch.empty_like(q)
     lse = torch.empty((1, 1, sequence), device=q.device, dtype=torch.float32)
     block_m = 32 if dim == 128 else 64
-    kernel[(triton.cdiv(sequence, block_m),)](
+    compiled = kernel[(triton.cdiv(sequence, block_m),)](
         q, k, v, out, lse, dim ** -0.5,
         *q.stride(), *k.stride(), *v.stride(), *out.stride(), *lse.stride(),
         N_CTX=sequence, NUM_HEADS=1, NUM_Q_BLOCKS=triton.cdiv(sequence, block_m),
         HEAD_DIM=dim, BLOCK_M=block_m, BLOCK_N=32, CAUSAL=causal,
         WARP_SPECIALIZE=True, num_stages=stages, num_warps=4,
         waves_per_eu=1, matrix_instr_nonkdim=16, kpack=2,
-        wasp_enabled=True, wdra_enabled=True, wasp_num_load_warps=4,
-        wasp_num_mma_warps=8, wdra_num_load_regs=32,
-        wdra_num_mma_regs_main=164, wdra_num_mma_regs_tail=164,
-        enable_v_mmac_cluster=1, enable_consumer_pingpong=True,
+        wasp_partition_warps=(4, 4, 4), wasp_wdra=wdra,
+        wasp_partition_regs=partition_regs if wdra else None,
+        enable_v_mmac_cluster=1,
         optimize_epilogue=True, hcu_use_gfx946_sched_model_v2=False)
+    assert "ttng.fence_async_shared" not in compiled.asm["ttgir"]
+    assert ("@llvm.hcu.wdra.init(" in compiled.asm["llir"]) == wdra
     torch.testing.assert_close(out.cpu().float(), ref_out, atol=0.005, rtol=0.005)
     torch.testing.assert_close(lse.cpu(), ref_lse, atol=0.005, rtol=0.005)
 
@@ -657,8 +662,8 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
     """Default matrix is wasp/wdra only; nowrap is opt-in via --mode nowrap.
 
     Mode tuple: (wasp, wdra, load_warps, mma_warps, num_stages).
-    GEMM also covers TwoPTwoC wdra 8+8; its tt.load case uses the known-green
-    K=512 workaround. FA stays on 4+4 / 4+8 for now. Extra GEMM coverage:
+    GEMM also covers TwoPTwoC wdra 8+8 with K=4096 for repeated slot reuse.
+    FA stays on 4+4 / 4+8 for now. Extra GEMM coverage:
     wdra4+8 with num_stages=4 (TwoPTwoC cannot use stages=4), and mls_store
     epilogue cases with mmac_layout_force=3.
     """
@@ -666,8 +671,11 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
     # (wasp, wdra, load_warps, mma_warps, num_stages)
     modes = [
         (True, False, 4, 4, 2),   # wasp4+4
+        (True, True, 4, 4, 2),    # 8-wave WDRA
         (True, True, 4, 8, 2),    # wdra4+8 OnePTwoC
-        # (True, True, 8, 8, 2),  # wdra8+8 TwoPTwoC — temporarily disabled
+        (True, True, 8, 8, 2),    # TwoPTwoC, independent P0/P1 quotas
+        (True, False, 4, 8, 2),   # 12-wave, WDRA off
+        (True, False, 8, 8, 2),   # 16-wave, WDRA off
         (True, True, 4, 8, 4),    # wdra4+8 num_stages=4 (GEMM only below)
     ]
     if include_nowrap:
@@ -677,7 +685,7 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
             for wasp, wdra, load_w, mma_w, nstages in modes:
                 if kind == "fa" and not wasp:
                     continue  # FA nowrap not supported yet
-                if kind == "fa" and wdra and load_w >= 8:
+                if kind == "fa" and load_w >= 8:
                     continue  # FA TwoPTwoC not in default matrix yet
                 if kind == "fa" and nstages != 2:
                     continue  # FA stages=4 not in default matrix yet
@@ -686,7 +694,7 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
                 load = "mls" if use_mls else "load"
                 name = f"{kind}/{load}/{_mode_tag(wasp, wdra, load_w, mma_w, nstages)}"
                 shape = DEFAULT_GEMM_SHAPE
-                if kind == "gemm" and wdra and load_w >= 8 and not use_mls:
+                if kind == "gemm" and load_w >= 8 and not use_mls:
                     shape = WDRA88_LOAD_GEMM_SHAPE
                 if kind == "gemm":
                     runner = lambda co, mls=use_mls, wp=wasp, w=wdra, lw=load_w, mw=mma_w, ns=nstages, sh=shape: run_gemm(
@@ -767,6 +775,8 @@ def filter_cases(cases: List[Case], args: argparse.Namespace) -> List[Case]:
     elif args.mode == "wdra":
         # Historical: OnePTwoC 4+8 only.
         out = [c for c in out if c.wdra and c.load_warps == 4 and c.mma_warps == 8]
+    elif args.mode == "wdra44":
+        out = [c for c in out if c.wdra and c.load_warps == 4 and c.mma_warps == 4]
     elif args.mode == "wdra88":
         out = [c for c in out if c.wdra and c.load_warps == 8 and c.mma_warps == 8]
     elif args.mode == "nowrap":
@@ -782,7 +792,7 @@ def main() -> int:
     parser.add_argument("--only", choices=["gemm", "fa", "all"], default="all")
     parser.add_argument(
         "--mode",
-        choices=["wasp", "wdra", "wdra88", "nowrap", "all"],
+        choices=["wasp", "wdra", "wdra44", "wdra88", "nowrap", "all"],
         default="all",
         help="wasp=4+4; wdra=4+8; wdra88=8+8 TwoPTwoC; nowrap=no WASP (GEMM only)",
     )

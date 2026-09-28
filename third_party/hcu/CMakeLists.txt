@@ -17,11 +17,11 @@ endif()
 
 add_subdirectory(lib)
 
-# DataPartition only needs WdraSplitPlan + MlsInsn helpers. Linking the full
+# DataPartition only needs WaspSplitPlan + MlsInsn helpers. Linking the full
 # TritonHCUTransforms PUBLIC would pull AccelerateHCUMatmul (and its AMD-ToLLVM
 # deps) into googletest/other TritonGPUTransforms consumers and break CI.
 if(TARGET TritonGPUTransforms)
-  target_link_libraries(TritonGPUTransforms PUBLIC TritonHCUWdraSupport)
+  target_link_libraries(TritonGPUTransforms PUBLIC TritonHCUWaspSupport)
 endif()
 
 if(TRITON_BUILD_PYTHON_MODULE)

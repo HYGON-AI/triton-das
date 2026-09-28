@@ -51,15 +51,8 @@ def run_load(load_w, mma_w, label):
     b = torch.randn((K, N), device="cuda", dtype=torch.float16)
     c = torch.empty((M, N), device="cuda", dtype=torch.float16)
     cfg = {
-        "wasp_enabled": True,
-        "wdra_enabled": True,
-        "wasp_num_load_warps": load_w,
-        "wasp_num_mma_warps": mma_w,
-        "wdra_num_load_regs": 88,
-        "wdra_num_mma_regs_main": 144,
-        # 2P2C: load+load+main+tail must be a multiple of 32 (branch-avg
-        # VGPR granularity). 88+88+144+160=480. 1P2C ignores the 4th branch.
-        "wdra_num_mma_regs_tail": 160 if load_w == 8 else 140,
+        "wasp_partition_warps": (4,) * ((load_w + mma_w) // 4),
+        "wasp_partition_regs": ((80, 96, 144, 160) if load_w == 8 else (88, 144, 140)),
     }
     dump = tempfile.mkdtemp(prefix="wdra_ttload_")
     os.environ["TRITON_ALWAYS_COMPILE"] = "1"
@@ -74,7 +67,7 @@ def run_load(load_w, mma_w, label):
             WARP_SPECIALIZE=True, **cfg,
         )
         torch.cuda.synchronize()
-        total = starts = topo = None
+        total = starts = partition_warps = None
         for root, _, files in os.walk(dump):
             for f in files:
                 if not f.endswith(".ttgir"):
@@ -86,11 +79,11 @@ def run_load(load_w, mma_w, label):
                 m = re.search(r"warpGroupStartIds = array<i32: ([^>]+)>", text)
                 if m:
                     starts = m.group(1)
-                m = re.search(r"hcu.wdra_topo = (\d+)", text)
+                m = re.search(r"hcu.wasp_partition_warps = array<i32: ([^>]+)>", text)
                 if m:
-                    topo = m.group(1)
+                    partition_warps = m.group(1)
         print(f"{label}: PASS")
-        print(f"  topo={topo} total-num-warps={total} starts={starts}")
+        print(f"  partition-warps={partition_warps} total-num-warps={total} starts={starts}")
         return True
     except Exception as e:
         msg = str(e)

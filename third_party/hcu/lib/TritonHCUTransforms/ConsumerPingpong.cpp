@@ -1,5 +1,5 @@
 #include "TritonHCU/Passes.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -127,20 +127,21 @@ public:
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
-    auto topo = hcu::getWdraTopologyAttr(mod);
-    if (topo.kind != hcu::WdraTopoKind::OnePTwoC &&
-        topo.kind != hcu::WdraTopoKind::TwoPTwoC) {
-      LDBG("skip: not a two-consumer WDRA topology");
-      return;
-    }
-
     WalkResult result = mod.walk([&](WarpSpecializeOp wsOp) {
+      // Partition assignment is complete: use the actual op, not the request.
+      auto topo = hcu::WaspTopology::get(wsOp.getPartitionNumWarpsAttr());
+      if (!topo) {
+        wsOp.emitError("invalid HCU WASP partitionNumWarps");
+        return WalkResult::interrupt();
+      }
+      if (!topo->hasSplitConsumers())
+        return WalkResult::advance();
       for (auto [idx, partition] :
            llvm::enumerate(wsOp.getPartitionRegions())) {
-        if (!topo.isMmaPartition(idx))
+        if (!topo->isMmaPartition(idx))
           continue;
-        if (failed(pingpongMmaPartition(partition, topo.isMmaTailPartition(idx),
-                                        topo.isMmaMainPartition(idx))))
+        if (failed(pingpongMmaPartition(partition, topo->isMmaTailPartition(idx),
+                                        topo->isMmaMainPartition(idx))))
           return WalkResult::interrupt();
       }
       return WalkResult::advance();

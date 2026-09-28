@@ -47,7 +47,7 @@
 // CHECK: scf.if
 // CHECK: rocdl.s.barrier
 // CHECK-SAME: hcu.consumer_pingpong
-module attributes {hcu.wdra_topo = 1 : i32, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32, "ttg.total-num-warps" = 12 : i32} {
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32, "ttg.total-num-warps" = 12 : i32} {
   tt.func public @wdra48_consumer_pingpong(%a: !ttg.memdesc<2x64x32xf16, #shared, #smem, mutable>, %b: !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable>, %k: i32) {
     ttg.warp_specialize(%a, %b, %k) attributes {requestedRegisters = array<i32: 88, 88, 88>, warpGroupStartIds = array<i32: 0, 4, 8>}
     default {
@@ -91,11 +91,11 @@ module attributes {hcu.wdra_topo = 1 : i32, "ttg.num-ctas" = 1 : i32, "ttg.num-w
 // -----
 
 // Without a two-consumer WDRA topology the pass is a no-op.
-// CHECK-LABEL: @skip_without_wdra_topo
+// CHECK-LABEL: @skip_without_wasp_topo
 // CHECK-NOT: hcu.consumer_pingpong
 // CHECK-NOT: rocdl.s.setprio
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32} {
-  tt.func public @skip_without_wdra_topo() {
+  tt.func public @skip_without_wasp_topo() {
     tt.return
   }
 }

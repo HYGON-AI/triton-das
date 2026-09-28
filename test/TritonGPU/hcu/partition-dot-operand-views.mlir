@@ -16,7 +16,7 @@
 #shared1 = #ttg.swizzled_shared<{vec = 8, perPhase = 2, maxPhase = 2, order = [0, 1]}>
 #shared2 = #ttg.shared_linear<{offset = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [1, 0], [2, 8], [4, 0], [8, 0], [16, 0], [0, 32]]}, alignment = 16>
 #smem = #ttg.shared_memory
-module attributes {hcu.empty_arrive_after_mmac = false, hcu.sched_barrier_before_mmac = true, hcu.sched_barrier_between_a_b_loads = true, hcu.wdra_topo = 1 : i32, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32} {
+module attributes {hcu.empty_arrive_after_mmac = false, hcu.sched_barrier_before_mmac = true, hcu.sched_barrier_between_a_b_loads = true, hcu.wasp_partition_warps = array<i32: 4, 4, 4>, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32} {
   tt.func public @_flash_attention_fwd_kernel(%Q: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %K: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %V: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %Out: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %Lse: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %sm_scale: f32, %stride_qb: i32 {tt.divisibility = 16 : i32}, %stride_qh: i32 {tt.divisibility = 16 : i32}, %stride_qs: i32 {tt.divisibility = 16 : i32}, %stride_kb: i32 {tt.divisibility = 16 : i32}, %stride_kh: i32 {tt.divisibility = 16 : i32}, %stride_ks: i32 {tt.divisibility = 16 : i32}, %stride_vb: i32 {tt.divisibility = 16 : i32}, %stride_vh: i32 {tt.divisibility = 16 : i32}, %stride_vs: i32 {tt.divisibility = 16 : i32}, %stride_ob: i32 {tt.divisibility = 16 : i32}, %stride_oh: i32 {tt.divisibility = 16 : i32}, %stride_os: i32 {tt.divisibility = 16 : i32}, %stride_lb: i32 {tt.divisibility = 16 : i32}, %stride_lh: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
     %cst = arith.constant dense<160> : tensor<32xi32, #ttg.slice<{dim = 0, parent = #mma}>>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<64x32xf32, #mma>
@@ -156,7 +156,7 @@ module attributes {hcu.empty_arrive_after_mmac = false, hcu.sched_barrier_before
       %acc_114 = ttg.local_load %acc_113 {ttg.partition = array<i32: 0>} : !ttg.memdesc<32x64xf16, #shared2, #smem> -> tensor<32x64xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 4}>>
       %acc_115 = tt.dot %acc_112, %acc_114, %acc_109, inputPrecision = tf32 {loop.cluster = 1 : i32, loop.stage = 1 : i32, ttg.partition = array<i32: 0>} : tensor<64x32xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 4}>> * tensor<32x64xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 4}>> -> tensor<64x64xf32, #mma>
       scf.yield {ttg.partition = array<i32: 0>} %m_ij_99, %l_i_106, %acc_115 : tensor<64xf32, #ttg.slice<{dim = 1, parent = #mma}>>, tensor<64xf32, #ttg.slice<{dim = 1, parent = #mma}>>, tensor<64x64xf32, #mma>
-    } {hcu.wdra_split_policy = 2 : i32, tt.scheduled_max_stage = 1 : i32, tt.warp_specialize}
+    } {hcu.wasp_split_policy = 2 : i32, tt.scheduled_max_stage = 1 : i32, tt.warp_specialize}
     %out = tt.expand_dims %acc#1 {axis = 1 : i32} : tensor<64xf32, #ttg.slice<{dim = 1, parent = #mma}>> -> tensor<64x1xf32, #mma>
     %out_63 = tt.broadcast %out : tensor<64x1xf32, #mma> -> tensor<64x64xf32, #mma>
     %out_64 = arith.divf %acc#2, %out_63 : tensor<64x64xf32, #mma>

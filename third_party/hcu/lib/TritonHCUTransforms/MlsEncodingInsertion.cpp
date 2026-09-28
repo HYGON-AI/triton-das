@@ -17,7 +17,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonHCU/Utility.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 using namespace ::mlir::triton::HCU;
 
 using namespace mlir;
@@ -86,16 +86,16 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   // elem-space dimensions used by MLS tile selection from those logic shapes.
   int64_t logicalK = blockK;
   int64_t logicalNonK = blockNonK;
-  if (auto wdraPlan = HCU::getWdraSplitPlan(dot)) {
+  if (auto waspPlan = HCU::getWaspSplitPlan(dot)) {
     // TwoPTwoC: partitioned operand is a half-tile MLS write — constrain tile
     // selection by the eventual per-consumer shape.
     // OnePTwoC: one full-tile MLS write; consumers memdesc_subslice — keep
     // full-tile logicalNonK so mlsTile matches the shared write.
-    auto topo = HCU::getWdraTopologyAttr(dot);
-    if (topo.producerSliced() &&
-        wdraPlan->partitionedOperand == static_cast<unsigned>(opIdx)) {
+    auto topo = HCU::getWaspTopologyFromModule(dot);
+    if (topo && topo->producerSliced() &&
+        waspPlan->partitionedOperand == static_cast<unsigned>(opIdx)) {
       auto effectiveShape =
-          HCU::getWdraEffectiveResultShape(dot, *wdraPlan);
+          HCU::getWaspEffectiveResultShape(dot, *waspPlan);
       logicalNonK = effectiveShape[(rank - 2) + opIdx];
     }
   }
@@ -636,6 +636,11 @@ public:
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
+    if (mod->hasAttr(HCU::kWaspPartitionWarpsAttrName) &&
+        !HCU::getWaspTopologyFromModule(mod)) {
+      mod.emitError("invalid hcu.wasp_partition_warps attribute");
+      return signalPassFailure();
+    }
     auto arch = getAMDArch(mod);
     assert(arch.has_value() && "expected arch");
     auto features = mlir::triton::HCU::deduceHCUISAFeature(*arch);

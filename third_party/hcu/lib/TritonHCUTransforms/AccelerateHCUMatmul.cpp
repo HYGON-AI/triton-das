@@ -2,7 +2,7 @@
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "TritonHCU/DsReadMLayout.h"
 #include "TritonHCU/MlsGroup.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "TritonHCU/Passes.h"
 #include "TritonHCU/Utility.h"
@@ -465,7 +465,7 @@ chooseMfmaInstructionWithMLS(tt::DotOpInterface dot,
                              std::optional<MatrixLoadInfo> &aMatInfo,
                              std::optional<MatrixLoadInfo> &bMatInfo,
                              HCUISAFeature features,
-                             const HCU::WdraSplitPlan *wdraPlan = nullptr) {
+                             const HCU::WaspSplitPlan *waspPlan = nullptr) {
   (void)enforcedNonKDim;
   RankedTensorType aType = cast<RankedTensorType>(dot.getA().getType());
   RankedTensorType bType = cast<RankedTensorType>(dot.getB().getType());
@@ -481,10 +481,10 @@ chooseMfmaInstructionWithMLS(tt::DotOpInterface dot,
   auto M = resShape[rank - 2];
   auto N = resShape[rank - 1];
   // Before DataPartition clones the graph, select MLS/MFMA tiles using the
-  // logical shape that one WDRA consumer will own. The result tensor remains
+  // logical shape that one WASP consumer will own. The result tensor remains
   // full-sized at this point; only candidate legality/coverage is per-slice.
-  if (wdraPlan) {
-    auto effectiveShape = HCU::getWdraEffectiveResultShape(dot, *wdraPlan);
+  if (waspPlan) {
+    auto effectiveShape = HCU::getWaspEffectiveResultShape(dot, *waspPlan);
     M = effectiveShape[effectiveShape.size() - 2];
     N = effectiveShape[effectiveShape.size() - 1];
   }
@@ -1037,12 +1037,12 @@ public:
     bool withScale = false;
     auto [aMatInfo, bMatInfo] = getDotOperandMatrixLoadInfo(dotOp, features);
     bool useMatrixLoad = aMatInfo.has_value() || bMatInfo.has_value();
-    auto wdraPlan = HCU::getWdraSplitPlan(dotOp);
+    auto waspPlan = HCU::getWaspSplitPlan(dotOp);
     FailureOr<MfmaIntrinsic> mfmaInstr;
     if (useMatrixLoad) {
       mfmaInstr = chooseMfmaInstructionWithMLS(dotOp, mfmaVersion, nonKDim,
                                                aMatInfo, bMatInfo, features,
-                                               wdraPlan ? &*wdraPlan : nullptr);
+                                               waspPlan ? &*waspPlan : nullptr);
     } else {
       // If mfmaVersion == 4 and both inputs are of F8F6F4 types, we will try to
       // use the V_MFMA_*_F8F6F4 instructions since it has higher FLOPs per cycle.
@@ -1323,8 +1323,8 @@ public:
                                           b, newAcc, dotOp.getInputPrecision(),
                                           dotOp.getMaxNumImpreciseAcc());
     }
-    if (wdraPlan)
-      HCU::setWdraSplitPlan(newDot.getDefiningOp(), *wdraPlan);
+    if (waspPlan)
+      HCU::setWaspSplitPlan(newDot.getDefiningOp(), *waspPlan);
     Value dotOutput =
         convertAndCastTensor(rewriter, newDot, oldRetType.getEncoding(),
                              oldRetType.getElementType());
@@ -1606,14 +1606,14 @@ public:
     //                                      "num_warps==1 is not supported");
     auto [aMatInfo, bMatInfo] = getDotOperandMatrixLoadInfo(dotOp, hcuFeatures);
     bool useMatrixLoad = aMatInfo.has_value() || bMatInfo.has_value();
-    auto wdraPlan = HCU::getWdraSplitPlan(dotOp);
+    auto waspPlan = HCU::getWaspSplitPlan(dotOp);
     unsigned aScaledExt = aMatInfo.has_value() ? MLS_GEN_SCALED_EXT(aMatInfo.value().mlsElemBitTyKind, aMatInfo.value().isNonKPack) : 0;
     unsigned bScaledExt = bMatInfo.has_value() ? MLS_GEN_SCALED_EXT(bMatInfo.value().mlsElemBitTyKind, bMatInfo.value().isNonKPack) : 0;
     FailureOr<MfmaIntrinsic> mfmaInstr;
     if (useMatrixLoad) {
       mfmaInstr = chooseMfmaInstructionWithMLS(dotOp, mfmaVersion, nonKDim,
                                                aMatInfo, bMatInfo, hcuFeatures,
-                                               wdraPlan ? &*wdraPlan : nullptr);
+                                               waspPlan ? &*waspPlan : nullptr);
     } else {
       // Choose a suitable Scaled MFMA instruction for this scaled dot op.
       mfmaInstr = chooseMfmaInstruction(dotOp, mfmaVersion, nonKDim);
@@ -1802,8 +1802,8 @@ public:
     auto newDot = rewriter.create<triton::DotScaledOp>(
         dotOp.getLoc(), newRetType, a, b, newAcc, newAScale, newBScale,
         aElemType, bElemType, dotOp.getFastMath(), dotOp.getLhsKPack(), dotOp.getRhsKPack());
-    if (wdraPlan)
-      HCU::setWdraSplitPlan(newDot, *wdraPlan);
+    if (waspPlan)
+      HCU::setWaspSplitPlan(newDot, *waspPlan);
     rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dotOp, oldRetType,
                                                       newDot);
     return success();

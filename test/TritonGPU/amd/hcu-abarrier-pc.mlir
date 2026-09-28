@@ -6,14 +6,14 @@
 // RUN:   --allocate-shared-memory \
 // RUN:   --convert-scf-to-cf \
 // RUN:   --convert-triton-hcu-to-llvm="arch=gfx946" \
-// RUN:   --triton-hcu-convert-warp-specialize-to-llvm="arch=gfx946 wasp_num_load_warps=4 wasp_num_mma_warps=4 wdra-enabled=false" \
+// RUN:   --triton-hcu-convert-warp-specialize-to-llvm="arch=gfx946 wdra-enabled=false" \
 // RUN:   | mlir-translate --mlir-to-llvmir \
 // RUN:   | FileCheck %s
 
 #blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
 #shared = #ttg.swizzled_shared<{vec = 4, perPhase = 1, maxPhase = 4, order = [0]}>
 #smem = #ttg.shared_memory
-module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32, "ttg.total-num-warps" = 8 : i32} {
+module attributes {hcu.wasp_partition_warps = array<i32: 4, 4>, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32, "ttg.total-num-warps" = 8 : i32} {
   tt.func public @abarrier_pc_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %arg2: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
     %ready = llvm.mlir.constant(8 : i32) : i32
     %done  = llvm.mlir.constant(9 : i32) : i32

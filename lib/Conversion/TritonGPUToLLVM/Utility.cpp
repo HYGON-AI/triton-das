@@ -336,12 +336,12 @@ Value getThreadId(OpBuilder &rewriter, Location loc) {
 
   TritonLLVMOpBuilder b(loc, rewriter);
 
-  // If this is being created inside a warp specialize op, compute the relative
-  // thread ID within the warp group.
-  //if (std::optional<int> startId =
-  //  getWarpGroupStartThreadId(rewriter.getInsertionBlock())) {
-  //  tid = rewriter.create<arith::SubIOp>(loc, tid, b.i32_val(*startId));
-  //}
+  // Mixed HCU partitions are packed in Load-first order, so a group's start
+  // need not align to its size: (1,4,4) starts at waves (0,1,5).
+  // Compute the local ID before masking; aligned starts need no subtraction.
+  if (auto startId = getWarpGroupStartThreadId(rewriter.getInsertionBlock());
+      startId && *startId % upperBound)
+    tid = b.sub(tid, b.i32_val(*startId));
 
   assert(llvm::isPowerOf2_32(upperBound));
   // help LLVM's known bits analysis:

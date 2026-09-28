@@ -5,7 +5,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "third_party/nvidia/include/Dialect/NVWS/Transforms/Passes.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
@@ -86,9 +86,12 @@ void AutomaticWarpSpecialization::runOnOperation() {
   triton::resetAbarrierIds();
 
   ModuleOp mod = getOperation();
-  hcu::WdraTopology topo =
-      hcu::deriveWdraTopology(wdraEnabled, waspNumLoadWarps, waspNumMmaWarps);
-  hcu::setWdraTopologyAttr(mod, topo);
+  auto topology = hcu::getWaspTopologyFromModule(mod);
+  if (!topology) {
+    mod.emitError("missing or invalid hcu.wasp_partition_warps attribute");
+    return signalPassFailure();
+  }
+  const hcu::WaspTopology &topo = *topology;
 
   OpPassManager pm;
   pm.addPass(createTritonGPUConvertLayoutThroughShared());
@@ -96,7 +99,7 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.addPass(createTritonGPUPartitionSchedulingHCU());
   pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
   pm.addPass(createTritonGPULoadMMASpecializationHCU(
-      {numStages, wdraEnabled, waspNumLoadWarps, waspNumMmaWarps}));
+      {numStages, wdraEnabled}));
   pm.addPass(std::make_unique<AnnotateRootPartitionPass>());
   pm.addPass(createTritonGPURewritePartitionDependenciesHCU());
   // `int-range-optimizations` and SCCP are good at cleaning up loop arithmetic.
@@ -107,8 +110,7 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.addPass(createNVWSAssignStagePhase());
   pm.addPass(createNVWSLowerAref());
   // OnePTwoC / TwoPTwoC both need consumer (and for TwoPTwoC, producer) split.
-  if (topo.kind == hcu::WdraTopoKind::OnePTwoC ||
-      topo.kind == hcu::WdraTopoKind::TwoPTwoC) {
+  if (topo.hasSplitConsumers()) {
     pm.addPass(createTritonGPUDataPartition());
     pm.addPass(createTritonGPUSplitMmaPartitions());
   }
@@ -130,8 +132,6 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.clear();
   TritonGPUOptimizePartitionWarpsHCUOptions opts;
   opts.wdraEnabled = wdraEnabled;
-  opts.waspNumLoadWarps = waspNumLoadWarps;
-  opts.waspNumMmaWarps = waspNumMmaWarps;
   pm.addPass(createTritonGPUOptimizePartitionWarpsHCU(opts));
   pm.addPass(createTritonGPUScheduleLoops());
   if (failed(runPipeline(pm, getOperation())))

@@ -183,12 +183,6 @@ def TritonGPUAutomaticWarpSpecializationHCU : Pass<"tritongpu-automatic-warp-spe
     Option<"wdraEnabled", "wdra-enabled",
            "bool", /*default*/"false",
            "flag to indicate wdra is enabled">,
-    Option<"waspNumLoadWarps", "wasp-num-load-warps",
-           "int32_t", /*default*/"4",
-           "total num of warps for load when wasp is enabled">,
-    Option<"waspNumMmaWarps", "wasp-num-mma-warps",
-           "int32_t", /*default*/"8",
-           "total num of warps for mma when wasp is enabled">,
   ];
 }
 
@@ -231,18 +225,14 @@ def TritonGPUOptimizePartitionWarpsHCU : Pass<"tritongpu-optimize-partition-warp
   let summary = "optimize the number of warps assigned to partitions (HCU)";
 
   let description = [{
-    The `tritongpu-optimize-partition-warps-hcu` pass will analyze the partitions
-    of `ttg.warp_specialize` ops and attempts to reduce the number of warps
-    assigned to them and optimize the register usage of the partitions.
+    Assign partition sizes from the module's hcu.wasp_partition_warps tuple,
+    update layouts and physical wave start IDs, and estimate WDRA quotas.
+    Explicit frontend partitions must match the tuple without resizing.
   }];
 
   let options = [
     Option<"wdraEnabled", "wdra-enabled", "bool", /*default*/"false",
            "flag to indicate wdra is enabled">,
-    Option<"waspNumLoadWarps", "wasp-num-load-warps", "int32_t", /*default*/"4",
-           "total num of warps for load when wasp is enabled">,
-    Option<"waspNumMmaWarps", "wasp-num-mma-warps", "int32_t", /*default*/"8",
-           "total num of warps for mma when wasp is enabled">
   ];
 
 }
@@ -274,10 +264,6 @@ def TritonGPULoadMMASpecializationHCU : Pass<"tritongpu-load-mma-specialization-
            "number of pipeline stages">,
     Option<"wdraEnabled", "wdra-enabled", "bool", /*default*/"false",
            "flag to indicate wdra is enabled">,
-    Option<"waspNumLoadWarps", "wasp-num-load-warps", "int32_t", /*default*/"4",
-           "total num of warps for load when wasp is enabled">,
-    Option<"waspNumMmaWarps", "wasp-num-mma-warps", "int32_t", /*default*/"8",
-           "total num of warps for mma when wasp is enabled">,
   ];
 }
 

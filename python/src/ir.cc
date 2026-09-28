@@ -637,6 +637,17 @@ void init_triton_ir(py::module &&m) {
                return py::none();
              return py::str(ret.getValue().str());
            })
+      .def("has_attr", [](Operation &self, const std::string &name) {
+        return self.hasAttr(name);
+      })
+      .def("get_dense_i32_array_attr",
+           [](Operation &self, const std::string &name) -> py::object {
+             auto attr = self.getAttrOfType<DenseI32ArrayAttr>(name);
+             if (!attr)
+               return py::none();
+             auto values = attr.asArrayRef();
+             return py::cast(std::vector<int32_t>(values.begin(), values.end()));
+           })
       .def("get_bool_attr",
            [](Operation &self, const std::string &name) -> py::object {
              auto ret = self.getAttrOfType<BoolAttr>(name);
@@ -881,6 +892,10 @@ void init_triton_ir(py::module &&m) {
       .def("get_int32_attr",
            [](TritonOpBuilder &self, int32_t value) {
              return self.getBuilder().getI32IntegerAttr(value);
+           })
+      .def("get_dense_i32_array_attr",
+           [](TritonOpBuilder &self, const std::vector<int32_t> &values) -> Attribute {
+             return self.getBuilder().getDenseI32ArrayAttr(values);
            })
       .def("get_string_attr",
            [](TritonOpBuilder &self, std::string value) -> Attribute {

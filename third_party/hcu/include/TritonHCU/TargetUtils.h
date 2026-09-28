@@ -11,5 +11,7 @@ using AMD::HCUISAFeatureMask;
 using AMD::deduceHCUISAFeature;
 using AMD::supportsHCUISAFeature;
 
+using AMD::getVgprSize;
+
 } // namespace mlir::triton::HCU
 #endif

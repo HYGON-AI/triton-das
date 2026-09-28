@@ -8,9 +8,9 @@ set(TRITON_HCU1_INCLUDE_DIRS
 # AMDGPUToLLVM, or PUBLIC consumers (googletest) fail to link.
 # Keep AMDGPUIR PRIVATE so googletest is not forced to resolve AMDGPUIR's
 # own incomplete link deps (Utils / GPUToLLVM linearize).
-add_triton_library(TritonHCUWdraSupport
+add_triton_library(TritonHCUWaspSupport
   MlsGroup.cpp
-  WdraSplitPlan.cpp
+  WaspSplitPlan.cpp
 
   DEPENDS
   TritonAMDGPUIR
@@ -20,8 +20,8 @@ add_triton_library(TritonHCUWdraSupport
   TritonGPUIR
 )
 
-target_include_directories(TritonHCUWdraSupport PRIVATE ${TRITON_HCU1_INCLUDE_DIRS})
-target_link_libraries(TritonHCUWdraSupport PRIVATE TritonAMDGPUIR)
+target_include_directories(TritonHCUWaspSupport PRIVATE ${TRITON_HCU1_INCLUDE_DIRS})
+target_link_libraries(TritonHCUWaspSupport PRIVATE TritonAMDGPUIR)
 
 add_triton_library(TritonHCUTransforms
   AccelerateHCUMatmul.cpp
@@ -34,7 +34,7 @@ add_triton_library(TritonHCUTransforms
   MlsLowering.cpp
   UpdateAsyncWaitCount.cpp
   MmacGroup.cpp
-  PrepareWdraSplitPlan.cpp
+  PrepareWaspSplitPlan.cpp
   UtilityHCU.cpp
 
   DEPENDS
@@ -42,10 +42,10 @@ add_triton_library(TritonHCUTransforms
   TritonAMDGPUIR
   TritonAMDGPUTransformsIncGen
   TritonGPUIR
-  TritonHCUWdraSupport
+  TritonHCUWaspSupport
 
   LINK_LIBS PUBLIC
-  TritonHCUWdraSupport
+  TritonHCUWaspSupport
   TritonAMDGPUIR
   TritonAMDGPUTransforms
   TritonAMDGPUToLLVM

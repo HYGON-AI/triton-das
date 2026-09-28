@@ -30,7 +30,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "TritonHCU/MlsGroup.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 
 using namespace mlir;
 using namespace mlir::triton::HCU;

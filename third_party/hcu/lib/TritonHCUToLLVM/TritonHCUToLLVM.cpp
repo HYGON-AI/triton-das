@@ -1,6 +1,6 @@
 #include "TritonHCU/Passes.h"
 #include "TritonHCU/WaitCntHCUUtility.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
 
 #include "AsyncUtility.h"

@@ -39,9 +39,9 @@ def TritonHCUAccelerateMatmul : Pass<"tritonhcu-accelerate-matmul", "mlir::Modul
   ];
 }
 
-def TritonHCUPrepareWdraSplitPlan
-    : Pass<"tritonhcu-prepare-wdra-split-plan", "mlir::ModuleOp"> {
-  let summary = "Annotate warp-specialized loops with HCU WDRA split plans";
+def TritonHCUPrepareWaspSplitPlan
+    : Pass<"tritonhcu-prepare-wasp-split-plan", "mlir::ModuleOp"> {
+  let summary = "Annotate warp-specialized loops with HCU WASP split plans";
   let options = [
     Option<"numConsumerGroups", "num-consumer-groups", "int32_t",
            /*default=*/"2",
@@ -50,9 +50,9 @@ def TritonHCUPrepareWdraSplitPlan
 }
 
 def TritonHCUConsumerPingpong : Pass<"tritonhcu-consumer-pingpong", "mlir::ModuleOp"> {
-  let summary = "Stagger WDRA MMA consumers so they do not contend for matrix units";
+  let summary = "Stagger WASP MMA consumers so they do not contend for matrix units";
   let description = [{
-    WDRA OnePTwoC / TwoPTwoC runs two MMA consumer warp groups that otherwise
+    WASP OnePTwoC / TwoPTwoC runs two MMA consumer warp groups that otherwise
     lockstep through local_load + dot and compete for the same SIMD matrix
     pipes. This pass mirrors `tritonamdgpu-block-pingpong`:
 
@@ -183,16 +183,11 @@ def TritonHCUUpdateAsyncWaitCount : Pass<"tritonhcu-update-async-wait-count", "m
 
 def HCUConvertWarpSpecializeToLLVM : Pass<"triton-hcu-convert-warp-specialize-to-llvm", "mlir::ModuleOp"> {
   let summary = "lower `ttg.warp_specialize` to LLVM";
-  let constructor = "mlir::triton::createHCUConvertWarpSpecializeToLLVM(\"\", 4, 8, true, 32, 32, 32)";
+  let constructor = "mlir::triton::createHCUConvertWarpSpecializeToLLVM(\"\", true)";
   let dependentDialects = ["mlir::LLVM::LLVMDialect", "mlir::ROCDL::ROCDLDialect", "mlir::triton::amdgpu::TritonAMDGPUDialect"];
   let options = [
     Option<"arch", "arch", "std::string", /*default*/"\"\"", "gfx target device architecture">,
-    Option<"waspNumLoadWarps", "wasp_num_load_warps", "int", /*default*/"4", "total number of warps to do load">,
-    Option<"waspNumMmaWarps", "wasp_num_mma_warps", "int", /*default*/"8", "total number of warps to do mma">,
     Option<"wdraEnabled", "wdra-enabled", "bool", /*default*/"true", "flag to indicate wdra is enabled">,
-    Option<"wdraNumLoadRegs", "wdra_num_load_regs", "int", /*default*/"0", "max registers for load partition">,
-    Option<"wdraNumMmaRegsMain", "wdra_num_mma_regs_main", "int", /*default*/"0", "max registers for main mma partition">,
-    Option<"wdraNumMmaRegsTail", "wdra_num_mma_regs_tail", "int", /*default*/"0", "max registers for tail mma partition">,
   ];
 }
 

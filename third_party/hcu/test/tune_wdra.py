@@ -5,9 +5,7 @@ VGPR Size 自动调试脚本（WASP + WDRA 专用）
 根据编译输出自动调整各分支的 VGPR 分配。
 
 WDRA 参数：
-  - wdra_num_load_regs
-  - wdra_num_mma_regs_main（始终存在）
-  - wdra_num_mma_regs_tail（始终传入；仅 1 个 mma 分支时为 0，不参与合法性校验里的“分支”计数）
+  - wasp_partition_regs=(load, mma_main[, mma_tail])
 
 合法性校验（validate_allocation）只针对硬件 wave 分支（num_branches 路），与 JSON 里占位的 tail=0 无关。
 """
@@ -50,8 +48,9 @@ class WDRATuner:
 
         # Kernel Specific（仅考虑 WASP + WDRA 模式）
         self.default_num_warps = 0
-        self.load_num_warps = config["wasp_num_load_warps"]
-        self.mma_num_warps = config["wasp_num_mma_warps"]
+        self.load_num_warps = 4
+        waves = config.get("wasp_partition_warps", (4, 4, 4))
+        self.mma_num_warps = sum(waves[2:] if len(waves) == 4 else waves[1:])
         self.waves_per_tg = self.default_num_warps + self.load_num_warps + self.mma_num_warps
         self.waves_per_eu = int(self.waves_per_tg / self.eus_per_cu)
         self.vgpr_limit = int(self.total_num_vgpr / (self.waves_per_tg / self.eus_per_cu))
@@ -259,19 +258,14 @@ class WDRATuner:
         return partition_allocation
 
     def update_config(self, branch_allocation: Tuple[int, ...], mode: str):
-        if self.config.get("wasp_enabled", False) and self.config.get("wdra_enabled", False):
+        if self.config.get("wasp_wdra", True):
             partition_allocation = self.branch_allocation_to_partition_allocation(
                 mode, branch_allocation
             )
-            if "load" in partition_allocation:
-                self.config["wdra_num_load_regs"] = partition_allocation["load"]
-            if "mma_main" in partition_allocation:
-                self.config["wdra_num_mma_regs_main"] = partition_allocation["mma_main"]
-            # 始终传 tail：单 mma 分支时固定为 0（不作为一路 wave 分支参与 validate_allocation）
-            if self.num_mma_branches == 1:
-                self.config["wdra_num_mma_regs_tail"] = 0
-            elif "mma_tail" in partition_allocation:
-                self.config["wdra_num_mma_regs_tail"] = partition_allocation["mma_tail"]
+            roles = ["load", "mma_main"]
+            if self.num_mma_branches > 1:
+                roles.append("mma_tail")
+            self.config["wasp_partition_regs"] = tuple(partition_allocation[role] for role in roles)
 
         with open(self.config_path, "w") as f:
             json.dump(self.config, f)
@@ -341,7 +335,7 @@ class WDRATuner:
         两路 mma（三路 wave）时 main/tail 对应分支可不同。
         各路之和须能被 num_branches 整除，且平均 VGPR 为 4 的倍数。
 
-        注意：单 mma 时 JSON 仍会传 wdra_num_mma_regs_tail=0，但该占位不增加 wave 分支数，
+        注意：单 mma 时 wasp_partition_regs 仅包含 load 和 mma_main，
         此处 branch_allocation 长度仍为 num_branches（仅 load + main），不把 tail 当作一路分支校验。
         """
         for vgpr in branch_allocation:
@@ -373,11 +367,8 @@ class WDRATuner:
         mode = "local-wave"
 
         probe_config = dict(self.config)
-        probe_config["wdra_num_load_regs"] = test_values["load"]
-        probe_config["wdra_num_mma_regs_main"] = test_values["mma_main"]
-        probe_config["wdra_num_mma_regs_tail"] = (
-            0 if self.num_mma_branches == 1 else test_values["mma_tail"]
-        )
+        roles = ["load", "mma_main"] + (["mma_tail"] if self.num_mma_branches > 1 else [])
+        probe_config["wasp_partition_regs"] = tuple(test_values[role] for role in roles)
 
         with open(self.config_path, "w") as f:
             json.dump(probe_config, f)
@@ -638,7 +629,7 @@ def _tune_one_config(
         "status_line": "",
     }
 
-    if not (config.get("wasp_enabled", False) and config.get("wdra_enabled", False)):
+    if not (config.get("wasp_wdra", True)):
         result["skip"] = True
         result["ok"] = True
         result["status_line"] = f"config {config_idx}/{n}: skipped"
@@ -648,9 +639,10 @@ def _tune_one_config(
             lf.write(f"config: {json.dumps(config, ensure_ascii=False, indent=2)}\n")
         return result
 
-    wasp_load = config.get("wasp_num_load_warps")
-    wasp_mma = config.get("wasp_num_mma_warps")
-    if wasp_load != 4 or wasp_mma not in (4, 8):
+    waves = tuple(config.get("wasp_partition_warps", (4, 4, 4)))
+    wasp_load = sum(waves[:2]) if len(waves) == 4 else waves[0]
+    wasp_mma = sum(waves) - wasp_load
+    if waves not in ((4, 4), (4, 4, 4)):
         result["skip"] = True
         result["ok"] = True
         result["status_line"] = f"config {config_idx}/{n}: skipped"
@@ -658,7 +650,7 @@ def _tune_one_config(
             lf.write(f"config {config_idx}/{n}: skipped\n")
             lf.write(
                 "reason: unsupported WASP wave config "
-                f"(wasp_num_load_warps={wasp_load}, wasp_num_mma_warps={wasp_mma})\n"
+                f"(wasp_partition_warps={waves})\n"
             )
             lf.write(f"config: {json.dumps(config, ensure_ascii=False, indent=2)}\n")
         return result
@@ -827,10 +819,7 @@ if __name__ == "__main__":
             "BLOCK_SIZE_N": BN,
             "BLOCK_SIZE_K": BK,
             "GROUP_SIZE_M": GM,
-            "wasp_enabled": True,
-            "wdra_enabled": True,
-            "wasp_num_load_warps": 4,
-            "wasp_num_mma_warps": num_mma_warps,
+            "wasp_partition_warps": (4,) * (1 + num_mma_warps // 4),
         }
         for BM in [32, 64, 128]
         for BN in [32, 64, 128]

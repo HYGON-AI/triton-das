@@ -20,7 +20,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "TritonHCU/MlsGroup.h"
-#include "TritonHCU/WdraSplitPlan.h"
+#include "TritonHCU/WaspSplitPlan.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -229,7 +229,7 @@ struct DataPartitionScheme {
   DenseMap<Operation *, SetVector<unsigned>> rematerializedOps;
   // Ops should not be partitioned due to rematerialization.
   DenseSet<Operation *> opsToSkip;
-  // Shared (noOp) MLS write chain: clone once across WDRA consumer offsets.
+  // Shared (noOp) MLS write chain: clone once across WASP consumer offsets.
   DenseMap<Operation *, Operation *> sharedMlsClones;
 
   // op with noOpPartitionDim will be duplicated instead of partitioned.
@@ -343,8 +343,8 @@ static bool getBackwardSliceToPartition(Value v,
 // swizzled OnePTwoC). MlsOpToLLVM must honor allocShape + subslice offsets.
 //
 // TwoPTwoC (producerSliced): the partitioned operand still gets per-consumer
-// half-tile MLS write + LocalAlloc; the shared operand stays one full-tile
-// MLS write.
+// half-tile MLS write + LocalAlloc; the unsliced operand gets a full-tile
+// allocation and write for each independent Producer/Consumer pair.
 static bool isMlsSharedEncoding(Attribute encoding) {
   return isa_and_nonnull<HCUMlsSharedEncodingAttr>(encoding);
 }
@@ -356,7 +356,7 @@ static bool isMlsSharedMemDesc(Type type) {
 
 static bool isMlsSharedValue(Value v) { return isMlsSharedMemDesc(v.getType()); }
 
-// Identity-map an op in slice mappings (share original across WDRA partitions).
+// Identity-map an op in slice mappings (share original across WASP partitions).
 static void mapOpIdentity(Operation *op, IRMapping &mappings,
                           IRMapping &reverseMappings) {
   mappings.map(op, op);
@@ -392,7 +392,7 @@ warpsPerCTAMatrixLoad(ArrayRef<int64_t> shape, ArrayRef<unsigned> shapePerWarp,
 }
 
 // MlsEncodingInsertion accepts a tile only when it divides the tensor and
-// tile*numWarps fits in the tensor volume. Sliced WDRA tiles often inherit a
+// tile*numWarps fits in the tensor volume. Sliced WASP tiles often inherit a
 // full-tile mlsTile (e.g. 64x64 into 32x64) that violates this — re-select a
 // valid hardware tile from the MLS DB (same candidates as chooseMlsInstruction).
 static bool mlsTileFitsShape(ArrayRef<unsigned> tile, ArrayRef<int64_t> shape,
@@ -556,7 +556,7 @@ static void setRankedTensorEncoding(Value v, Attribute newEnc) {
   v.setType(newTy);
 }
 
-// After WDRA shape slicing, MFMA tilesPerWarp is repaired at retype sites.
+// After WASP shape slicing, MFMA tilesPerWarp is repaired at retype sites.
 // Values that were not sliced on that dim (e.g. N-side epilogue) can still
 // keep the full-tile tilesPerWarp while the Dot already has the sliced one.
 // Unify every MFMA / SliceEncoding / DotOperand in the same MFMA family to
@@ -718,7 +718,7 @@ static MemDescType retypeMlsMemDesc(MemDescType memTy, ArrayRef<int64_t> shape,
 }
 
 // Pull MatrixLoadToLocal (+ async commit/wait) that writes `dest` into the
-// partition scheme. For the partitioned operand, each WDRA consumer rematerializes
+// partition scheme. For the partitioned operand, each WASP consumer rematerializes
 // a matched MLS write/read; for noOp (shared operand) the chain is identity-mapped.
 static bool trackMlsProducerChain(Value dest, DataPartitionScheme &partitionScheme,
                                   unsigned currentDim) {
@@ -854,7 +854,8 @@ static bool getBackwardSliceToPartition(Value v,
       assert(expandDimsOp.getAxis() != currentDim &&
              "expanded dim always has shape 1");
       // Parition along currentDim - 1 for ExpandDimsOp.
-      if (expandDimsOp.getAxis() < currentDim)
+      if (currentDim != DataPartitionScheme::noOpPartitionDim &&
+          expandDimsOp.getAxis() < currentDim)
         currentDim--;
     }
 
@@ -906,10 +907,9 @@ static bool getBackwardSliceToPartition(Value v,
         if (!trackMlsProducerChain(op->getResult(0), partitionScheme,
                                    currentDim))
           return false;
-      } else if (partitionScheme.producerSliced &&
-                 currentDim != DataPartitionScheme::noOpPartitionDim) {
+      } else if (partitionScheme.producerSliced) {
         // tt.load path: pull LocalStore + global load so each pair owns a
-        // half-tile write (mirrors MLS producer slicing).
+        // private write, sliced or full-tile (mirrors MLS producer slicing).
         if (!trackLocalStoreProducerChain(op->getResult(0), partitionScheme,
                                           currentDim))
           return false;
@@ -933,6 +933,17 @@ static bool getBackwardSliceToPartition(Value v,
     } else if (isa<ttng::ReinterpretTensorDescOp, MakeTensorDescOp>(op)) {
       return true;
     } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
+      if (partitionScheme.producerSliced && !allocOp.getSrc()) {
+        // Deallocation must follow the pair-private allocation as well.
+        // Otherwise the old full buffer stays alive only for its dealloc.
+        for (Operation *user : allocOp->getUsers()) {
+          if (isa<LocalDeallocOp>(user)) {
+            partitionScheme.ops.insert(user);
+            partitionScheme.opPartitionDims[user] =
+                DataPartitionScheme::noOpPartitionDim;
+          }
+        }
+      }
       // Recurse into the source operand so that the data chain feeding the
       // allocation (e.g. truncf -> exp2 -> ... -> dot) is also partitioned.
       // Without this, the original full-width chain stays alive because the
@@ -1238,21 +1249,21 @@ static bool computePartitionScheme(triton::FuncOp &funcOp,
       LDBG("partition not possible: shapePerCTA " << shapePerCTA.size());
       return false;
     }
-    auto wdraPlan = hcuMls::getWdraSplitPlan(op);
-    unsigned requestedFactor = wdraPlan ? wdraPlan->factor : 2;
+    auto waspPlan = hcuMls::getWaspSplitPlan(op);
+    unsigned requestedFactor = waspPlan ? waspPlan->factor : 2;
     if (requestedFactor != 2) {
-      LDBG("unsupported WDRA split factor " << requestedFactor);
+      LDBG("unsupported WASP split factor " << requestedFactor);
       return false;
     }
     int sliceSizeM = shapePerCTA[0] / requestedFactor;
     int sliceSizeN = shapePerCTA[1] / requestedFactor;
     SmallVector<unsigned, 2> partitionDim, partitionSize;
 
-    if (wdraPlan) {
-      unsigned dim = wdraPlan->resultDim;
+    if (waspPlan) {
+      unsigned dim = waspPlan->resultDim;
       int sliceSize = dim == 0 ? sliceSizeM : sliceSizeN;
-      if (wdraPlan->partitionedOperand != dim || sliceSize < 16) {
-        LDBG("invalid precomputed WDRA split plan");
+      if (waspPlan->partitionedOperand != dim || sliceSize < 16) {
+        LDBG("invalid precomputed WASP split plan");
         return false;
       }
       partitionDim.push_back(dim);
@@ -1534,12 +1545,12 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
 
   // slice operands first
   Operation *newOp;
-  // Full-tile MLS alloc / stage view: identity-map so producer stays one
-  // shared buffer. Applies to the non-partitioned operand always, and to the
-  // partitioned operand under OnePTwoC (!producerSliced). The matrix_load must
+  // OnePTwoC has a single writer and shares full-tile buffers. TwoPTwoC
+  // uses independent EMPTY/READY pairs: even the unsliced operand needs a
+  // private buffer per pair, otherwise one producer overwrites the other's
+  // live data. The matrix_load must
   // still be *cloned* (sharedMlsClones) so it survives scf.for takeBody.
-  if (dim == DataPartitionScheme::noOpPartitionDim ||
-      !partitionScheme.producerSliced) {
+  if (!partitionScheme.producerSliced) {
     if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
       if (!allocOp.getSrc() && isMlsSharedMemDesc(allocOp.getType())) {
         mapOpIdentity(op, mappings, reverseMappings);
@@ -1940,7 +1951,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       assert(dim < tensorShape.size() &&
              "matrix_store partition dim exceeds tensorShape rank");
       assert(tensorShape[dim] % static_cast<int>(numOfPartitions) == 0 &&
-             "matrix_store tensorShape not divisible by WDRA partitions");
+             "matrix_store tensorShape not divisible by WASP partitions");
       sliceSize = tensorShape[dim] / static_cast<int>(numOfPartitions);
       tensorShape[dim] = sliceSize;
 
@@ -2004,13 +2015,10 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
   } else if (auto tensorDescOp = dyn_cast<MakeTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
   } else if (auto mlsOp = dyn_cast<tta::MatrixLoadToLocalOp>(op)) {
-    // OnePTwoC / shared (noOp): one full-tile MLS write reused across consumer
-    // offsets via sharedMlsClones.
-    // TwoPTwoC partitioned: clone sliced MLS write per consumer.
+    // OnePTwoC: one full-tile MLS write reused via sharedMlsClones.
+    // TwoPTwoC: a private write per pair, including the unsliced operand.
     // Keep load-partition async_task_id either way.
-    bool shareFullTileMls =
-        dim == DataPartitionScheme::noOpPartitionDim ||
-        !partitionScheme.producerSliced;
+    bool shareFullTileMls = !partitionScheme.producerSliced;
     if (shareFullTileMls) {
       if (Operation *existing = partitionScheme.sharedMlsClones.lookup(op)) {
         mappings.map(op, existing);
@@ -2087,8 +2095,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
         mlsOp.getEvict(), mlsOp.getIsVolatile(), newDest, Value());
     // TwoPTwoC: tag each half with its consumer task id so SplitMma can move
     // the write into the matching Load partition. OnePTwoC keeps load attrs.
-    if (partitionScheme.producerSliced &&
-        dim != DataPartitionScheme::noOpPartitionDim)
+    if (partitionScheme.producerSliced)
       hcu::setAsyncTaskIds(newMlsOp, sliceTaskIds);
     else
       hcu::setAsyncTaskIds(newMlsOp, origTaskIds);
@@ -2106,7 +2113,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       for (unsigned w : oldEnc.getWarpsPerCTA())
         oldWarps *= w;
       SmallVector<unsigned> newWarpsPerCTA;
-      if (shareFullTileMls) {
+      if (!sliceMlsWrite) {
         // Shared / OnePTwoC full-tile write: keep original warpsPerCTA.
         newWarpsPerCTA.assign(oldEnc.getWarpsPerCTA().begin(),
                               oldEnc.getWarpsPerCTA().end());
@@ -2145,10 +2152,8 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     builder.setAsynTaskIdsFromArray(sliceTaskIds);
   } else if (isa<AsyncCommitGroupOp, AsyncWaitOp>(op)) {
     // Stay with the load-partition task ids of the original op.
-    // Full-tile MLS async chain (shared B or OnePTwoC A): clone once.
-    bool shareFullTileMls =
-        dim == DataPartitionScheme::noOpPartitionDim ||
-        !partitionScheme.producerSliced;
+    // OnePTwoC shares the chain; TwoPTwoC keeps each pair independent.
+    bool shareFullTileMls = !partitionScheme.producerSliced;
     if (shareFullTileMls) {
       if (Operation *existing = partitionScheme.sharedMlsClones.lookup(op)) {
         mappings.map(op, existing);
@@ -2166,8 +2171,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     for (Value operand : op->getOperands())
       sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
-    if (partitionScheme.producerSliced &&
-        dim != DataPartitionScheme::noOpPartitionDim)
+    if (partitionScheme.producerSliced)
       hcu::setAsyncTaskIds(newOp, sliceTaskIds);
     else
       hcu::setAsyncTaskIds(newOp, origTaskIds);
@@ -2295,7 +2299,8 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     LDBG("slicing operand " << opndIndx << "\n");
     sliceOp(op->getOperand(opndIndx), offset, mappings, reverseMappings,
             partitionScheme);
-    if (dim == 0 && opndIndx == 1 || dim == 1 && opndIndx == 0) {
+    if (partitionScheme.producerSliced ||
+        (dim == 0 && opndIndx == 1) || (dim == 1 && opndIndx == 0)) {
       // slice the other operand
       unsigned otherOpndIndx = 1 - opndIndx;
       LDBG("slicing operand " << otherOpndIndx << "\n");
@@ -2570,8 +2575,8 @@ static bool doDeepCleanup(triton::FuncOp &funcOp,
 static bool doDataPartition(triton::FuncOp &funcOp,
                             unsigned numConsumerGroups) {
   DataPartitionScheme partitionScheme;
-  partitionScheme.producerSliced =
-      hcuMls::getWdraTopologyAttr(funcOp).producerSliced();
+  auto topo = hcuMls::getWaspTopologyFromModule(funcOp);
+  partitionScheme.producerSliced = topo && topo->producerSliced();
   if (!computePartitionScheme(funcOp, partitionScheme)) {
     if (numConsumerGroups > 1) {
       LDBG("computePartitionScheme failed when requested");
@@ -2676,10 +2681,16 @@ struct TritonGPUDataPartition
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
-    // Consumer groups follow WDRA topology (OnePTwoC / TwoPTwoC both use 2).
-    auto topo = hcuMls::getWdraTopologyAttr(mod);
-    unsigned numConsumerGroups =
-        topo.enabled() ? topo.numConsumerGroups : 2;
+    // An explicit OnePOneC tuple needs no data split. Without a configuration,
+    // retain the standalone pass's two-consumer default.
+    auto topo = hcuMls::getWaspTopologyFromModule(mod);
+    if (mod->hasAttr(hcuMls::kWaspPartitionWarpsAttrName) && !topo) {
+      mod.emitError("invalid hcu.wasp_partition_warps attribute");
+      return signalPassFailure();
+    }
+    if (topo && !topo->hasSplitConsumers())
+      return;
+    unsigned numConsumerGroups = topo ? topo->numConsumerGroups() : 2;
 
     WalkResult result = mod.walk([&](triton::FuncOp funcOp) {
       if (!doDataPartition(funcOp, numConsumerGroups))

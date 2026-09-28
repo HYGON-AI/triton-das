@@ -1,4 +1,4 @@
-// Verify GEMM WASP / WASP+WDRA lowering IR captured from:
+// Verify historical GEMM WASP / WASP+WDRA lowering IR captured from:
 //   triton-opt %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir \
 //     --tritongpu-automatic-warp-specialization-hcu="num-stages=2 wdra-enabled=false wasp-num-load-warps=4 wasp-num-mma-warps=4"
 //   triton-opt %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir \
@@ -8,6 +8,10 @@
 //   triton-opt %S/Inputs/hcu-gemm-wasp-wdra-pre.mlir \
 //     --tritongpu-automatic-warp-specialization-hcu="num-stages=2 wdra-enabled=true wasp-num-load-warps=4 wasp-num-mma-warps=8"
 //   (wdra88 / TwoPTwoC golden dumped from Python HCU pipeline with load=8,mma=8)
+//
+// Current callers supply the hcu.wasp_partition_warps module attribute
+// instead of the removed Load/MMA wave-count pass options above.
+// The commands document the origin of these goldens, not the current API.
 //
 // Note: triton-opt currently cannot emit ROCDL HCU abarrier ops without loading
 // the HCU dialect via the Python backend; goldens are produced with the HCU
@@ -82,7 +86,7 @@
 
 // WASP+WDRA 8+8 TwoPTwoC: 4 partitions (Load0, Load1, MMA0, MMA1).
 // WDRA88: module attributes
-// WDRA88-SAME: hcu.wdra_topo = 2
+// WDRA88-SAME: hcu.wasp_partition_warps = array<i32: 4, 4, 4, 4>
 // WDRA88-SAME: ttg.total-num-warps" = 16 : i32
 // WDRA88-LABEL: @gemm_load_kernel
 // WDRA88: rocdl.hcu.s.abarrier.init

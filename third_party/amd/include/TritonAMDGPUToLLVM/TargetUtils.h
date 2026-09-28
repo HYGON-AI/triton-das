@@ -106,6 +106,14 @@ int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
 llvm::StringRef getPermlane16SwapIntrinsic(llvm::StringRef arch);
 llvm::StringRef getPermlane32SwapIntrinsic(llvm::StringRef arch);
 
+// VGPR capacity per SIMD, in Wave64 vector-register units (not bytes/CU).
+// gfx936/gfx938 have 768; other architectures default to 512.
+inline unsigned getVgprSize(llvm::StringRef arch) {
+  if (arch == "gfx936" || arch == "gfx938")
+    return 768;
+  return 512;
+}
+
 } // namespace mlir::triton::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTOLLVM_TARGETUTILS_H_

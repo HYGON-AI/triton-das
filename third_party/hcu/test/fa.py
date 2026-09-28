@@ -1464,13 +1464,9 @@ if __name__ == "__main__":
         "BLOCK_N": 64,
         "pre_load_v": False,
         "num_stages": 1,
-        "wasp_enabled": True,
-        "wasp_num_load_warps": 4,
-        "wasp_num_mma_warps": 8,
-        "wdra_enabled": True,
-        "wdra_num_load_regs": 52,
-        "wdra_num_mma_regs_main": 160,
-        "wdra_num_mma_regs_tail": 160,
+        "wasp_partition_warps": (4, 4, 4),
+        "wasp_wdra": True,
+        "wasp_partition_regs": (52, 160, 160),
     }
     print("accuracy test (fwd fp16) Z=%s Q_H=%s K_H=%s N_CTX=%s D_HEAD=%s causal=%s config=%s"
           % (Z, Q_H, K_H, N_CTX, D_HEAD, causal, config))
