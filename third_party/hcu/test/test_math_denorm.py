@@ -43,7 +43,11 @@ def test_math_ftz_option(op, flush_denorm):
     if flush_denorm is not False or op == "sqrt":
         assert "llvm.amdgcn." + intrinsic + ".f32" in kernel.asm["llir"]
     if flush_denorm is False and op in ("sqrt", "rsqrt"):
-        ref = host.double().sqrt()
+        # Importing flash_attn during collection can enable CPU FTZ/DAZ.
+        # Build the reference directly in FP64: converting the FP32 host
+        # tensor to FP64 under DAZ would turn its subnormal inputs into zero.
+        ref_input = torch.tensor([2.0**-149, 2.0**-148, 2.0**-126 - 2.0**-149, 1.0], dtype=torch.float64)
+        ref = ref_input.sqrt()
         if op == "rsqrt":
             ref = ref.reciprocal()
         torch.testing.assert_close(out.cpu(), ref.float(), rtol=1.2e-7, atol=0)
@@ -57,6 +61,18 @@ def test_math_ftz_option(op, flush_denorm):
     else:
         expected = torch.tensor([float("inf"), float("inf"), float("inf"), 1.])
     torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+
+
+def test_exp2_preserves_subnormal_outputs():
+    # Regression for the global AICC approximation flag bypassing the
+    # non-FTZ lowering of llvm.exp2.f32. Powers of two have exact FP32 bits.
+    x = torch.tensor([-149., -148., -127., -126., -125., 0.], device="cuda")
+    out = torch.empty_like(x)
+    kernel = math_kernel[(1,)](x, out, x.numel(), "exp2", 256, allow_flush_denorm=False)
+    assert "llvm.exp2.f32" in kernel.asm["llir"]
+    expected_bits = torch.tensor([1, 2, 0x00400000, 0x00800000, 0x01000000, 0x3f800000], dtype=torch.int32)
+    # Compare integer bits so CPU FTZ/DAZ cannot hide flushed GPU results.
+    torch.testing.assert_close(out.cpu().view(torch.int32), expected_bits, rtol=0, atol=0)
 
 
 def test_ftz_option_parsing_and_cache():

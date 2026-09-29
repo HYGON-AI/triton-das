@@ -19,6 +19,7 @@ pytest_cases=(
   "${hcu_file_path}/test_asyncmark_waitcnt.py"
   "${hcu_file_path}/gemm-ds-read-m.py"
   "${hcu_file_path}/test_elementwise_fma.py"
+  "${hcu_file_path}/test_math_denorm.py"
   "${hcu_file_path}/test_cvt_scale_pk.py"
   "${hcu_file_path}/test_amd_buffer_ops_4gb.py"
   "${hcu_file_path}/test_amd_buffer_ops_offset_assert.py"

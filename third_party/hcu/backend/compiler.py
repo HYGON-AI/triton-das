@@ -486,7 +486,6 @@ class HIPBackend(BaseBackend):
 
         version_args = {
             "18": [
-                "-mllvm=-enable-hcu-approx-func-fp-math=true",
                 "-mllvm=-hcu-update-wait-by-reverse-search=true",
             ],
         }
