@@ -1,6 +1,10 @@
 #include "PatternTritonGPUOpToLLVM.h"
+#include "BufferLdsAddress.h"
 #include "TritonHCU/DsReadMLayout.h"
+#include "TritonHCU/LdsReadAccessPatterns.h"
 #include "TritonHCU/MlsGroup.h"
+#include "TritonHCU/BufferLdsEncoding.h"
+#include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -96,9 +100,15 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
   auto srcTy = cast<MemDescType>(op.getSrc().getType());
   auto dstTy = cast<RankedTensorType>(op.getType());
   auto dotEnc = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-  if (srcTy.getRank() != 2 || dstTy.getRank() != 2 || !dotEnc ||
-      dotEnc.getOpIdx() != 1)
+  if (srcTy.getRank() != 2 || dstTy.getRank() != 2 || !dotEnc)
     return std::nullopt;
+  auto sharedEncoding =
+      dyn_cast<HCUBufferLdsSharedEncodingAttr>(srcTy.getEncoding());
+  // Existing flat/panel layouts remain B-only. BufferLds encodings use
+  // the common (non-K, K) legacy fragment for either operand.
+  if (dotEnc.getOpIdx() != 1 && !sharedEncoding)
+    return std::nullopt;
+  unsigned nonKDim = dotEnc.getOpIdx(), kDim = 1 - nonKDim;
 
   auto spec = getDsReadMLayoutSpecForTypes(srcTy.getElementType(),
                                           dstTy.getElementType());
@@ -106,13 +116,21 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
     return std::nullopt;
 
   // b16: ds_read_m32x16 covers K=16; b8: ds_read_m32x32 covers K=32.
-  int64_t bk = dstTy.getShape()[0], bn = dstTy.getShape()[1];
+  int64_t bk = dstTy.getShape()[kDim], bn = dstTy.getShape()[nonKDim];
   auto sharedEnc = dyn_cast<SwizzledSharedEncodingAttr>(srcTy.getEncoding());
   std::optional<DsReadMPanelViewPlan> panelViewPlan =
       buildDsReadMPanelViewPlan(srcTy, *spec);
   bool panelMajor = panelViewPlan.has_value();
+  bool interleavedBufferLds = false;
+  if (sharedEncoding) {
+    if (!canUseBufferLdsMatrixRead(srcTy, dotEnc))
+      return std::nullopt;
+    interleavedBufferLds = true;
+    panelMajor = false;
+  }
   if (!isDsReadMTileShape(bk, bn, *spec) ||
-      (!panelMajor && !hasExpectedSharedLayout(sharedEnc, *spec, bn)))
+      (!panelMajor && !interleavedBufferLds &&
+       !hasExpectedSharedLayout(sharedEnc, *spec, bn)))
     return std::nullopt;
 
   // Generic affine shared views remain unsupported.  The only affine panel
@@ -127,11 +145,11 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
   auto tilesPerWarp = mfmaEnc.getTilesPerWarp();
   // 16x16xK MFMA, tilesPerWarp={1,2}; each N-warp owns >=1 full 32-col panel.
   // AccelerateHCUMatmul redistributes warpsPerCTA so warpsN <= BN/32.
-  unsigned warpsN = warpsPerCTA.size() == 2 ? warpsPerCTA[1] : 0;
+  unsigned warpsN = warpsPerCTA.size() == 2 ? warpsPerCTA[nonKDim] : 0;
   if (instrShape.size() != 3 || instrShape[0] != 16 || instrShape[1] != 16 ||
       instrShape[2] != spec->kPerTile || dotEnc.getKWidth() != spec->kWidth ||
-      tilesPerWarp.size() != 2 || tilesPerWarp[0] != 1 ||
-      tilesPerWarp[1] != 2 || warpsN == 0 || bn % (warpsN * 32))
+      tilesPerWarp.size() != 2 || tilesPerWarp[kDim] != 1 ||
+      tilesPerWarp[nonKDim] != 2 || warpsN == 0 || bn % (warpsN * 32))
     return std::nullopt;
 
   return DsReadMPlan{spec->elementBitWidth == 8 ? DsReadMKind::B8
@@ -177,11 +195,56 @@ SmallVector<Value> unpackI32Regs(Location loc, Type elemTy,
   return elems;
 }
 
-// Emit ds_read_m32x16_b16 for each (nPanel, kTile).
-//
-// Both paths return the same logical N32 x K16 fragment. Panel-major LDS uses
-// one physical [BK,32] panel per N-warp, while the flat path addresses the
-// complete [BK,BN] tile. Their address formulas are documented at each path.
+// BufferLds b16/b8 reads share a 16-byte source span per lane. The element
+// width determines the source-lane grid and the returned fragment packing.
+SmallVector<SmallVector<Value>>
+emitBufferLdsMatrixReads(Location loc, RewriterBase &rewriter,
+                 TritonLLVMOpBuilder &b, Type smemPtrTy, Type elemTy,
+                 Value smemBase, Value laneId, Value warpNonK,
+                 const BufferLdsConfig &copyConfig,
+                 const DsReadMPlan &plan) {
+  SmallVector<SmallVector<Value>> fragments;
+  bool b16 = plan.kind == DsReadMKind::B16;
+  unsigned elementBytes = b16 ? 2 : 1;
+  unsigned elementsPerLane = 16 / elementBytes;
+  unsigned lanesPerRow = 32 / elementsPerLane;
+  unsigned kPerTile = 64 / lanesPerRow;
+  Type vecTy = b16 ? vec_ty(elemTy, 8) : vec_ty(rewriter.getI32Type(), 4);
+  for (unsigned panel = 0; panel < plan.nPanels; ++panel)
+    for (unsigned kt = 0; kt < plan.kTiles; ++kt) {
+      Value row = b.add(b.udiv(laneId, b.i32_val(lanesPerRow)),
+                        b.i32_val(kt * kPerTile));
+      Value col = b.add(
+          b.mul(b.add(warpNonK, b.i32_val(panel * plan.warpsN)), b.i32_val(32)),
+          b.mul(b.urem(laneId, b.i32_val(lanesPerRow)),
+                b.i32_val(elementsPerLane)));
+      Value bytes =
+          emitBufferLdsByteOffset(b, copyConfig, row, col, elementBytes);
+      Value elementOffset = b.udiv(bytes, b.i32_val(elementBytes));
+      Value addr = b.gep(smemPtrTy, elemTy, smemBase, elementOffset,
+                         LLVM::GEPNoWrapFlags::inbounds);
+      if (b16) {
+        Value result =
+            createDsReadM32x16B16(loc, rewriter, vecTy, addr, b.i32_val(0));
+        SmallVector<Value> elems;
+        for (unsigned i = 0; i < 8; ++i)
+          elems.push_back(b.extract_element(elemTy, result, b.i32_val(i)));
+        fragments.push_back(elems);
+      } else {
+        Value result =
+            createDsReadM32x32B8(loc, rewriter, vecTy, addr, b.i32_val(0));
+        SmallVector<Value> regs;
+        for (unsigned i = 0; i < 4; ++i)
+          regs.push_back(b.extract_element(rewriter.getI32Type(), result,
+                                           b.i32_val(i)));
+        ArrayRef<Value> regRef(regs);
+        fragments.push_back(unpackI32Regs(loc, elemTy, regRef.take_front(2), b));
+        fragments.push_back(unpackI32Regs(loc, elemTy, regRef.drop_front(2), b));
+      }
+    }
+  return fragments;
+}
+
 SmallVector<SmallVector<Value>>
 emitB16Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
              Type smemPtrTy, Type elemTy, Value smemBase, Value laneId,
@@ -280,18 +343,19 @@ emitB16Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
 SmallVector<SmallVector<Value>>
 emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
             Type smemPtrTy, Type elemTy, Value smemBase, Value laneId,
-            Value warpId, const DsReadMPlan &plan) {
+            Value warpNonK, const DsReadMPlan &plan) {
   SmallVector<SmallVector<Value>> elemsByPanel;
   Value colInPair = b.and_(laneId, b.i32_val(1)); // c = lane & 1
   Type vecTy = vec_ty(rewriter.getI32Type(), 4);
+
   if (plan.panelMajor) {
     // Panel-major physical addressing:
     //   k_addr = lane >> 1
     //   c       = lane & 1
     //   phase   = k_addr & 1
-    //   panel   = nPanel * warpsN + warpN
+    //   panel   = nPanel * warpsN + warpNonK
     //   physical_k = k_addr ^ (panel & 3)
-    //   vaddr_elem = warpN * BK * 32 + physical_k * 32
+    //   vaddr_elem = warpNonK * BK * 32 + physical_k * 32
     //              + ((c ^ phase) * 16)
     //
     // maxPhase=2 keeps the N XOR within the two 16-byte groups of this warp's
@@ -309,13 +373,13 @@ emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
       // Undo that skew in the matrix-read address.  nPanel selects a later
       // group of warpsN panels through the immediate below, so include it when
       // forming the full logical panel id.
-      Value panelId = b.add(warpId, b.i32_val(nPanel * plan.warpsN));
+      Value panelId = b.add(warpNonK, b.i32_val(nPanel * plan.warpsN));
       Value panelK = b.and_(panelId, b.i32_val(3));
       Value physicalK = b.xor_(kAddr, panelK);
       Value vaddrElem =
           b.add(b.add(b.mul(physicalK, b.i32_val(plan.ldsBn)),
                       b.mul(nGroup, b.i32_val(16))),
-                b.mul(warpId, b.i32_val(plan.ldsBk * plan.ldsBn)));
+                b.mul(warpNonK, b.i32_val(plan.ldsBk * plan.ldsBn)));
       Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, vaddrElem,
                                 LLVM::GEPNoWrapFlags::inbounds);
       for (unsigned kTile = 0; kTile < plan.kTiles; ++kTile) {
@@ -343,7 +407,7 @@ emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
   // Flat [BK,BN] addressing:
   //   k_addr = (lane >> 1) + kTile * 32
   //   c       = lane & 1
-  //   panel   = nPanel * warpsN + warpN
+  //   panel   = nPanel * warpsN + warpNonK
   //   n0      = panel * 32 + c * 16
   //
   // For shared {vec=16, perPhase=1, maxPhase=min(4, BN/16), order=[1,0]}:
@@ -360,7 +424,7 @@ emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
       Value phase = b.urem(kAddr, b.i32_val(plan.maxPhase));
       Value nPanelBase = b.mul(b.i32_val(nPanel * plan.warpsN), b.i32_val(2));
       Value nGroup = b.xor_(
-          b.add(b.add(nPanelBase, b.mul(warpId, b.i32_val(2))), colInPair),
+          b.add(b.add(nPanelBase, b.mul(warpNonK, b.i32_val(2))), colInPair),
           phase);
       Value vaddrElem = b.add(b.mul(kAddr, b.i32_val(plan.bn)),
                               b.mul(nGroup, b.i32_val(16)));
@@ -418,7 +482,10 @@ packDsReadMFragments(const SmallVector<SmallVector<Value>> &elemsByKTile,
 }
 
 struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  HCUDsReadMConversion(LLVMTypeConverter &converter, StringRef arch,
+                       PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), arch(arch.str()) {}
+  std::string arch;
 
   LogicalResult
   matchAndRewrite(LocalLoadOp op, OpAdaptor adaptor,
@@ -429,6 +496,14 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
 
     Location loc = op.getLoc();
     auto srcTy = cast<MemDescType>(op.getSrc().getType());
+    auto sharedEncoding =
+        dyn_cast<HCUBufferLdsSharedEncodingAttr>(srcTy.getEncoding());
+    MatrixReadOpcode opcode = plan->kind == DsReadMKind::B16
+                                  ? MatrixReadOpcode::M32x16B16
+                                  : MatrixReadOpcode::M32x32B8;
+    if (sharedEncoding && !matrixReadBankPhases(arch, opcode))
+      return rewriter.notifyMatchFailure(op,
+                                         "target has no BufferLds matrix-read profile");
     auto dstTy = cast<RankedTensorType>(op.getType());
     auto typeConverter = getTypeConverter();
     Type elemTy = typeConverter->convertType(srcTy.getElementType());
@@ -448,15 +523,19 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
     SmallVector<Value> warpIds =
         delinearize(rewriter, loc, warpId, mfmaEnc.getWarpsPerCTA(),
                     triton::gpu::getMatrixOrder(/*rank=*/2, /*rowMajor=*/true));
-    Value warpN = warpIds[1];
+    // M for operand A, N for operand B.
+    Value warpNonK = warpIds[cast<DotOperandEncodingAttr>(dstTy.getEncoding()).getOpIdx()];
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
-
     SmallVector<SmallVector<Value>> elemsByKTile =
-        plan->kind == DsReadMKind::B16
-            ? emitB16Reads(loc, rewriter, b, smemPtrTy, elemTy,
-                           smemBase, laneId, warpN, *plan)
-            : emitB8Reads(loc, rewriter, b, smemPtrTy, elemTy,
-                          smemBase, laneId, warpN, *plan);
+        sharedEncoding
+            ? emitBufferLdsMatrixReads(loc, rewriter, b, smemPtrTy, elemTy, smemBase,
+                               laneId, warpNonK,
+                               getBufferLdsConfig(sharedEncoding), *plan)
+        : plan->kind == DsReadMKind::B16
+            ? emitB16Reads(loc, rewriter, b, smemPtrTy, elemTy, smemBase,
+                           laneId, warpNonK, *plan)
+            : emitB8Reads(loc, rewriter, b, smemPtrTy, elemTy, smemBase, laneId,
+                          warpNonK, *plan);
 
     SmallVector<Value> outVals = packDsReadMFragments(elemsByKTile, *plan);
     Value result = packLLElements(loc, typeConverter, outVals, rewriter, dstTy);
@@ -469,8 +548,8 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
 
 namespace mlir::triton::HCU {
 void populateDsReadMToLLVMPatterns(LLVMTypeConverter &typeConverter,
-                                   RewritePatternSet &patterns,
+                                   RewritePatternSet &patterns, StringRef arch,
                                    PatternBenefit benefit) {
-  patterns.add<HCUDsReadMConversion>(typeConverter, benefit);
+  patterns.add<HCUDsReadMConversion>(typeConverter, arch, benefit);
 }
 } // namespace mlir::triton::HCU

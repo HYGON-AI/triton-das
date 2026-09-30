@@ -585,6 +585,16 @@ static LogicalResult inferMemDescReshapeOpEncoding(ArrayRef<int64_t> srcShape,
                                                    ArrayRef<int64_t> dstShape,
                                                    Attribute &dstEnc) {
   auto *ctx = srcEnc.getContext();
+  if (isa<HCUBufferLdsSharedEncodingAttr>(srcEnc)) {
+    // This encoding is a physical producer/consumer placement contract for
+    // one complete tile, rather than a shape-independent logical layout.
+    // Preserve it only for an identity reshape; a shape-changing reshape must
+    // select another encoding instead of silently reinterpreting LDS.
+    if (srcShape != dstShape)
+      return failure();
+    dstEnc = srcEnc;
+    return success();
+  }
   // TODO Delete this once SharedLinearEncodingAttr is more widely supported.
   if (auto mmaEncoding = dyn_cast<NVMMASharedEncodingAttr>(srcEnc)) {
     if (getNumCTAs(mmaEncoding) == 1) {
@@ -819,6 +829,10 @@ LogicalResult MemDescIndexOp::verify() {
   if (isa<SharedEncodingTrait>(srcEnc) != isa<SharedEncodingTrait>(dstEnc)) {
     return emitError("src and dst must have the same type of encoding");
   }
+  if ((isa<HCUBufferLdsSharedEncodingAttr>(srcEnc) ||
+       isa<HCUBufferLdsSharedEncodingAttr>(dstEnc)) &&
+      srcEnc != dstEnc)
+    return emitError("memdesc_index must preserve HCU buffer-to-LDS placement");
 
   if (dstTy.getAllocShape() != dstTy.getShape() ||
       srcTy.getAllocShape() != srcTy.getShape()) {
@@ -852,6 +866,11 @@ LogicalResult MemDescSubsliceOp::verify() {
 
   auto srcEnc = srcTy.getEncoding();
   auto dstEnc = dstTy.getEncoding();
+  if ((isa<HCUBufferLdsSharedEncodingAttr>(srcEnc) ||
+       isa<HCUBufferLdsSharedEncodingAttr>(dstEnc)) &&
+      srcEnc != dstEnc)
+    return emitError(
+        "memdesc_subslice must preserve HCU buffer-to-LDS placement");
   if (bool(srcEnc) != bool(dstEnc)) {
     return emitError("src and result must both have or not have an encoding");
   }

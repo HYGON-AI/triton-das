@@ -646,6 +646,14 @@ bool TargetInfo::requiresAliasInfoForAsyncOps() const {
 }
 
 bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
+  // HCU buffer-to-LDS instructions accept dword, dwordx2 and dwordx4
+  // transfers.  Keep this target capability here instead of teaching the
+  // common load/store lowering about a planned-copy encoding.
+  if (llvm::is_contained({StringRef("gfx936"), StringRef("gfx938"),
+                          StringRef("gfx92a"), StringRef("gfx946")},
+                         StringRef(arch)))
+    return llvm::is_contained({128, 64, 32}, bitWidth);
+
   switch (getISAFamily()) {
   case ISAFamily::CDNA3:
     // Disable 8 and 16 bits because they get extended to 32 bit.

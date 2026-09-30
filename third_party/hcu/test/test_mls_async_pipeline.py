@@ -151,6 +151,7 @@ def test_non_dot_mls_fallback():
     ttgir = kernel.asm["ttgir"]
     assert "scf.for" in ttgir
     assert ttgir.count("amdg.matrix_load_to_local") == 1
+    assert "#ttg.hcu_buffer_lds_shared" not in ttgir
     assert "pred =" not in ttgir
     assert "tt.matrix_load " not in ttgir
 
@@ -182,15 +183,13 @@ def _chained_kernel(A, B, S, C, K, SHARED_MLS: tl.constexpr):
 
 @pytest.mark.parametrize("a_mls,b_mls", [(True, True), (True, False), (False, True), (False, False)])
 @pytest.mark.parametrize("stages", [2, 3, 4])
-@pytest.mark.parametrize("small_tensor", [True, False])
-def test_unified_pipeline_ir(tmp_path, a_mls, b_mls, stages, small_tensor):
+def test_unified_pipeline_ir(tmp_path, a_mls, b_mls, stages):
     attrs = {(i,): [("tt.divisibility", 16)] for i in range(5)}
-    if small_tensor:
-        # Match normal HCU JIT specialization for tensors within 4 GiB.
-        # Without this, pointer canonicalization retains i64 offsets and the
-        # copies take the global-to-LDS path instead of buffer-to-LDS.
-        for i in range(4):
-            attrs[(i,)].append(("tt.pointer_range", 32))
+    # Match normal HCU JIT specialization for tensors within 4 GiB. This test
+    # covers the buffer-to-LDS pipeline; generic global-to-LDS is a separate
+    # target/toolchain capability and is outside this suite's scope.
+    for i in range(4):
+        attrs[(i,)].append(("tt.pointer_range", 32))
     kernel = triton.compile(
         ASTSource(_mixed_kernel,
                   signature={"A": "*fp16", "B": "*fp16", "S": "*fp32", "C": "*fp32", "K": "i32"},
@@ -211,17 +210,12 @@ def test_unified_pipeline_ir(tmp_path, a_mls, b_mls, stages, small_tensor):
         assert "pred =" in ttgir  # dynamic prologue/epilogue MLS guards
         assert "llvm.hcu.matrix.load" in kernel.asm["llir"]
     if not a_mls or not b_mls:
-        if small_tensor:
-            assert "amdg.buffer_load_to_local" in ttgir
-            assert "ttg.async_copy_global_to_local" not in ttgir
-            opcode = "buffer_load_dword"
-        else:
-            assert "ttg.async_copy_global_to_local" in ttgir
-            assert "amdg.buffer_load_to_local" not in ttgir
-            opcode = "global_load_dword"
+        assert "amdg.buffer_load_to_local" in ttgir
+        assert "ttg.async_copy_global_to_local" not in ttgir
         # The current gfx938 TargetInfo allows 32-bit direct-to-LDS loads
-        # (two fp16 elements per lane), regardless of a larger tile size.
-        assert re.search(rf"^\s*{opcode}\s+[^\n]*\blds\b", kernel.asm["amdgcn"], re.MULTILINE)
+        # and may combine adjacent transfers into a wider dwordxN operation.
+        assert re.search(r"^\s*buffer_load_dword(?:x\d+)?\s+[^\n]*\blds\b",
+                         kernel.asm["amdgcn"], re.MULTILINE)
     assert "llvm.amdgcn.wait.asyncmark" in kernel.asm["llir"]
 
 

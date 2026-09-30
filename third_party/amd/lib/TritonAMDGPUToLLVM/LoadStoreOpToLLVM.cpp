@@ -7,6 +7,8 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TDMUtility.h"
 #include "TargetInfo.h"
+#include "TritonHCU/BufferLdsM0.h"
+#include "TritonHCU/BufferLdsEncoding.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -926,8 +928,22 @@ struct BufferLoadToLocalOpConversion
     bool requiresSrcPtrSwizzling =
         !targetInfo.supportsDirectToLDSScattering() && maybeSwizzledEnc &&
         maybeSwizzledEnc.getMaxPhase() != 1;
-    if (failed(canWriteCoalesced(rewriter, op, ptrType, dstTy, vec,
-                                 requiresSrcPtrSwizzling))) {
+    auto sharedEncoding = dyn_cast<HCUBufferLdsSharedEncodingAttr>(dstEnc);
+    if (sharedEncoding) {
+      // A contiguity hint may increase vec after mask elements were unpacked.
+      // Re-apply the mask bound before validating the complete HCU
+      // producer/placement contract.
+      if (llMask)
+        vec = std::min<unsigned>(vec, getMaskAlignment(mask));
+      auto arch = targetInfo.getArch();
+      auto validatedVec = triton::HCU::getValidatedBufferLdsCopyWidth(
+          op, ptrType, dstTy, vec, !otherElems.empty(),
+          std::string_view(arch.data(), arch.size()));
+      if (failed(validatedVec))
+        return failure();
+      vec = *validatedVec;
+    } else if (failed(canWriteCoalesced(rewriter, op, ptrType, dstTy, vec,
+                                        requiresSrcPtrSwizzling))) {
       return failure();
     }
 
@@ -957,21 +973,33 @@ struct BufferLoadToLocalOpConversion
         zipLoadValues(rewriter, loc, vec, offsetElems, offsetTy, maskElems,
                       otherElems, otherTy, swizzledLaneOffsets);
 
-    // FIXME: Explicitly disable cache swizzling(introduced by oai commit 83229ced0479) for
-    //        buffer atomic ops on HCUs as more hcu-specific details (stride field particularly)
-    //        should be considered.
-    // Create the resource descriptor and then emit the buffer_loads to lds
-    // based on the collected shared addresses and vector size
-    // Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
-    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr);
+    // ConvertToBufferOps has already normalized llStride for descriptor cache
+    // swizzling. It affects global cache indexing, not the LDS placement.
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
 
     Value threadPred = emitRedundantThreadPredicate(
         getFreeVariableMasks(ptrType), rewriter, loc, targetInfo);
 
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+    Value wrapWaveId = warpId;
+    if (sharedEncoding) {
+      // The placement assigns a different M0 rotation to each producer wave.
+      // M0's wrap field is wave-uniform, just like the LDS allocation base.
+      // Scalarize at entry: doing it after composing each M0 value leaves a
+      // convergent readfirstlane in every software-pipeline generation.
+      OpBuilder::InsertionGuard guard(rewriter);
+      auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
+      rewriter.setInsertionPointToStart(&func.getBody().front());
+      auto entryWarp = getLaneAndWarpId(rewriter, loc).second;
+      wrapWaveId =
+          LLVM::createLLVMIntrinsicCallOp(
+              rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty}, {entryWarp})
+              .getResult(0);
+    }
     auto emitBufferLoadLds =
         [this, &op, &b, &bufferEmitter, &rsrcDesc, laneId = laneId, threadPred,
-         offsetTy, otherTy, hasOther, requiresSrcPtrSwizzling](
+         offsetTy, otherTy, hasOther, requiresSrcPtrSwizzling, sharedEncoding,
+         wrapWaveId](
             RewriterBase &rewriter, Location loc, ArrayRef<Value> loadVals,
             Value shmemAddr, int startIdx, VectorType vecTy,
             Value multicastMask) -> SmallVector<Value> {
@@ -995,8 +1023,16 @@ struct BufferLoadToLocalOpConversion
 
       auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, cond);
 
+      Value intrinsicLdsAddress = shmemAddr;
+      if (sharedEncoding) {
+        // Target-specific intrinsic ABI adaptation stays inside the BufferLds
+        // HCU lowering. Preserve the real address for any ordinary LDS store.
+        intrinsicLdsAddress = triton::HCU::encodeBufferLdsWaveM0(
+            rewriter, loc, shmemAddr, wrapWaveId, sharedEncoding,
+            targetInfo.getArch());
+      }
       auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
-          vecTy, vecBytesVal, rsrcDesc, offsetElem, shmemAddr,
+          vecTy, vecBytesVal, rsrcDesc, offsetElem, intrinsicLdsAddress,
           hasOther ? b.true_val() : maybeSwizzledMaskElem, op.getCache());
       if (targetInfo.requiresAliasInfoForAsyncOps())
         AMD::addAsyncCopyAliasScope(bufferLoadToLds);
@@ -1041,6 +1077,13 @@ struct AsyncCopyGlobalToLocalOpConversion
   LogicalResult
   matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (isa<HCUBufferLdsSharedEncodingAttr>(
+            op.getResult().getType().getEncoding()))
+      return rewriter.notifyMatchFailure(
+          op, "generic async-copy cannot write the HCU bank-conflict-aware "
+              "LDS placement because it cannot encode row permutation and "
+              "M0 wrap; expected the HCU buffer-to-LDS conversion to "
+              "materialize amdg.buffer_load_to_local first");
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 

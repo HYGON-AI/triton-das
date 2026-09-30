@@ -28,6 +28,10 @@ def is_in_thread_transpose_enabled(arch):
     return (arch == "gfx942") if knobs.amd.use_in_thread_transpose is None else knobs.amd.use_in_thread_transpose
 
 
+def supports_buffer_lds(arch):
+    return arch in ("gfx92a", "gfx936", "gfx938", "gfx946")
+
+
 @dataclass(frozen=True)
 class HIPOptions:
     num_warps: int = 4
@@ -569,6 +573,7 @@ class HIPBackend(BaseBackend):
         # Attach sched/empty-arrive knobs as module attrs for WASP + MMAC lowering.
         # Sched barriers are implied by enable_v_mmac_cluster != 0.
         b = ir.builder(mod.context)
+        use_async_copy = options.use_async_copy
         mmac_cluster_on = int(options.enable_v_mmac_cluster) >= 1
         mod.set_attr("hcu.sched_barrier_before_mmac",
                      b.get_bool_attr(mmac_cluster_on))
@@ -599,6 +604,22 @@ class HIPBackend(BaseBackend):
                                                  options.matrix_instr_nonkdim,
                                                  options.kpack,
                                                  options.mmac_layout_force)
+        # Bank-conflict-aware buffer-to-LDS is an implementation of the existing async-copy
+        # request, not an AccelerateMatmul layout mode. Try it after the final
+        # dot-operand encoding is known; unsupported operands remain untouched
+        # for ordinary register staging.
+        # TODO(hcu): Support BufferLds under WASP. The placement must use the
+        # load-partition producer-wave count (and a partition-local wave id),
+        # preserve its encoding through WASP multi-buffer/view rewrites, and
+        # publish completion as wait_asyncmark -> ready abarrier arrive. Do not
+        # insert the ordinary whole-workgroup local_barrier in that path.
+        try_buffer_lds = (
+            use_async_copy and supports_buffer_lds(options.arch)
+            and options.num_ctas == 1
+            and not metadata.get("wasp_enabled", False)
+            and knobs.amd.use_buffer_ops)
+        if try_buffer_lds:
+            hcu.passes.ttgpuir.add_select_buffer_lds_config(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)
         if options.optimize_epilogue:
             amd.passes.ttgpuir.add_optimize_epilogue(pm)
@@ -614,7 +635,26 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
 
-        use_async_copy = options.use_async_copy
+        # Only the async-copy path needs to inspect the selected IR before
+        # scheduling. Keep the ordinary pipeline as one pass-manager run.
+        if use_async_copy:
+            pm.run(mod, 'make_ttgir_layout')
+            uses_buffer_lds = hcu.has_buffer_lds_encoding(mod)
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+        else:
+            uses_buffer_lds = False
+        metadata["uses_bank_conflict_aware_lds_placement"] = uses_buffer_lds
+        # The generic AMD async pipeline owns allocation slots and publication
+        # waits for the whole loop. HCU row-interleaved layout has a different
+        # producer/consumer contract, so this target mode owns copy selection:
+        # matching operands use the selected shared encoding and rejected operands
+        # remain ordinary register staging. Other targets retain the generic
+        # async-copy behavior selected by the same public option. If selection
+        # produced no BufferLds operand at all, fall back to that generic
+        # pipeline instead of treating an unsuccessful attempt as a selection.
+        enable_generic_async_pipeline = (
+            use_async_copy and not uses_buffer_lds)
 
         # Preserve the old triton stream-prefetch behavior for MLS:
         # separate global load and LDS consumption by one pipeline stage.
@@ -639,8 +679,9 @@ class HIPBackend(BaseBackend):
             hcu.passes.ttgpuir.add_prepare_block_pingpong(pm)
         if not metadata.get("wasp_enabled", False):
             amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
-            amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, False)
-        if use_async_copy:
+            amd.passes.ttgpuir.add_pipeline(
+                pm, enable_generic_async_pipeline, False)
+        if enable_generic_async_pipeline:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
         if options.schedule_hint.lower() != "none":
@@ -686,6 +727,11 @@ class HIPBackend(BaseBackend):
                 knobs.amd.buffer_ops_use_range_analysis,
                 buffer_cache_swizzle,
             )
+            if uses_buffer_lds:
+                # Publish each proven producer before any LDS consumer.
+                hcu.passes.ttgpuir.add_convert_buffer_lds_copies(pm)
+                passes.common.add_canonicalizer(pm)
+                passes.ttgpuir.add_remove_layout_conversions(pm)
 
         amd.passes.ttgpuir.add_fold_true_cmpi(pm)
         passes.common.add_canonicalizer(pm)

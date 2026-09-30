@@ -1,6 +1,27 @@
 // HCU-specific pass declarations
 include "mlir/Pass/PassBase.td"
 
+def TritonHCUConvertBufferLdsCopies : Pass<"tritonhcu-convert-buffer-lds-copies", "mlir::ModuleOp"> {
+  let summary = "Convert eligible HCU buffer loads into synchronized buffer-to-LDS copies";
+  let description = [{
+    Replace a buffer load followed by a local allocation or store with a
+    target-validated buffer-to-LDS copy. The pass preserves the selected
+    bank-conflict-aware LDS placement and inserts the commit, wait, and
+    workgroup barrier required before LDS consumers execute.
+  }];
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
+
+def TritonHCUSelectBufferLdsConfig : Pass<"tritonhcu-select-buffer-lds-config", "mlir::ModuleOp"> {
+  let summary = "Select bank-conflict-aware HCU buffer-to-LDS configurations";
+  let description = [{
+    After matmul acceleration has selected the final dot-operand layout, try to
+    replace eligible ordinary load-to-dot conversions with an explicit HCU
+    buffer-to-LDS allocation and local load. Unsupported operands are left
+    unchanged for ordinary register staging.
+  }];
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
+}
 
 def TritonHCUApplyFuncHintsAndClean : Pass<"tritonhcu-apply-func-hints-and-clean", "mlir::ModuleOp"> {
   let summary = "Apply known tt.hint.func.* effects and clean tt.hint.* (HCU)";

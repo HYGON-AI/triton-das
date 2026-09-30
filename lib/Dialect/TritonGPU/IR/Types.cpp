@@ -179,6 +179,22 @@ LogicalResult MemDescType::verify(function_ref<InFlightDiagnostic()> emitError,
     return emitError() << encoding << " is not a valid encoding";
   }
 
+  if (auto enc = dyn_cast<HCUBufferLdsSharedEncodingAttr>(encoding)) {
+    const auto backingTileShape = enc.getBackingTileShape();
+    const bool hasSupportedElementType =
+        elementType.isF16() || elementType.isBF16() ||
+        isa<Float8E4M3FNType, Float8E5M2Type>(elementType);
+    const bool hasMatchingElementWidth =
+        elementType.getIntOrFloatBitWidth() == enc.getElementBytes() * 8;
+    if (!hasSupportedElementType || !hasMatchingElementWidth ||
+        allocShape.take_back(2) != ArrayRef<int64_t>(backingTileShape))
+      return emitError() << "HCU buffer-to-LDS encoding requires its complete "
+                            "fp16/bf16/fp8 backing tile";
+    if (shape.take_back(2) != ArrayRef<int64_t>(backingTileShape))
+      return emitError() << "HCU buffer-to-LDS encoding does not support "
+                            "partial tile views";
+  }
+
   // PaddedSharedEncodingAttr is also a SharedEncodingTrait but we have some
   // additional rules to verify.
   if (auto enc = dyn_cast<PaddedSharedEncodingAttr>(encoding)) {

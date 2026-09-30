@@ -10,6 +10,8 @@ add_triton_library(TritonHCUToLLVM
   DotOpToLLVMHCU.cpp
   ElementwiseOpToLLVM.cpp
   DsReadM.cpp
+  BufferLdsLocalLoadLowering.cpp
+  BufferLdsAddress.cpp
   MlsOpToLLVM.cpp
   WaitCntHCUUtility.cpp
   ConvertWarpSpecializeToLLVM.cpp

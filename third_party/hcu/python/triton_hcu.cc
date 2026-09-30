@@ -4,6 +4,7 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "TritonHCU/WaitCntHCUUtility.h"
 #include "TritonHCU/Passes.h"
+#include "TritonHCU/BufferLdsEncoding.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
@@ -41,6 +42,8 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_4("add_accelerate_matmul",
                             mlir::createTritonHCUAccelerateMatmul,
                             const std::string, int, int, int);
+  ADD_PASS_WRAPPER_0("add_select_buffer_lds_config",
+                     mlir::createTritonHCUSelectBufferLdsConfig);
   ADD_PASS_OPTION_WRAPPER_1("add_prepare_wasp_split_plan",
                             mlir::createTritonHCUPrepareWaspSplitPlan, int);
   ADD_PASS_WRAPPER_0("add_consumer_pingpong",
@@ -61,6 +64,8 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_prepare_block_pingpong",
                      mlir::createTritonHCUPrepareBlockPingpong);
   ADD_PASS_WRAPPER_0("add_utc_warmup", mlir::createTritonHCUUTCWarmup);
+  ADD_PASS_WRAPPER_0("add_convert_buffer_lds_copies",
+                     mlir::createTritonHCUConvertBufferLdsCopies);
   m.def("add_block_pingpong", addBlockPingpongPipeline);
   ADD_PASS_WRAPPER_0("add_pack_block_pingpong_bit8",
                      mlir::createTritonHCUPackBlockPingpongBit8);
@@ -85,6 +90,9 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
 
 void init_triton_hcu(py::module &&m) {
   m.doc() = "Python bindings to the HCU Triton backend";
+  m.def("has_buffer_lds_encoding", [](mlir::ModuleOp mod) {
+    return mlir::triton::HCU::hasBufferLdsEncoding(mod);
+  });
   auto passes = m.def_submodule("passes");
   init_triton_hcu_passes_ttgpuir(passes.def_submodule("ttgpuir"));
   m.def("add_wait_cnt", [](mlir::ModuleOp mod) {

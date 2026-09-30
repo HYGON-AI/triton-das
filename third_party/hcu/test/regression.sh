@@ -11,6 +11,9 @@ hcu_file_path="${SRC_HOME}/third_party/hcu/test"
 junit_xml="${JUNIT_XML:-${CUR_PATH}/hcu_regression.xml}"
 
 pytest_cases=(
+  "${hcu_file_path}/test_buffer_lds_config.py"
+  "${hcu_file_path}/test_buffer_lds_copy.py"
+  "${hcu_file_path}/test_async_copy_dtypes.py"
   "${hcu_file_path}/matmul.py"
   "${hcu_file_path}/rmsnorm.py"
   "${hcu_file_path}/fused-attention.py"

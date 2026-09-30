@@ -215,6 +215,8 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
   if (auto linearEnc = dyn_cast<SharedLinearEncodingAttr>(layout)) {
     return linearEnc.getOrder();
   }
+  if (auto sharedEncoding = dyn_cast<HCUBufferLdsSharedEncodingAttr>(layout))
+    return sharedEncoding.getOrder();
   if (auto sharedLayout = dyn_cast<NVMMASharedEncodingAttr>(layout)) {
     if (shape.size() == 1) {
       return {0};
@@ -1925,6 +1927,124 @@ SharedLinearEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 }
 
 //===----------------------------------------------------------------------===//
+// HCU buffer-to-LDS encoding
+//===----------------------------------------------------------------------===//
+
+CTAEncodingAttr HCUBufferLdsSharedEncodingAttr::getCTALayout() const {
+  return getLinearComponent().getCTALayout();
+}
+
+LogicalResult HCUBufferLdsSharedEncodingAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError,
+    SharedLinearEncodingAttr linearComponent, unsigned elementBytes,
+    unsigned contiguousDim, unsigned rows, unsigned rowBytes, unsigned waves,
+    unsigned copyBytesPerLane, unsigned rowsPerChunk, unsigned wrapCount,
+    unsigned wrapStepBytes, unsigned wavesPerRowGroup, bool transferMajor) {
+  auto pow2 = [](unsigned n) { return n && llvm::isPowerOf2_32(n); };
+  if (elementBytes != 1 && elementBytes != 2)
+    return emitError()
+           << "HCU buffer-to-LDS supports one- or two-byte elements";
+  // The encoding describes a rank-2 tile, so its contiguous dimension is
+  // necessarily one of the two tensor dimensions.
+  if (contiguousDim > 1)
+    return emitError()
+           << "HCU buffer-to-LDS requires a rank-2 contiguous dimension";
+  if (!pow2(rows) || !pow2(rowBytes) || !pow2(waves) || !pow2(rowsPerChunk))
+    return emitError() << "HCU buffer-to-LDS rows, row bytes, waves, and row "
+                          "chunk must be powers of two";
+  // wrapCount is the period, in producer waves, of the LDS rotation pattern.
+  // The exact M0 field range and granularity are target properties and are
+  // checked against BufferLdsTargetProfile during lowering.
+  if (!pow2(wrapCount) || wrapCount > waves || wrapStepBytes % 4)
+    return emitError() << "invalid HCU buffer-to-LDS wrap geometry";
+  // A row group is an independently interleaved subset of producer waves;
+  // zero is the canonical spelling for one group containing every wave.
+  if (wavesPerRowGroup && (!pow2(wavesPerRowGroup) || wavesPerRowGroup > waves))
+    return emitError() << "HCU buffer-to-LDS wave group must be zero or a "
+                          "power of two no larger than the wave count";
+  if (copyBytesPerLane != 4 && copyBytesPerLane != 8 && copyBytesPerLane != 16)
+    return emitError()
+           << "HCU buffer-to-LDS copy width must be 4, 8, or 16 bytes per lane";
+  if (rowBytes % copyBytesPerLane || uint64_t(rowsPerChunk) * waves > rows)
+    return emitError()
+           << "HCU buffer-to-LDS row chunk does not partition the tile";
+
+  // This encoding is target independent. Target lowering validates the exact
+  // LDS capacity and M0 fields. Here we only require that the tile consists of
+  // complete rounds in which every producer wave issues one lane-wide copy.
+  uint64_t tileBytes = uint64_t(rows) * rowBytes;
+  uint64_t bytesPerAllWaveRound = uint64_t(waves) * 64 * copyBytesPerLane;
+  if (tileBytes % bytesPerAllWaveRound)
+    return emitError()
+           << "HCU buffer-to-LDS tile must contain complete all-wave rounds";
+
+  auto ll = linearComponent.getLinearLayout();
+  // Standard rank-2 output names are dim0/dim1. The offset input enumerates
+  // bytes inside this allocation; block selects a CTA-owned allocation.
+  auto dims = standardOutDimNames(linearComponent.getContext(), 2);
+  if (ll.getNumOutDims() != 2 ||
+      ll.getOutDimSize(dims[contiguousDim]) != rowBytes / elementBytes ||
+      ll.getOutDimSize(dims[1 - contiguousDim]) != rows ||
+      ll.getInDimSize(StringAttr::get(linearComponent.getContext(), "block")) !=
+          1)
+    return emitError() << "HCU placement requires its complete single-CTA tile";
+  auto offsetDim = StringAttr::get(linearComponent.getContext(), "offset");
+  auto blockDim = StringAttr::get(linearComponent.getContext(), "block");
+  uint64_t bytesPerWave = tileBytes / waves;
+  uint64_t bytesPerTransfer = 64 * copyBytesPerLane;
+
+  // Decode one unwrapped LDS byte offset into the wave that produces it and
+  // that wave's local byte offset. transferMajor only swaps the outer
+  // [wave][transfer] order; lane order inside a transfer is unchanged.
+  auto decodeProducerOffset = [&](uint64_t byteOffset) {
+    if (!transferMajor)
+      return std::pair<unsigned, uint64_t>{
+          static_cast<unsigned>(byteOffset / bytesPerWave),
+          byteOffset % bytesPerWave};
+    unsigned wave =
+        static_cast<unsigned>(byteOffset / bytesPerTransfer % waves);
+    uint64_t local = byteOffset / (bytesPerTransfer * waves) *
+                         bytesPerTransfer +
+                     byteOffset % bytesPerTransfer;
+    return std::pair<unsigned, uint64_t>{wave, local};
+  };
+
+  // Convert that producer-local position to the declared logical row/column.
+  auto expectedLogicalPosition = [&](uint64_t byteOffset) {
+    auto [wave, local] = decodeProducerOffset(byteOffset);
+    unsigned localRow = static_cast<unsigned>(local / rowBytes);
+    // Adjacent wave groups own adjacent row ranges. Within a group, waves
+    // round-robin chunks of `rowsPerChunk` rows.
+    unsigned groupWaves = wavesPerRowGroup ? wavesPerRowGroup : waves;
+    unsigned row = wave / groupWaves * (rows / waves * groupWaves) +
+                   (localRow / rowsPerChunk * groupWaves + wave % groupWaves) *
+                       rowsPerChunk +
+                   localRow % rowsPerChunk;
+    unsigned column =
+        static_cast<unsigned>((local % rowBytes) / elementBytes);
+    return std::pair<unsigned, unsigned>{row, column};
+  };
+
+  // A LinearLayout is defined by the image of each power-of-two input basis.
+  // Checking element offsets 1, 2, 4, ... therefore proves the entire linear
+  // mapping; offset zero is implicit. Compare each offset basis with the
+  // producer placement declared by this encoding.
+  uint64_t tileElements = tileBytes / elementBytes;
+  for (uint64_t basisElement = 1; basisElement < tileElements;
+       basisElement *= 2) {
+    auto [row, column] =
+        expectedLogicalPosition(basisElement * elementBytes);
+    auto logical =
+        ll.apply({{offsetDim, int32_t(basisElement)}, {blockDim, 0}});
+    if (logical[1 - contiguousDim].second != row ||
+        logical[contiguousDim].second != column)
+      return emitError()
+             << "linear component does not match producer interleaving";
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // PaddedShared encoding
 //===----------------------------------------------------------------------===//
 
@@ -2865,6 +2985,9 @@ struct TritonGPUInferLayoutInterface
       return success();
     }
     // Generic case
+    if (isa<HCUBufferLdsSharedEncodingAttr>(operandEncoding))
+      return emitOptionalError(
+          loc, "transpose of HCU buffer-to-LDS placement is unsupported");
     auto padded = dyn_cast<PaddedSharedEncodingAttr>(operandEncoding);
 
     auto ll = padded ? padded.getLinearComponent()
@@ -4117,18 +4240,27 @@ int triton::gpu::lookupNumCTAs(OpBuilder &rewriter) {
 bool triton::gpu::areLayoutsEquivalent(ArrayRef<int64_t> shape,
                                        LayoutEncodingTrait lhs,
                                        LayoutEncodingTrait rhs) {
+  // This encoding is also a producer/consumer physical-placement contract.
+  // Its wrap and row-interleave metadata is not fully represented by the
+  // LinearLayout component, so equal LinearLayouts are not sufficient to
+  // replace one placement with another (or with an ordinary shared layout).
+  if (isa<HCUBufferLdsSharedEncodingAttr>(lhs) ||
+      isa<HCUBufferLdsSharedEncodingAttr>(rhs))
+    return lhs == rhs;
   auto lhsLL = triton::gpu::toLinearLayout(shape, lhs);
   auto rhsLL = triton::gpu::toLinearLayout(shape, rhs);
   return lhsLL == rhsLL;
 }
 
 bool triton::gpu::isInnermostContiguous(MemDescType type, unsigned numElems) {
-  ArrayRef<int64_t> shape = type.getShape();
   Attribute enc = type.getEncoding();
-  MLIRContext *ctx = enc.getContext();
+  // Consecutive logical elements are not necessarily consecutive physical
+  // LDS addresses after per-wave rotation. Only the scalar case is universally
+  // safe; BufferLds producer/consumer lowerings prove wider accesses themselves.
+  if (isa<HCUBufferLdsSharedEncodingAttr>(enc))
+    return numElems <= 1;
 
   LinearLayout actual = toLinearLayout(type);
-  StringAttr fastestIn = *actual.getInDimNames().begin();
 
   // Flatten actual outs in reverse order to produce a row-major flattening
   // of the layout

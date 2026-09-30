@@ -1245,6 +1245,11 @@ LinearLayout TritonGPUDialect::toLinearLayout(ArrayRef<int64_t> shape,
       result = swizzledSharedToLinearLayout(shape, shared);
     } else if (auto shared = dyn_cast<SharedLinearEncodingAttr>(layout)) {
       result = shared.toLinearLayout(shape);
+    } else if (auto sharedEncoding =
+                   dyn_cast<HCUBufferLdsSharedEncodingAttr>(layout)) {
+      // Generic layout transforms use the unwrapped LDS layout. HCU lowering
+      // applies the target-specific M0 wrap separately.
+      result = sharedEncoding.getLinearComponent().toLinearLayout(shape);
     } else if (auto shared = dyn_cast<NVMMASharedEncodingAttr>(layout)) {
       result = nvmmaSharedToLinearLayout(shape, shared);
     } else if (auto sbl = dyn_cast<AMDRotatingSharedEncodingAttr>(layout)) {

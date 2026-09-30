@@ -391,6 +391,157 @@ def SharedLinearEncodingAttr
   let hasCustomAssemblyFormat = 1;
 }
 
+def HCUBufferLdsSharedEncodingAttr
+    : TritonGPU_Attr<"HCUBufferLdsSharedEncoding", "hcu_buffer_lds_shared_encoding",
+                     [SharedEncodingTrait, LayoutEncodingTrait,
+                      DeclareLayoutEncodingMethods]> {
+  let mnemonic = "hcu_buffer_lds_shared";
+  let description = [{
+    Physical placement of one rank-2 HCU buffer-to-LDS tile.
+
+    `linearComponent` maps unwrapped copy offsets to logical tensor coordinates.
+    Producer waves interleave `rowsPerChunk` rows within independently laid-out
+    groups of `wavesPerRowGroup` waves; zero means one group containing every
+    producer wave. Grouping controls which waves round-robin adjacent logical
+    row chunks when a tile has more waves than one useful interleave group.
+    `transferMajor` selects the physical slot order
+    `[transfer][wave][lane]`; otherwise it is `[wave][transfer][lane]`.
+
+    M0 then rotates each wave transfer by
+    `(wave % wrapCount) * wrapStepBytes`. Thus `wrapCount` is the period, in
+    producer waves, after which the rotation pattern repeats; it is not a count
+    of memory transactions. Because this modular rotation is not generally
+    XOR-linear, producer and consumer lowering must handle it in addition to
+    `linearComponent`.
+
+    For example, consider an fp16 tile with `M = 256` and `K = 16`. M is the
+    row dimension and K is the column dimension. Eight waves copy four M rows
+    at a time, and each lane copies eight contiguous K elements (16 bytes):
+
+      #shared = #ttg.shared_linear<{
+        offset = [[0, 1], [0, 2], [0, 4], [0, 8],
+                  [1, 0], [2, 0], [32, 0], [64, 0], [128, 0],
+                  [4, 0], [8, 0], [16, 0]]
+      }, alignment = 16>
+
+      #ttg.hcu_buffer_lds_shared<{
+        linearComponent = #shared,
+        elementBytes = 2, contiguousDim = 1,
+        rows = 256, rowBytes = 32, waves = 8,
+        copyBytesPerLane = 16, rowsPerChunk = 4,
+        wrapCount = 4, wrapStepBytes = 16,
+        wavesPerRowGroup = 8, transferMajor = false
+      }>
+
+    Number each logical element by `index = M * 16 + K`. The logical matrix
+    and producer assignment then look like this (lanes are wave-local):
+
+       M\K |  0    1    2    3    4    5    6    7 |  8    9   10   11   12   13   14   15 | producer
+      ------+---------------------------------------+-----------------------------------------+----------------
+         0  |  0    1    2    3    4    5    6    7 |  8    9   10   11   12   13   14   15 | W0, lanes 0/1
+         1  | 16   17   18   19   20   21   22   23 | 24   25   26   27   28   29   30   31 | W0, lanes 2/3
+         2  | 32   33   34   35   36   37   38   39 | 40   41   42   43   44   45   46   47 | W0, lanes 4/5
+         3  | 48   49   50   51   52   53   54   55 | 56   57   58   59   60   61   62   63 | W0, lanes 6/7
+         4  | 64   65   66   67   68   69   70   71 | 72   73   74   75   76   77   78   79 | W1, lanes 0/1
+        ... |                    ...                |                    ...                  | ...
+        28  |448  449  450  451  452  453  454  455 |456  457  458  459  460  461  462  463 | W7, lanes 0/1
+        32  |512  513  514  515  516  517  518  519 |520  521  522  523  524  525  526  527 | W0, lanes 8/9
+        ... |                    ...                |                    ...                  | ...
+       252  |4032 4033 4034 4035 4036 4037 4038 4039|4040 4041 4042 4043 4044 4045 4046 4047| W7, lanes 56/57
+       255  |4080 4081 4082 4083 4084 4085 4086 4087|4088 4089 4090 4091 4092 4093 4094 4095| W7, lanes 62/63
+
+    More precisely, for `m = 0..255`, the producing wave and the first lane
+    for that M row are:
+
+      mBand    = m / 32
+      wave     = (m % 32) / 4
+      laneBase = mBand * 8 + (m % 4) * 2
+      K 0..7   is copied by laneBase
+      K 8..15  is copied by laneBase + 1
+
+    `laneBase` is the lane id inside its wave (0..63), not a CTA-wide thread
+    id. For example, M=32..35 on W0 expands to:
+
+      M 32: W0 lane  8 copies K 0..7, lane  9 copies K 8..15
+      M 33: W0 lane 10 copies K 0..7, lane 11 copies K 8..15
+      M 34: W0 lane 12 copies K 0..7, lane 13 copies K 8..15
+      M 35: W0 lane 14 copies K 0..7, lane 15 copies K 8..15
+
+    LDS has 32 banks and each bank is four bytes, or two fp16 elements. One
+    128-byte hardware phase therefore covers Bank00..Bank31 exactly once. The
+    rows of the following two-dimensional view are hardware phases and its
+    columns are banks. W0/P0 contains M=0..3 and W0/P1 contains M=32..35:
+
+| phase / bank | B00 | B01 | B02 | B03 | B04 | B05 | B06 | B07 | B08 | B09 | B10 | B11 | B12 | B13 | B14 | B15 | B16 | B17 | B18 | B19 | B20 | B21 | B22 | B23 | B24 | B25 | B26 | B27 | B28 | B29 | B30 | B31 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W0/P0 | 0,1 | 2,3 | 4,5 | 6,7 | 8,9 | 10,11 | 12,13 | 14,15 | 16,17 | 18,19 | 20,21 | 22,23 | 24,25 | 26,27 | 28,29 | 30,31 | 32,33 | 34,35 | 36,37 | 38,39 | 40,41 | 42,43 | 44,45 | 46,47 | 48,49 | 50,51 | 52,53 | 54,55 | 56,57 | 58,59 | 60,61 | 62,63 |
+| W0/P1 | 512,513 | 514,515 | 516,517 | 518,519 | 520,521 | 522,523 | 524,525 | 526,527 | 528,529 | 530,531 | 532,533 | 534,535 | 536,537 | 538,539 | 540,541 | 542,543 | 544,545 | 546,547 | 548,549 | 550,551 | 552,553 | 554,555 | 556,557 | 558,559 | 560,561 | 562,563 | 564,565 | 566,567 | 568,569 | 570,571 | 572,573 | 574,575 |
+
+    Every wave owns one 1024-byte transfer, which consists of eight such
+    128-byte phases. M0 rotates that transfer by `(wave % 4) * 16` bytes:
+
+      W0/W4: +0 bytes   W1/W5: +16 bytes
+      W2/W6: +32 bytes  W3/W7: +48 bytes
+
+    For example, W1's last 16-byte cell (elements 3704..3711) wraps to the
+    beginning of W1's region. Its first two physical phases have this view:
+
+| phase / bank | B00 | B01 | B02 | B03 | B04 | B05 | B06 | B07 | B08 | B09 | B10 | B11 | B12 | B13 | B14 | B15 | B16 | B17 | B18 | B19 | B20 | B21 | B22 | B23 | B24 | B25 | B26 | B27 | B28 | B29 | B30 | B31 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1/P0 | 3704,3705 | 3706,3707 | 3708,3709 | 3710,3711 | 64,65 | 66,67 | 68,69 | 70,71 | 72,73 | 74,75 | 76,77 | 78,79 | 80,81 | 82,83 | 84,85 | 86,87 | 88,89 | 90,91 | 92,93 | 94,95 | 96,97 | 98,99 | 100,101 | 102,103 | 104,105 | 106,107 | 108,109 | 110,111 | 112,113 | 114,115 | 116,117 | 118,119 |
+| W1/P1 | 120,121 | 122,123 | 124,125 | 126,127 | 576,577 | 578,579 | 580,581 | 582,583 | 584,585 | 586,587 | 588,589 | 590,591 | 592,593 | 594,595 | 596,597 | 598,599 | 600,601 | 602,603 | 604,605 | 606,607 | 608,609 | 610,611 | 612,613 | 614,615 | 616,617 | 618,619 | 620,621 | 622,623 | 624,625 | 626,627 | 628,629 | 630,631 |
+
+    In units of 16-byte cells, the same mapping is:
+
+      physicalCell(wave, localCell) =
+          wave * 64 + (localCell + wave % 4) % 64
+
+    `transferMajor` controls the outer ordering only when each wave owns more
+    than one transfer. In the concrete configuration above,
+    `copyBytesPerLane = 16`, so one transfer is 64 lanes * 16 bytes = 1024
+    bytes, exactly the 1024 bytes assigned to each wave. There is only T0;
+    consequently `transferMajor = false` and `true` are equivalent here.
+
+    For comparison, if each lane copied eight bytes, each wave would own two
+    512-byte transfers, T0 and T1. Their LDS order would be:
+
+      transferMajor = false (wave-major):
+        [W0T0][W0T1][W1T0][W1T1] ... [W7T0][W7T1]
+
+      transferMajor = true (transfer-major):
+        [W0T0][W1T0] ... [W7T0][W0T1][W1T1] ... [W7T1]
+
+    It does not change the logical M/K ownership, lane assignment, per-phase
+    bank mapping, or M0 wrap rotation. Every supported wave transfer is an
+    integer multiple of the 128-byte LDS bank period, so reordering whole
+    transfers changes only the high-level physical ranges. The generic copy
+    configuration search therefore always selects wave-major placement. A schedule may set
+    `transferMajor = true` afterwards when it needs the T0 slices from all
+    waves, then the T1 slices from all waves, to be independently addressable.
+  }];
+  let parameters = (ins
+      "SharedLinearEncodingAttr":$linearComponent,
+      "unsigned":$elementBytes, "unsigned":$contiguousDim,
+      "unsigned":$rows, "unsigned":$rowBytes,
+      "unsigned":$waves, "unsigned":$copyBytesPerLane,
+      "unsigned":$rowsPerChunk, "unsigned":$wrapCount,
+      "unsigned":$wrapStepBytes,
+      DefaultValuedParameter<"unsigned", "0">:$wavesPerRowGroup,
+      DefaultValuedParameter<"bool", "false">:$transferMajor);
+  let assemblyFormat = "`<` `{` struct(params) `}` `>`";
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = [{
+    SmallVector<unsigned> getOrder() const { return getLinearComponent().getOrder(); }
+    int32_t getAlignment() const { return 16; }
+    SmallVector<int64_t> getBackingTileShape() const {
+      SmallVector<int64_t> shape(2);
+      shape[getContiguousDim()] = getRowBytes() / getElementBytes();
+      shape[1 - getContiguousDim()] = getRows();
+      return shape;
+    }
+  }];
+}
+
 def NVMMASharedEncodingAttr : TritonGPU_Attr<"NVMMASharedEncoding", "nvmma_shared_encoding",
                      [DeclareSharedEncodingMethods, LayoutEncodingTrait,
                       DeclareLayoutEncodingMethods]> {
