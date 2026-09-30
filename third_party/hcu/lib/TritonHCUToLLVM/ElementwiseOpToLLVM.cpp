@@ -2138,7 +2138,17 @@ struct FpToFpOpConversion
             // {{F8E5M2FNUZTyID, F32TyID, undefRounding}, Fp8E5M2FNUZ_to_Fp32},
             {{F8E4M3FNTyID, F32TyID, undefRounding},
              Fp8E4M3FN_to_Fp32(features)},
+            // Triton tags the fp8->f32 upcast with RTNE (e.g. promoting an fp8
+            // dot result before `o * scale`), while the entry above is keyed
+            // rounding-agnostic. The upcast is exact, so the same converter
+            // serves both keys; without the explicit RTNE entry the lookup
+            // misses and legalization fails with "Unsupported conversion from
+            // 'f8E4M3FN' to 'f32' with rounding mode rtne".
+            {{F8E4M3FNTyID, F32TyID, RoundingMode::RTNE},
+             Fp8E4M3FN_to_Fp32(features)},
             {{F8E5M2TyID, F32TyID, undefRounding},
+             Fp8E5M2_to_Fp32(features)},
+            {{F8E5M2TyID, F32TyID, RoundingMode::RTNE},
              Fp8E5M2_to_Fp32(features)},
             // F32 -> F16 with RTZ
             {{F32TyID, F16TyID, RoundingMode::RTZ}, convertFp32ToFp16RTZ},
