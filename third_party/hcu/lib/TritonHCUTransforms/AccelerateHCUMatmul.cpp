@@ -720,7 +720,6 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
   auto ctx = dot.getContext();
   int64_t inputKDim = dot.getA().getType().getShape().back();
-  llvm::dbgs() << "[chooseMfmaInstruction] inputKDim before : " << inputKDim << "\n";
   if (dot.getAElemType() == ScaleDotElemType::E2M1 && dot.getLhsKPack()) {
     // Since two fp4 are packed into int8, to get the correct K dim size, we
     // need to multiply it by 2.
@@ -1767,7 +1766,8 @@ public:
     StringAttr kWarp = StringAttr::get(ctx, "warp");
     auto convertScaleLayout = [&](TensorValue scale,
                                   llvm::ArrayRef<int64_t> valShape,
-                                  LinearLayout dotLL, int idx) -> Value {
+                                  LinearLayout dotLL, int idx,
+                                  int32_t rowBase) -> Value {
       if (bothScalesAbsent)
         return Value();
       SmallVector<int64_t> shape;
@@ -1790,15 +1790,40 @@ public:
         return rewriter.create<arith::ConstantOp>(
             dotOp->getLoc(), newScaleType,
             DenseElementsAttr::get(newScaleType, llvm::APInt(8, 0x7F)));
-      } else {
-        return rewriter.create<ttg::ConvertLayoutOp>(scale.getLoc(),
-                                                     newScaleType, scale);
       }
+
+      auto newScale = rewriter.create<ttg::ConvertLayoutOp>(scale.getLoc(),
+                                                          newScaleType, scale);
+      Attribute sharedEnc = ttg::SwizzledSharedEncodingAttr::get(
+          ctx, /*vec=*/1, /*perPhase=*/1, /*maxPhase=*/1,
+          /*order=*/{1, 0}, ctaLayout);
+      auto memDescType = ttg::MemDescType::get(
+          shape, i8_ty, sharedEnc, ttg::SharedMemorySpaceAttr::get(ctx),
+          /*mutableMemory=*/true);
+
+      auto localAlloc = rewriter.create<ttg::LocalAllocOp>(
+          scale.getLoc(), memDescType, /*src=*/newScale.getResult());
+
+      auto resType = RankedTensorType::get(shape, i32_ty, newScaleEncoding);
+      return rewriter.create<amdgpu::MXScaleCopyDs2BufOp>(
+          scale.getLoc(), resType, /*smem=*/localAlloc.getResult(),
+          /*scale=*/newScale, /*opIdx=*/idx, /*rowBase=*/rowBase,
+          /*opCtrl0=*/0);
     };
+
+    int rowBase = 0;
     auto newAScale =
-        convertScaleLayout(aScale, aShape, aEncLL, /*dotOperandIdx=*/0);
+        convertScaleLayout(aScale, aShape, aEncLL, /*dotOperandIdx=*/0,
+                           /*rowBase=*/rowBase);
+
+    auto aScaleShape = aScale.getType().getShape();
+    // 16 cols per row. Since repeat mapping of the second half lanes,
+    // valid rows *= 2.
+    rowBase += (aScaleShape[0] / 16) * aScaleShape[1] * 2;
+
     auto newBScale =
-        convertScaleLayout(bScale, bShape, bEncLL, /*dotOperandIdx=*/1);
+        convertScaleLayout(bScale, bShape, bEncLL, /*dotOperandIdx=*/1,
+                           /*rowBase=*/rowBase);
     auto newDot = rewriter.create<triton::DotScaledOp>(
         dotOp.getLoc(), newRetType, a, b, newAcc, newAScale, newBScale,
         aElemType, bElemType, dotOp.getFastMath(), dotOp.getLhsKPack(), dotOp.getRhsKPack());

@@ -25,6 +25,7 @@
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
+#include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -508,6 +509,11 @@ struct DotOpMFMAConversionHelper {
         results = b.bitcast(vec, vec_ty(i32_ty, 4));
       if (32 == kBase)
         results = b.bitcast(vec, vec_ty(i32_ty, 8));
+    } else if (type.getIntOrFloatBitWidth() == 32 && kBase == 1) {
+      if (vec.getType() == i32_ty)
+        results = vec;
+      else
+        results = b.bitcast(vec, i32_ty);
     } else {
       results = vec;
     }
@@ -574,6 +580,9 @@ struct DotOpMFMAConversionHelper {
             } else if (type.getIntOrFloatBitWidth() == 8) {
               vals = prepareOperands(rawElems, kBase, i8_ty, preserveBF16, isHCUMmac,
                                      isConstantScale);
+            } else if (type.getIntOrFloatBitWidth() == 32) {
+              vals = prepareOperands(rawElems, kBase, i32_ty, preserveBF16, isHCUMmac,
+                                     isConstantScale);
             } else if (type.isBF16()) {
               vals = prepareOperands(rawElems, kBase, bf16_ty, preserveBF16, isHCUMmac);
             } else {
@@ -630,7 +639,6 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     return shape;
   }
 
-
   Value generateScaledMFMAOp(StringRef intrinsicName, Value valA, Value valB,
                              Value valC, Type elemTypeA, Type elemTypeB) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -660,30 +668,42 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
   Value generateScaledMFMAOp(StringRef intrinsicName, Value valA, Value valB,
                              Value valC, Value valScaleA, Value valScaleB,
-                             Type elemTypeA, Type elemTypeB, int opSelA,
-                             int opSelB) const {
+                             Type elemTypeA, Type elemTypeB) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
-    Value valOpSelA = b.i32_val(opSelA);
-    Value valOpSelB = b.i32_val(opSelB);
-    OperationState loweredOp(loc, intrinsicName);
-    int32_t cbsz = getMfmaF8F6F4MatrixFormat(elemTypeA);
-    int32_t blgp = getMfmaF8F6F4MatrixFormat(elemTypeB);
-    assert((cbsz != -1) && (blgp != -1));
-    loweredOp.addTypes(resType);
 
-    auto realABTypeID = 5 * cbsz + blgp;
     auto mmacLayout = mfmaLayout.getMmacLayout();
     bool isLTS = mmacLayout == MmacLayout::TRANSPOSE ||
                  mmacLayout == MmacLayout::INTERLEAVE_TRANSPOSE;
     bool isLIT = mmacLayout == MmacLayout::INTERLEAVE ||
                  mmacLayout == MmacLayout::INTERLEAVE_TRANSPOSE;
-    auto lts = isLTS ? b.true_val() : b.false_val();
-    auto lit = isLIT ? b.true_val() : b.false_val();
 
-    loweredOp.addOperands({valA, valB, valC, b.i32_val(realABTypeID), lit, lts,
-                           valOpSelA, valOpSelB});
-    return rewriter.create(loweredOp)->getResult(0);
+    StringRef suffix = intrinsicName.drop_front(StringRef("rocdl.").size());
+    std::string mnemonic = suffix.str();
+    std::replace(mnemonic.begin(), mnemonic.end(), '.', '_');
+
+    std::string flags;
+    if (isLIT) flags += " lit";
+    if (isLTS) flags += " lts";
+
+    std::string asmStr =
+      "s_mov_b32 m0, $4\n\t"
+      "v_" + mnemonic + " $0, $1, $2" + flags +
+      " scale_a_offset:0 scale_b_offset:0";
+
+    auto m0Val = b.or_(valScaleA, b.shl(valScaleB, b.i32_val(16)));
+    auto scaleMmacOp = rewriter.create<LLVM::InlineAsmOp>(
+      loc, /*resultTypes=*/TypeRange{resType},
+      /*operands=*/ValueRange{valA, valB, valC, m0Val},
+      /*asm_string=*/asmStr,
+      /*constraints=*/"=v,v,v,0,s",
+      /*has_side_effects=*/true,
+      /*is_align_stack=*/false, LLVM::TailCallKind::None,
+      LLVM::AsmDialectAttr::get(rewriter.getContext(),
+                                LLVM::AsmDialect::AD_ATT),
+      /*operand_attrs=*/ArrayAttr());
+
+    return scaleMmacOp.getResult(0);
   }
 
   LogicalResult convertScaledDot(DotScaledOp op,
@@ -734,14 +754,19 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       llvm::report_fatal_error("NYI: mxfp6\n");
     }
 
-    auto aShapeE = getScaledDotOpElemsShape(op, 0);
-    auto bShapeE = getScaledDotOpElemsShape(op, 1);
-    auto aMlsElemBitTyKind = getMlsElemBitTyKind(aEncoding.getMlsScaledExt());
-    auto bMlsElemBitTyKind = getMlsElemBitTyKind(bEncoding.getMlsScaledExt());
+    auto aMlsScaledExt = aEncoding.getMlsScaledExt();
+    auto bMlsScaledExt = bEncoding.getMlsScaledExt();
+    auto aShapeE = aMlsScaledExt ? getScaledDotOpElemsShape(op, 0) : aTensorTy.getShape();
+    auto bShapeE = bMlsScaledExt ? getScaledDotOpElemsShape(op, 0) : bTensorTy.getShape();
+    auto aMlsElemBitTyKind = getMlsElemBitTyKind(aMlsScaledExt);
+    auto bMlsElemBitTyKind = getMlsElemBitTyKind(bMlsScaledExt);
     auto aFlow = getMlsDataFlowInfo(aMlsElemBitTyKind);
     auto bFlow = getMlsDataFlowInfo(bMlsElemBitTyKind);
-    bool isAElemB4Packed = aFlow.usesPackedShape(MlsDataFlowView::DotOperand);
-    bool isBElemB4Packed = bFlow.usesPackedShape(MlsDataFlowView::DotOperand);
+    auto isAElemB4Packed = aMlsScaledExt ? aFlow.usesPackedShape(MlsDataFlowView::DotOperand)
+                                         : aElemType == ScaleDotElemType::E2M1;
+    auto isBElemB4Packed = bMlsScaledExt ? bFlow.usesPackedShape(MlsDataFlowView::DotOperand)
+                                         : bElemType == ScaleDotElemType::E2M1;
+
     int aKWidth = aEncoding.getKWidth();
     int bKWidth = bEncoding.getKWidth();
     // Match mfmaDotToLinearLayout (LinearLayoutConversions.cpp): kTileSize =
@@ -774,7 +799,9 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto arch = getAMDArch(op->getParentOfType<ModuleOp>());
     assert(arch.has_value() && "expected arch");
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        op.getLoc(), mfmaVersion, mDim, nDim, kDimOperandSize,
+        op.getLoc(), mfmaVersion, mDim, nDim,
+        aElemType == ScaleDotElemType::E2M1 ? kDimOperandSize * 2
+                                            : kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
         scaleDotElemTypeToMLIRType(ctx, bElemType),
         /*withScale=*/true, allowXF32, features);
@@ -789,11 +816,16 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     unsigned bKBase = isBElemB4Packed ? kBase / 2 : kBase;
 
     const auto kDimInstrSize =
-        mfmaLayout.getInstrShapeForScaledOperand(aKWidth, aMlsElemBitTyKind, 0)[1];
-    auto repA =
-        mfmaLayout.getRepForScaledOperand(aShapeE, aKWidth, aMlsElemBitTyKind, 0);
-    auto repB =
-        mfmaLayout.getRepForScaledOperand(bShapeE, bKWidth, bMlsElemBitTyKind, 1);
+        mfmaLayout.getInstrShapeForScaledOperand(aKWidth,
+                                                 aMlsElemBitTyKind, 0)[1];
+    auto repA = aMlsScaledExt
+        ? mfmaLayout.getRepForScaledOperand(aShapeE, aKWidth,
+                                            aMlsElemBitTyKind, 0)
+        : mfmaLayout.getRepForOperand(aShapeE, aKWidth, 0);
+    auto repB = bMlsScaledExt
+        ? mfmaLayout.getRepForScaledOperand(bShapeE, bKWidth,
+                                            bMlsElemBitTyKind, 1)
+        : mfmaLayout.getRepForOperand(bShapeE, bKWidth, 1);
     assert(repA[2] == repB[1]);
 
     // For fp4 scaled mfma, each thread takes 1 element from scale. Will have
@@ -812,26 +844,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
 
-    // Scaled MFMA instructions expect scale operands as 32-bit values,
-    // even though each individual scale is only 8 bits. To reduce register
-    // usage, we pack 4 scales into a single 32-bit value and use the opSel
-    // field to select the appropriate byte during execution. Packing is done
-    // along the K dimension first; if there aren’t enough values in K, we
-    // continue along the non-K dimension.
-    // TODO: Support opSel selection for constant scales stored in SGPRs.
-    const int scaleAKBase =
-        isAScaleConstant ? 1 : std::min(4, static_cast<int>(numRepK * numRepM));
-    const int scaleBKBase =
-        isBScaleConstant ? 1 : std::min(4, static_cast<int>(numRepK * numRepN));
-
-    int akPackedVals =
-        isAScaleConstant ? 1 : std::min(4, static_cast<int>(numRepK));
-    int bkPackedVals =
-        isBScaleConstant ? 1 : std::min(4, static_cast<int>(numRepK));
-
-    assert(scaleAKBase % akPackedVals == 0 && scaleBKBase % bkPackedVals == 0);
-    int aNonKPackedVals = scaleAKBase / akPackedVals;
-    int bNonKPackedVals = scaleBKBase / bkPackedVals;
+    const int scaleAKBase = scaleKWidth;
+    const int scaleBKBase = scaleKWidth;
 
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, aKWidth, aKBase,
@@ -850,14 +864,14 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       auto aScaleTensorTy = cast<RankedTensorType>(aScale.getType());
       operandAScale = getValuesFromDotOperandLayoutStruct(
           loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleAKBase,
-          aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isAScaleConstant);
+          IntegerType::get(aScaleTensorTy.getContext(), 32), allowXF32,
+          /*preserveBF16=*/false, isAScaleConstant, isHCUMmac);
 
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
       operandBScale = getValuesFromDotOperandLayoutStruct(
           loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleBKBase,
-          bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isBScaleConstant);
+          IntegerType::get(aScaleTensorTy.getContext(), 32), allowXF32,
+          /*preserveBF16=*/false, isBScaleConstant, isHCUMmac);
     }
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -892,6 +906,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     } else
       innerKBound = numVecInKBase;
 
+    rewriter.create<ROCDL::SBarrierOp>(loc);
     if (getSchedBarrierBeforeMmacAttr(op))
       ROCDL::SchedBarrier::create(rewriter, loc, /*mask=*/0);
 
@@ -917,41 +932,32 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
             for (innerK = 0; innerK < innerKBound; innerK++) {
               int k = is2Step ? outerK : innerK;
               if (existBothScales) {
-                int akScale = k / akPackedVals;
-                int bkScale = k / bkPackedVals;
-                int opSelA = 0, opSelB = 0;
-
-                int mScale = m / aNonKPackedVals;
-                int nScale = n / bNonKPackedVals;
-                opSelA = (m * numRepK + k) % (aNonKPackedVals * akPackedVals);
-                opSelB = (n * numRepK + k) % (bNonKPackedVals * bkPackedVals);
-
                 if (mfmaLayout.getIsTransposed()) {
-                  acc = generateScaledMFMAOp(
-                      intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                        acc, operandBScale[{b, nScale, bkScale}],
-                        operandAScale[{b, mScale, akScale}],
-                      maybeMfmaIntrinsic->bElementType,
-                        maybeMfmaIntrinsic->aElementType, opSelB, opSelA);
+                  acc = generateScaledMFMAOp(intrinsicName, operandB[{b, n, k}],
+                                             operandA[{b, m, k}], acc,
+                                             operandBScale[{b, k, n}],
+                                             operandAScale[{b, m, k}],
+                                             maybeMfmaIntrinsic->bElementType,
+                                             maybeMfmaIntrinsic->aElementType);
                 } else {
-                  acc = generateScaledMFMAOp(
-                      intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
-                        acc, operandAScale[{b, mScale, akScale}],
-                        operandBScale[{b, nScale, bkScale}],
-                      maybeMfmaIntrinsic->aElementType,
-                        maybeMfmaIntrinsic->bElementType, opSelA, opSelB);
+                  acc = generateScaledMFMAOp(intrinsicName, operandA[{b, m, k}],
+                                             operandB[{b, n, k}], acc,
+                                             operandAScale[{b, m, k}],
+                                             operandBScale[{b, n, k}],
+                                             maybeMfmaIntrinsic->aElementType,
+                                             maybeMfmaIntrinsic->bElementType);
                 }
               } else {
                 if (mfmaLayout.getIsTransposed()) {
                   acc = generateScaledMFMAOp(intrinsicName, operandB[{b, n, k}],
-                                            operandA[{b, m, k}], acc,
-                                            maybeMfmaIntrinsic->bElementType,
-                                            maybeMfmaIntrinsic->aElementType);
+                                             operandA[{b, m, k}], acc,
+                                             maybeMfmaIntrinsic->bElementType,
+                                             maybeMfmaIntrinsic->aElementType);
                 } else {
                   acc = generateScaledMFMAOp(intrinsicName, operandA[{b, m, k}],
-                                            operandB[{b, n, k}], acc,
-                                            maybeMfmaIntrinsic->aElementType,
-                                            maybeMfmaIntrinsic->bElementType);
+                                             operandB[{b, n, k}], acc,
+                                             maybeMfmaIntrinsic->aElementType,
+                                             maybeMfmaIntrinsic->bElementType);
                 }
               }
               if (!firstMfma)
@@ -1073,4 +1079,154 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
 
   return helper.convertScaledDot(op, adaptor);
 }
+
+LogicalResult convertMXScale(triton::amdgpu::MXScaleCopyDs2BufOp op,
+                          triton::amdgpu::MXScaleCopyDs2BufOp::Adaptor adaptor,
+                          const LLVMTypeConverter *typeConverter,
+                          ConversionPatternRewriter &rewriter) {
+  Location loc = op.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  MLIRContext *ctx = op.getContext();
+
+  int32_t opIdx = op.getOpIdx();
+  auto scaleTy = cast<RankedTensorType>(op.getScale().getType());
+  int64_t nonK = scaleTy.getShape()[0];
+  int64_t K = scaleTy.getShape()[1];
+  int32_t opCtrl0 = op.getOpCtrl0();
+  int32_t dotOperandIdx = op.getOpIdx(); // 0 = A, 1 = B
+
+  // Fixme: Support opCtrl0 = 0/2/4
+  assert(opCtrl0 == 0 && "MXScaleOp: opCtrl0 must be 0");
+  // opCtl0 = 0, a warp consumes 4 rows.
+  int32_t numRowsCopyPerInst = 4;
+
+  auto dotScaledOp = [&]() -> triton::DotScaledOp {
+    for (Operation *user : op.getResult().getUsers())
+      if (auto dso = dyn_cast<triton::DotScaledOp>(user))
+        return dso;
+    llvm::report_fatal_error(
+        "MXScaleOp: expected result to be consumed by a single "
+        "tt.dot_scaled op");
+  }();
+
+  Value dotOperandTensor =
+      dotOperandIdx == 0 ? dotScaledOp.getA() : dotScaledOp.getB();
+  auto dotOperandTy = cast<RankedTensorType>(dotOperandTensor.getType());
+  auto dotOpEnc = cast<DotOperandEncodingAttr>(dotOperandTy.getEncoding());
+  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(dotOpEnc.getParent());
+  unsigned kWidth = dotOpEnc.getKWidth();
+  auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+
+  auto elems = unpackLLElements(loc, adaptor.getScale(), rewriter);
+  auto elem_size = elems.size();
+  int32_t repBase = static_cast<int32_t>(op.getRowBase());
+
+  Value smemBase = LLVM::getSharedMemoryObjectFromStruct(
+                        loc, adaptor.getSmem(),
+                        typeConverter->convertType(
+                            cast<triton::gpu::MemDescType>(op.getSmem().getType())
+                                .getElementType()),
+                        rewriter).getBase();
+
+  auto linearEnc = cast<triton::gpu::LinearEncodingAttr>(scaleTy.getEncoding());
+  LinearLayout ll = linearEnc.getLinearLayout();
+
+  StringAttr kRegister = StringAttr::get(ctx, "register");
+  StringAttr kLane = StringAttr::get(ctx, "lane");
+  StringAttr kWarpDim = StringAttr::get(ctx, "warp");
+  StringAttr kBlock = StringAttr::get(ctx, "block");
+  StringAttr dim0 = StringAttr::get(ctx, "dim0"); // non-K
+  StringAttr dim1 = StringAttr::get(ctx, "dim1"); // K
+
+  Value laneId = getLaneId(rewriter, loc);
+  Value zero32 = b.i32_val(0);
+
+  Value tid = rewriter.create<ROCDL::ThreadIdXOp>(loc, rewriter.getI32Type());
+  Value warpId = b.udiv(tid, b.i32_val(64));
+
+  SmallVector<Value> rowVals(elem_size);
+  SmallVector<Value> destAddrs(elem_size);
+  SmallVector<Value> tileIds(elem_size);
+
+  for (int64_t elemIdx = 0; elemIdx < elem_size; ++elemIdx) {
+    SmallVector<std::pair<StringAttr, Value>> indices = {
+        {kRegister, b.i32_val(static_cast<int32_t>(elemIdx))},
+        {kLane, laneId},
+        {kWarpDim, warpId},
+        {kBlock, zero32},
+    };
+    auto outputs = applyLinearLayout(loc, rewriter, ll, indices);
+
+    Value mIdx, kGlobal;
+    for (auto &kv : outputs) {
+      if (kv.first == dim0)
+        mIdx = kv.second;
+      else if (kv.first == dim1)
+        kGlobal = kv.second;
+    }
+    assert(mIdx && kGlobal &&
+            "MXScaleOp: LinearLayout must produce dim0/dim1 outputs");
+
+    Value destOffset = b.add(
+        b.mul(mIdx, b.i32_val(static_cast<int32_t>(K))), kGlobal);
+    Value destAddr = b.gep(smemBase.getType(), rewriter.getI8Type(),
+                            smemBase, destOffset);
+
+    // Mapping to scale tile, tile size = 16x2xi8
+    Value tileRow = b.udiv(mIdx, b.i32_val(16));
+    Value tileCol = b.udiv(kGlobal, b.i32_val(2));
+    Value tileId  = b.add(b.mul(tileRow, b.i32_val(K / 2)), tileCol);
+
+    destAddrs[elemIdx] = destAddr;
+    tileIds[elemIdx] = tileId;
+  }
+
+  Value rowBaseVal = b.i32_val(repBase);
+
+  // Consider only the register dimension's own (dim0, dim1) contribution
+  // (lane/warp/block are all fixed to 0), and assign each elemIdx a canonical
+  // position by sorting on (dim0, dim1) in ascending order. This ordering is
+  // exactly the {outer nonK, inner kBaseVec} order the consumer expects.
+  SmallVector<int64_t> canonicalPos(elem_size);
+  SmallVector<std::tuple<int32_t, int32_t, int64_t>> regCoords;
+  for (int64_t r = 0; r < elem_size; ++r) {
+    auto out = ll.apply({{kRegister, static_cast<int32_t>(r)},
+                        {kLane, 0}, {kWarpDim, 0}, {kBlock, 0}});
+    int32_t m = 0, k = 0;
+    for (auto &kv : out) {
+      if (kv.first == dim0) m = kv.second;
+      else if (kv.first == dim1) k = kv.second;
+    }
+    regCoords.push_back({m, k, r});
+  }
+
+  llvm::sort(regCoords, [](auto &a, auto &b) {
+    return std::tie(std::get<0>(a), std::get<1>(a)) <
+          std::tie(std::get<0>(b), std::get<1>(b));
+  });
+
+  for (int64_t rank = 0; rank < elem_size; ++rank)
+    canonicalPos[std::get<2>(regCoords[rank])] = rank;
+
+  rewriter.create<ROCDL::SBarrierOp>(loc);
+
+  for (int64_t elemIdx = 0; elemIdx < elem_size; ++elemIdx) {
+    Value rowSoffset = b.add(rowBaseVal, b.mul(tileIds[elemIdx],
+                                               b.i32_val(numRowsCopyPerInst)));
+    rewriter.create<ROCDL::ds_scale_copy_ds2buf>(
+        loc, destAddrs[elemIdx], rowSoffset,
+        rewriter.getI8IntegerAttr(opCtrl0),
+        rewriter.getI8IntegerAttr(0),
+        rewriter.getI8IntegerAttr(0));
+    rowVals[canonicalPos[elemIdx]] = rowSoffset;
+  }
+
+  Type structTy = LLVM::LLVMStructType::getLiteral(
+      ctx, SmallVector<Type>(rowVals.size(), rewriter.getI32Type()));
+  Value packedRows =
+      packLLElements(loc, typeConverter, rowVals, rewriter, structTy);
+  rewriter.replaceOp(op, packedRows);
+  return success();
+}
+
 } // namespace mlir::triton::HCU

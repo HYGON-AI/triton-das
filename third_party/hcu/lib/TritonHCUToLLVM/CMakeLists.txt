@@ -1,7 +1,9 @@
 set(TRITON_HCU_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../include
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/amd/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/hcu/include
   ${CMAKE_CURRENT_BINARY_DIR}/../../../amd/include
+  ${CMAKE_CURRENT_BINARY_DIR}/../../../hcu/include
     )
 
 add_triton_library(TritonHCUToLLVM
@@ -15,9 +17,11 @@ add_triton_library(TritonHCUToLLVM
   MlsOpToLLVM.cpp
   WaitCntHCUUtility.cpp
   ConvertWarpSpecializeToLLVM.cpp
+  AllocateScaleBuffer.cpp
 
   DEPENDS
   TritonHCUPassesIncGen
+  TritonHCUConversionPassIncGen
   TritonAMDGPUConversionPassIncGen
   LLVMIRIncGen
 

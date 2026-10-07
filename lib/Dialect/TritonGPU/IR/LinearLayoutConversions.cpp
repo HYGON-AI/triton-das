@@ -1516,19 +1516,20 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          unsigned mfmaMDim,
                                          ArrayRef<unsigned> tilesPerWarp,
                                          ArrayRef<unsigned> warpsPerCTA) {
-  using basisT = std::vector<std::vector<int32_t>>;
-  unsigned rank = dotOperandShape.size();
-  auto order = mlir::triton::gpu::getMatrixOrder(rank, /*rowMajor=*/true);
-  auto standardOutDims = standardOutDimNames(ctx, rank);
   StringAttr kRegister = StringAttr::get(ctx, "register");
   StringAttr kLane = StringAttr::get(ctx, "lane");
   StringAttr kWarp = StringAttr::get(ctx, "warp");
-  StringAttr kBlock = StringAttr::get(ctx, "block");
 
-  // Fetch the tilesPerWarp value in the M dimension for operand A, or in the N
-  // dimension for operand B.
-  unsigned mnDim = dotOperandIdx == 0 ? rank - 2 : rank - 1;
-  unsigned tilePerWarpMN = tilesPerWarp[mnDim];
+  int32_t kSize = dotOperandShape[1];
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, 2);
+
+  std::vector<std::vector<int32_t>> registerBase;
+  std::vector<std::vector<int32_t>> laneBase;
+
+  for (int32_t colBit = 2; colBit < kSize; colBit <<= 1)
+    registerBase.push_back({0, colBit});
+
+  assert(mfmaMDim == 16 && "only mfmaMDim = 16 is supported");
 
   // In scaled dot, the shapes of operands(without batch dimension) are,
   // respectively:
@@ -1537,47 +1538,15 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   // - aScale: [M, K / 32]
   // - bScale: [N, K / 32]
   //
-  // In general, for both 32x32 and 16x16 scaled mfma, and no matter what
-  // data type the A/B operand is, each lane takes 32 elements from A/B
-  // alone K dim, and 1 or 2 elements from scale accordingly. The number of
-  // scale's elements in a lane varies because the 32 elements from A/B may
-  // not be consecutive.
-  //
-  // For mxfp4, these 32 elements are consecutive, so only 1 scale element
-  // is required. But for mxfp6/mxfp8, there are 2 16-consecutive elements
-  // blocks, so 2 scale elements are required.
-  int32_t kSize = dotOperandShape[1];
+  // For ROCDL::mmac_scale_f32_16x16x64_fp4 with int8 input, each MMAC
+  // consumes 2 scales from aScale and 2 scales from bScale,
+  // aScale copy 16 elements alone M dimension to a scale buffer row,
+  // and each lane takes 2 * N scales from aScale alone K dimension.
+  // Similar to bScale.
+  laneBase = { {1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 1}, {0, 0}, };
 
-  std::vector<std::vector<int32_t>> registerBase;
-  std::vector<std::vector<int32_t>> laneBase;
-
-  auto threadsInKDim = mfmaMDim == 32 ? 2 : 4;
-  for (int32_t elem = threadsInKDim; elem < kSize; elem *= 2)
-    registerBase.emplace_back(std::vector<int32_t>{elem, 0});
-
-  for (int32_t elem = mfmaMDim; elem < tilePerWarpMN * mfmaMDim; elem *= 2)
-    registerBase.emplace_back(std::vector<int32_t>{0, elem});
-
-  if (mfmaMDim == 32) {
-    // For ROCDL::mfma_scale_f32_32x32x64_f8f6f4 with fp4 input, each lane
-    // takes 32 consecutive elements from A alone K dimension. The first
-    // 32 lanes collectively handle A[0:32][0:32], and the other 32 lanes
-    // collectively handle A[0:32][32:64]. Each lane take 1 scale element
-    // accordingly. Similar to B and bScale.
-    laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}};
-  } else {
-    assert(mfmaMDim == 16);
-    // For ROCDL::mfma_scale_f32_16x16x128_f8f6f4 with fp4 input, each lane
-    // takes 32 consecutive elements from A alone K dimension. The first
-    // 16 lanes collectively handle A[0:16][0:32], and another 16 lanes
-    // collectively handle A[0:16][32:64] and so on. Each lane take 1 scale
-    // element accordingly. Similar to B and bScale.
-    laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}};
-  }
-
-  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
   LinearLayout tileLayout({{kRegister, registerBase}, {kLane, laneBase}},
-                          {outDimNames[order[0]], outDimNames[order[1]]});
+                          {outDimNames[0], outDimNames[1]});
 
   SmallVector<unsigned> warpsPerCTANew =
       (dotOperandIdx == 1)

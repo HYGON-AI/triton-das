@@ -2,6 +2,7 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 
 using namespace mlir;
 
@@ -13,6 +14,10 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
                                 triton::DotScaledOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter);
+LogicalResult convertMXScale(triton::amdgpu::MXScaleCopyDs2BufOp op,
+                          triton::amdgpu::MXScaleCopyDs2BufOp::Adaptor adaptor,
+                          const LLVMTypeConverter *typeConverter,
+                          ConversionPatternRewriter &rewriter);
 } // namespace mlir::triton::HCU
 
 namespace {
@@ -46,13 +51,26 @@ struct HCUScaledDotOpConversion
                                                 rewriter);
   }
 };
+
+struct MXScaleCopyDs2BufOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::MXScaleCopyDs2BufOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::MXScaleCopyDs2BufOp op, OpAdaptor adaptor,
+                   ConversionPatternRewriter &rewriter) const override {
+    return mlir::triton::HCU::convertMXScale(op, adaptor, getTypeConverter(),
+                                             rewriter);
+  }
+};
+
 } // namespace
 
 namespace mlir::triton::HCU {
 void populateHCUDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                     RewritePatternSet &patterns,
                                     PatternBenefit benefit) {
-  patterns.add<HCUDotOpConversion, HCUScaledDotOpConversion>(typeConverter,
-                                                             benefit);
+  patterns.add<HCUDotOpConversion,
+               HCUScaledDotOpConversion,
+               MXScaleCopyDs2BufOpConversion>(typeConverter, benefit);
 }
 } // namespace mlir::triton::HCU

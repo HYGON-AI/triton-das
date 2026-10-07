@@ -787,6 +787,7 @@ class HIPBackend(BaseBackend):
         passes.convert.add_index_to_llvmir(pm)
 
         amd.passes.ttgpuir.add_allocate_shared_memory(pm)
+        hcu.passes.ttgpuir.add_allocate_scale_buffer(pm)
         # instrumentation point here so we can override IRs above (e.g., ttir and ttgir)
         if HIPBackend.instrumentation:
             HIPBackend.instrumentation.patch("ttgpuir_to_llvmir", pm, mod.context)
@@ -918,6 +919,10 @@ class HIPBackend(BaseBackend):
             )
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
+        scale_buffer_size = src.get_int_attr("hcu.scale_buffer")
+        if scale_buffer_size is not None:
+            fns[0].add_fn_attr("hcu-scale-buffer-size", str(scale_buffer_size))
+
         if knobs.compilation.enable_asan:
             fns[0].add_fn_target_feature("+xnack")
             fns[0].add_fn_asan_attr()

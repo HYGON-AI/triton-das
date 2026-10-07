@@ -13,6 +13,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "passes.h"
 #include "triton/Dialect/Triton/Transforms/Passes.h"
+#include "third_party/hcu/include/TritonHCUToLLVM/Passes.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -76,6 +77,8 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_1("add_update_async_wait_count",
                             mlir::createTritonHCUUpdateAsyncWaitCount,
                             std::string);
+  ADD_PASS_WRAPPER_0("add_allocate_scale_buffer",
+                     mlir::triton::HCU::createAllocateScaleBuffer);
   // HCU wrapper around AMD ConvertToBufferOps — passes extra HCU-specific options.
   ADD_PASS_OPTION_WRAPPER_6("add_convert_to_buffer_ops",
                             mlir::createTritonAMDGPUConvertToBufferOps,

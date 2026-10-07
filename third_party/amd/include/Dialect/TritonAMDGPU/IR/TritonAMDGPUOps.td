@@ -825,6 +825,45 @@ def UTCWarmupConsumeOp : TT_AMDGPU_Op<"utc_warmup_consume"> {
   let assemblyFormat = "$value attr-dict `:` type($value)";
 }
 
+def MXScaleCopyDs2BufOp : TT_AMDGPU_Op<"mxscale_copy_ds2buf", []> {
+  let summary = "Copy scales from LDS to scale buffer.";
+
+  let description = [{
+    `amdgpu.mxscale_copy_ds2buf` takes an [M, N] tile, where M is a multiple of
+    16 and N is a multiple of 2 (matching the 16x16x64 scaled-MFMA instruction),
+    and copies it into the scale buffer.
+
+    The op's result is passed as a_scale/b_scale to `tt.dot_scaled`, which reads
+    them back from the scale buffer to compute:
+
+      D = (A * a_scale) @ (B * b_scale) + C
+
+    Each group of 16 elements along the M dimension is copied into a single
+    scale buffer row. The op's return value, rows, holds these row indices as
+    int32 (the scale buffer supports up to 512 rows). The output shape matches
+    the input shape.
+
+    `rowBase` is provided by the caller (AccelerateHCUMatmul) to guarantee that
+    the B-scale rows never overlap the A-scale rows in the buffer.
+  }];
+
+  let arguments = (ins
+    TTG_MemDescType:$smem,
+    TT_Tensor:$scale,
+    I32Attr:$opIdx,
+    I32Attr:$rowBase, // scale buffer row base
+    DefaultValuedAttr<I32Attr, "0">:$opCtrl0
+  );
+
+  let results = (outs TT_Tensor:$rows);
+
+  let assemblyFormat = [{
+    $smem `,` $scale `opIdx` `=` $opIdx `rowBase` `=` $rowBase (`opCtrl0` `=` $opCtrl0^)?
+    attr-dict `:` type($scale) `,` qualified(type($smem)) `->` type($rows)
+  }];
+
+  let hasVerifier = 1;
+}
 
 //===----------------------------------------------------------------------===//
 // AsyncTDMCopyGlobalToLocalOp

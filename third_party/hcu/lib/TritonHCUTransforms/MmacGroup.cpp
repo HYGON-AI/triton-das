@@ -244,8 +244,8 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       TRITON_MMAC_v3to4(16, 16, ocpBf8T, ocpBf8T, f32T, mmac_f32_16x16x32_bf8_bf8, 32, 8),
 
       // fp4
-      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_f32_16x16x64_fp4, 64, 16,
-                          mmac_f32_16x16x32_f8f6f4, 32, 8),
+      // TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_f32_16x16x64_fp4, 64, 16,
+      //                     mmac_f32_16x16x32_f8f6f4, 32, 8),
       TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f16T, mmac_f16_16x16x64_fp4, 64, 16,
                           mmac_f16_16x16x32_f8f6f4, 32, 8),
       TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, bf16T, mmac_bf16_16x16x64_fp4, 64, 16,

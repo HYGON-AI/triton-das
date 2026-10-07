@@ -790,4 +790,34 @@ LogicalResult AsyncCopyMbarrierArriveOp::verify() {
   return success();
 }
 
+LogicalResult MXScaleCopyDs2BufOp::verify() {
+  auto scaleTy = dyn_cast<RankedTensorType>(getScale().getType());
+  if (!scaleTy)
+    return emitOpError("scale operand must be a ranked tensor");
+  if (scaleTy.getRank() != 2)
+    return emitOpError("scale operand must be rank 2 [nonK, "
+                        "K], got shape ") << scaleTy.getShape();
+
+  auto rowsTy = dyn_cast<RankedTensorType>(getRows().getType());
+  if (!rowsTy)
+    return emitOpError("rows must be a ranked tensor");
+
+  if (!rowsTy.getElementType().isSignlessInteger(32))
+    return emitOpError("rows element type must be signless i32, got ")
+           << rowsTy.getElementType();
+
+  int64_t opIdx = getOpIdx();
+  if (opIdx != 0 && opIdx != 1)
+    return emitOpError("opIdx must be 0 (A) or 1 (B), got ") << opIdx;
+
+  if (getRowBase() < 0)
+    return emitOpError("rowBase must be non-negative");
+
+  int64_t opCtrl0 = getOpCtrl0();
+  if (opCtrl0 < 0 || opCtrl0 > 2)
+    return emitOpError("opCtrl0 must be 0, 1, or 2, got ") << opCtrl0;
+
+  return success();
+}
+
 } // namespace mlir::triton::amdgpu
