@@ -162,6 +162,13 @@ class HIPOptions:
     #   2 — enable cluster + cross-region A/B load analysis (implies 1)
     enable_v_mmac_cluster: int = 0
 
+    # Assume float inputs are never NaN. Emits the `no-nans-fp-math` function
+    # attribute, which lets LLVM drop the FCANONICALIZE step that quiets
+    # signaling NaNs during fmin/fmax expansion. That removes one redundant
+    # `v_max_f32 x, x` per `maximum`/`fmax` . Opt-in because it makes NaN
+    # behaviour undefined: only enable when the data provably has no NaN.
+    assume_no_nans: bool = False
+
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
         warp_size = 32 if gfx_major >= 10 else 64
@@ -924,6 +931,10 @@ class HIPBackend(BaseBackend):
         if scale_buffer_size is not None:
             fns[0].add_fn_attr("hcu-scale-buffer-size", str(scale_buffer_size))
 
+        if options.assume_no_nans:
+            # Drop the FCANONICALIZE that quiets sNaN inside fmin/fmax when one
+            # operand is not a compile-time non-NaN constant.
+            fns[0].add_fn_attr("no-nans-fp-math", "true")
         if knobs.compilation.enable_asan:
             fns[0].add_fn_target_feature("+xnack")
             fns[0].add_fn_asan_attr()
