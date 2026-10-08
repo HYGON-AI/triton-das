@@ -3,6 +3,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "TritonHCU/BufferLdsEncoding.h"
 #include "TritonHCU/WaspSplitPlan.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -419,8 +420,13 @@ void PipelinedLoadGroup::allocateAref(scf::ForOp &loop, int numStages,
 
   // Create buffers for each the loads.
   for (PipelinedLoad &load : loads) {
-    loadBuffers.push_back(createAlloc(loop, load.type, load.loadOp->getLoc(),
-                                      load.sharedEnc, numStages));
+    Value buffer = createAlloc(loop, load.type, load.loadOp->getLoc(),
+                               load.sharedEnc, numStages);
+    if (Attribute config =
+            load.loadOp->getAttr(hcu::kBufferLdsProducerConfigAttrName))
+      buffer.getDefiningOp()->setAttr(hcu::kBufferLdsProducerConfigAttrName,
+                                      config);
+    loadBuffers.push_back(buffer);
   }
 
   numBarrierPairs = std::max(1u, topo.numBarrierPairs());
@@ -636,6 +642,10 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
   for (auto [load, buffer] : llvm::zip(loads, loadBuffers)) {
     b.setInsertionPoint(load.loadOp);
     Value view = createSingleBufferView(b, buffer, index);
+    if (Attribute config = buffer.getDefiningOp()->getAttr(
+            hcu::kBufferLdsProducerConfigAttrName))
+      view.getDefiningOp()->setAttr(hcu::kBufferLdsProducerConfigAttrName,
+                                    config);
     if (load.isMls) {
       auto mlsOp = cast<tta::MatrixLoadToLocalOp>(load.loadOp);
       // Point matrix_load_to_local at the multi-buffered slice, then retire the

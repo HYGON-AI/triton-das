@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: MIT
+
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, amd, hcu, distributed
 from triton import knobs
@@ -608,15 +611,13 @@ class HIPBackend(BaseBackend):
         # request, not an AccelerateMatmul layout mode. Try it after the final
         # dot-operand encoding is known; unsupported operands remain untouched
         # for ordinary register staging.
-        # TODO(hcu): Support BufferLds under WASP. The placement must use the
-        # load-partition producer-wave count (and a partition-local wave id),
-        # preserve its encoding through WASP multi-buffer/view rewrites, and
-        # publish completion as wait_asyncmark -> ready abarrier arrive. Do not
-        # insert the ordinary whole-workgroup local_barrier in that path.
+        # WASP keeps each BufferLds copy in its load partition and publishes
+        # completion through that partition's ready abarrier. DataPartition
+        # gives TwoPTwoC producer/consumer pairs private physical tiles before
+        # ConvertBufferLdsCopies materializes their async buffer loads.
         try_buffer_lds = (
             use_async_copy and supports_buffer_lds(options.arch)
             and options.num_ctas == 1
-            and not metadata.get("wasp_enabled", False)
             and knobs.amd.use_buffer_ops)
         if try_buffer_lds:
             hcu.passes.ttgpuir.add_select_buffer_lds_config(pm)

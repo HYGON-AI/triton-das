@@ -43,8 +43,7 @@ struct BufferLdsLocalLoadLowering : ConvertOpToLLVMPattern<LocalLoadOp> {
       return rewriter.notifyMatchFailure(
           op, "buffer-to-LDS layout is not encodable on this target");
     auto dstTy = op.getType();
-    auto cvt = toLinearLayout(dstTy).invertAndCompose(
-        sharedEncoding.getLinearComponent().toLinearLayout(srcTy.getShape()));
+    auto cvt = toLinearLayout(dstTy).invertAndCompose(toLinearLayout(srcTy));
     auto *ctx = op.getContext();
     auto dim = [&](StringRef name) { return StringAttr::get(ctx, name); };
     if (!cvt.isTrivialOver({dim("block")}))

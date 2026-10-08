@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 #include "TritonHCU/WaspSplitPlan.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -95,11 +98,11 @@ std::optional<WaspSplitPlan> inferWaspSplitPlan(DotOpInterface dot,
   // Keep the existing DataPartition priority: M/A first, then N/B. The full
   // slice-closure legality check remains in DataPartition, where it has the
   // complete transformed def-use graph.
-  for (auto [dim, operand] : llvm::enumerate(ArrayRef<unsigned>{0, 1})) {
+  for (unsigned dim = 0; dim < 2; ++dim) {
     int64_t extent = shapePerCTA[dim];
     if (extent >= static_cast<int64_t>(factor * 16) &&
         extent % static_cast<int64_t>(factor) == 0)
-      return WaspSplitPlan{static_cast<unsigned>(dim), factor, operand};
+      return WaspSplitPlan{dim, factor, dim};
   }
   return std::nullopt;
 }

@@ -48,7 +48,7 @@ static gpu::HCUBufferLdsSharedEncodingAttr buildBufferLdsOperandEncoding(
 gpu::HCUBufferLdsSharedEncodingAttr selectBufferLdsOperandEncoding(
     Value value, RankedTensorType type, gpu::DotOperandEncodingAttr consumer,
     std::optional<gpu::DotOperandEncodingAttr> compatible, Type instructionType,
-    unsigned waves, llvm::StringRef arch) {
+    unsigned waves, llvm::StringRef arch, unsigned *selectedMaxCopyBytes) {
   // gfx936 emulates FP8 dot with FP16 MMAC. Copy the stored bytes and keep
   // the existing FP8 -> FP16 conversion after the shared-memory read.
   bool fp8Emulation =
@@ -74,6 +74,8 @@ gpu::HCUBufferLdsSharedEncodingAttr selectBufferLdsOperandEncoding(
   if (load.getMask())
     vec = std::min(vec, axis.getMaskAlignment(load.getMask()));
   unsigned maxBytes = std::min(16u, vec * (type.getElementTypeBitWidth() / 8));
+  if (selectedMaxCopyBytes)
+    *selectedMaxCopyBytes = maxBytes;
   auto profile =
       getBufferLdsTargetProfile(std::string_view(arch.data(), arch.size()));
   if (!profile)

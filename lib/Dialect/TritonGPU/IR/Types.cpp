@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "mlir/IR/DialectImplementation.h" // required by `Types.cpp.inc`
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -190,9 +194,13 @@ LogicalResult MemDescType::verify(function_ref<InFlightDiagnostic()> emitError,
         allocShape.take_back(2) != ArrayRef<int64_t>(backingTileShape))
       return emitError() << "HCU buffer-to-LDS encoding requires its complete "
                             "fp16/bf16/fp8 backing tile";
-    if (shape.take_back(2) != ArrayRef<int64_t>(backingTileShape))
-      return emitError() << "HCU buffer-to-LDS encoding does not support "
-                            "partial tile views";
+    auto viewShape = shape.take_back(2);
+    for (auto [view, backing] : llvm::zip(viewShape, backingTileShape)) {
+      if (view <= 0 || view > backing || backing % view)
+        return emitError()
+               << "HCU buffer-to-LDS view must be a power-of-two tile of "
+                  "the complete backing tile";
+    }
   }
 
   // PaddedSharedEncodingAttr is also a SharedEncodingTrait but we have some

@@ -49,47 +49,53 @@ mmacReads(unsigned rows, unsigned columns, unsigned elementBytes,
   return reads;
 }
 
-// Search-selection regression at the selected copy width. This uses the
-// production score; lds_read_model_test.cpp independently checks bank scoring.
-// It is not a proof of hardware phase semantics or of arbitrary-layout
-// optimality.
-static void
-proveMinimumBankConflict(unsigned rows, unsigned columns, unsigned elementBytes,
-                         unsigned waves, unsigned copyBytes, bool kContiguous,
-                         unsigned instructionNonK, unsigned kWidth,
-                         bool matrixRead, const LdsGeometry &hw,
-                         const BufferLdsWrapCapabilities &wrap = {},
-                         std::string_view arch = "gfx936") {
+// Exhaust the production candidate space and prove that selection minimizes
+// the bank-conflict pair before applying any transport/locality tie-breakers.
+// lds_read_model_test.cpp independently checks the bit-level bank scoring.
+static void proveMinimumBankConflict(unsigned rows, unsigned columns,
+                                     unsigned elementBytes, unsigned waves,
+                                     unsigned copyBytes, bool kContiguous,
+                                     unsigned instructionNonK, unsigned kWidth,
+                                     bool matrixRead, const LdsGeometry &hw,
+                                     const BufferLdsWrapCapabilities &wrap = {},
+                                     std::string_view arch = "gfx936",
+                                     unsigned maxCopyBytes = 16) {
   auto selected = selectMmacBufferLdsConfig(
       rows, columns, elementBytes, waves, copyBytes, kContiguous,
-      instructionNonK, kWidth, hw, matrixRead, 16, wrap, arch);
+      instructionNonK, kWidth, hw, matrixRead, maxCopyBytes, wrap, arch);
   assert(selected);
-  copyBytes = selected->copyBytesPerLane;
-  auto reads = mmacReads(rows, columns, elementBytes, kContiguous,
-                         instructionNonK, kWidth, matrixRead, hw, copyBytes,
-                         arch);
-  assert(!reads.empty());
   auto best = std::make_pair(std::numeric_limits<unsigned>::max(),
                              std::numeric_limits<uint64_t>::max());
-  for (unsigned group = 1; group <= waves; group *= 2) {
-    for (unsigned chunk = 1; chunk <= rows / waves; chunk *= 2)
-      for (unsigned count = 1; count <= waves; count *= 2) {
-        unsigned limit = count == 1 ? 0
-                                    : std::min(wrap.maxBytes / (count - 1),
-                                               hw.waveSize * copyBytes - 1);
-        for (unsigned step = count == 1 ? 0 : wrap.granuleBytes; step <= limit;
-             step += wrap.granuleBytes) {
-          BufferLdsConfig candidate{rows,        columns * elementBytes,
-                                    waves,       copyBytes,
-                                    hw.waveSize, chunk,
-                                    count,       step};
-          candidate.wavesPerRowGroup = group;
-          if (!evaluateBufferLdsBankConflicts(candidate, hw, reads))
-            continue;
-          best = std::min(best, std::make_pair(candidate.worstReadWay,
-                                               candidate.readPhaseCost));
+  for (unsigned width : {16u, 8u, 4u}) {
+    if ((copyBytes && width != copyBytes) || width > maxCopyBytes ||
+        columns * elementBytes % width || rows % waves ||
+        uint64_t(rows) * columns * elementBytes %
+            (uint64_t(waves) * hw.waveSize * width))
+      continue;
+    auto reads =
+        mmacReads(rows, columns, elementBytes, kContiguous, instructionNonK,
+                  kWidth, matrixRead, hw, width, arch);
+    assert(!reads.empty());
+    for (unsigned group = 1; group <= waves; group *= 2) {
+      for (unsigned chunk = 1; chunk <= rows / waves; chunk *= 2)
+        for (unsigned count = 1; count <= waves; count *= 2) {
+          unsigned limit = count == 1 ? 0
+                                      : std::min(wrap.maxBytes / (count - 1),
+                                                 hw.waveSize * width - 1);
+          for (unsigned step = count == 1 ? 0 : wrap.granuleBytes;
+               step <= limit; step += wrap.granuleBytes) {
+            BufferLdsConfig candidate{rows,        columns * elementBytes,
+                                      waves,       width,
+                                      hw.waveSize, chunk,
+                                      count,       step};
+            candidate.wavesPerRowGroup = group;
+            if (!evaluateBufferLdsBankConflicts(candidate, hw, reads))
+              continue;
+            best = std::min(best, std::make_pair(candidate.worstReadWay,
+                                                 candidate.readPhaseCost));
+          }
         }
-      }
+    }
   }
   assert(std::make_pair(selected->worstReadWay, selected->readPhaseCost) ==
          best);
@@ -99,7 +105,10 @@ proveMinimumBankConflict(unsigned rows, unsigned columns, unsigned elementBytes,
   assert(!selected->transferMajor);
   BufferLdsConfig transferMajor = *selected;
   transferMajor.transferMajor = true;
-  assert(evaluateBufferLdsBankConflicts(transferMajor, hw, reads));
+  auto selectedReads =
+      mmacReads(rows, columns, elementBytes, kContiguous, instructionNonK,
+                kWidth, matrixRead, hw, selected->copyBytesPerLane, arch);
+  assert(evaluateBufferLdsBankConflicts(transferMajor, hw, selectedReads));
   assert(transferMajor.readPhaseCost == selected->readPhaseCost &&
          transferMajor.worstReadWay == selected->worstReadWay);
 }
@@ -266,6 +275,23 @@ int main() {
     for (unsigned byte = 0; byte < copyConfig->tileBytes(); ++byte)
       physical.insert(copyConfig->physicalByte(byte));
     assert(physical.size() == copyConfig->tileBytes());
+  }
+  // WASP producer slicing changes the backing A/B tiles and producer-wave
+  // count after the initial full-CTA selection. Prove that rescoring those
+  // final Shaobo tiles is bank-optimal across every legal copy width.
+  {
+    auto sb = getBufferLdsTargetProfile("gfx946");
+    assert(sb);
+    for (unsigned waves : {1u, 2u, 4u}) {
+      proveMinimumBankConflict(32, 16, 2, waves, 0,
+                               /*kContiguous=*/true, 16, 4,
+                               /*matrixRead=*/true, sb->lds, sb->wrap,
+                               "gfx946");
+      proveMinimumBankConflict(16, 64, 2, waves, 0,
+                               /*kContiguous=*/false, 16, 4,
+                               /*matrixRead=*/true, sb->lds, sb->wrap,
+                               "gfx946");
+    }
   }
   {
     auto selected = selectMmacBufferLdsConfig(256, 32, 2, 8, 16, true, 16, 4);

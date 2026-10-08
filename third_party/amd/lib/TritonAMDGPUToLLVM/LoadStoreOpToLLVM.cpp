@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
 // Modified by Hygon Information Technology Co., Ltd., 2026.
 
 #include "AsyncUtility.h"
@@ -542,21 +544,28 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       // When this sequence occurs inside a loop, the MachineLICM pass does not
       // hoist it because `v_readfirstlane` is convergent. Since both
       // `workitem.id.x` and `wave_id` are constant at runtime, their
-      // computation can be safely hoisted to the function entry block.
+      // computation can be safely hoisted to the function entry block. WASP
+      // partitions are isolated regions, so their value must stay local.
       auto insertPt = rewriter.saveInsertionPoint();
       Operation *parentOp = insertPt.getBlock()->getParentOp();
-      while (!isa<LLVM::LLVMFuncOp>(parentOp)) {
-        parentOp = parentOp->getParentOp();
-      }
+      bool inWarpSpecialize = false;
+      for (Operation *op = parentOp; op && !isa<LLVM::LLVMFuncOp>(op);
+           op = op->getParentOp())
+        inWarpSpecialize |= isa<WarpSpecializeOp>(op);
 
-      auto funcOp = cast<LLVM::LLVMFuncOp>(parentOp);
-      rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+      if (!inWarpSpecialize) {
+        while (!isa<LLVM::LLVMFuncOp>(parentOp))
+          parentOp = parentOp->getParentOp();
+        auto funcOp = cast<LLVM::LLVMFuncOp>(parentOp);
+        rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+      }
 
       std::tie(laneId, warpId) = getLaneAndWarpId(rewriter, loc);
       auto call = LLVM::createLLVMIntrinsicCallOp(
           rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty}, {warpId});
       warpId = call.getResult(0);
-      rewriter.restoreInsertionPoint(insertPt);
+      if (!inWarpSpecialize)
+        rewriter.restoreInsertionPoint(insertPt);
     } else {
       std::tie(laneId, warpId) = getLaneAndWarpId(rewriter, loc);
     }
@@ -983,17 +992,22 @@ struct BufferLoadToLocalOpConversion
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     Value wrapWaveId = warpId;
     if (sharedEncoding) {
-      // The placement assigns a different M0 rotation to each producer wave.
-      // M0's wrap field is wave-uniform, just like the LDS allocation base.
-      // Scalarize at entry: doing it after composing each M0 value leaves a
-      // convergent readfirstlane in every software-pipeline generation.
       OpBuilder::InsertionGuard guard(rewriter);
-      auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
-      rewriter.setInsertionPointToStart(&func.getBody().front());
-      auto entryWarp = getLaneAndWarpId(rewriter, loc).second;
+      if (op->getParentOfType<WarpSpecializeOp>()) {
+        Block *partitionBlock = op->getBlock();
+        while (!isa<WarpSpecializePartitionsOp>(
+            partitionBlock->getParentOp()))
+          partitionBlock = partitionBlock->getParentOp()->getBlock();
+        rewriter.setInsertionPointToStart(partitionBlock);
+      } else {
+        auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
+        rewriter.setInsertionPointToStart(&func.getBody().front());
+      }
+      auto scopedWarpId = getLaneAndWarpId(rewriter, loc).second;
       wrapWaveId =
           LLVM::createLLVMIntrinsicCallOp(
-              rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty}, {entryWarp})
+              rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty},
+              {scopedWarpId})
               .getResult(0);
     }
     auto emitBufferLoadLds =

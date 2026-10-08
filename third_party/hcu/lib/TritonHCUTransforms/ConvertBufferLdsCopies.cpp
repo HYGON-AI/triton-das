@@ -63,7 +63,10 @@ static bool preservesGlobalSource(Operation *op) {
           ttg::LocalBarrierOp, gpu::BarrierOp, ROCDL::SchedBarrier,
           LLVM::AssumeOp, ROCDL::SetPrioOp, triton::amdgpu::CondBarrierOp,
           ROCDL::SBarrierOp, triton::amdgpu::MemoryCounterWaitOp,
-          triton::amdgpu::BufferLoadToLocalOp, triton::amdgpu::UTCWarmupOp>(op))
+          ROCDL::HCUAbarrierTryWaitOp, ROCDL::HCUAbarrierArriveOp,
+          ROCDL::HCUAbarrierSeqOp, ROCDL::HCUAbarrierInitOp,
+          ROCDL::HCUAbarrierInvOp, triton::amdgpu::BufferLoadToLocalOp,
+          triton::amdgpu::UTCWarmupOp>(op))
     return true;
   if (auto intrinsic = dyn_cast<LLVM::CallIntrinsicOp>(op))
     return intrinsic.getIntrin() == "llvm.amdgcn.readfirstlane";
@@ -99,6 +102,22 @@ static bool canRetimeRead(Operation *destination) {
       return false;
   }
   return false;
+}
+
+// Warp specialization puts the producer load and its LDS store in the same
+// load-partition block, while unrelated consumer-side global stores live in a
+// sibling region.  In that case only the operations crossed inside the
+// producer block are relevant to the retiming proof.
+static bool canRetimeRead(Operation *source, Operation *destination) {
+  if (source->getBlock() == destination->getBlock() &&
+      source->isBeforeInBlock(destination)) {
+    for (Operation *op = source->getNextNode(); op && op != destination;
+         op = op->getNextNode())
+      if (!preservesGlobalSource(op))
+        return false;
+    return true;
+  }
+  return canRetimeRead(destination);
 }
 
 // A carried tensor and carried offsets must describe the same load on BOTH
@@ -239,7 +258,7 @@ struct CombineBufferLdsBufferLoadToLocal
   matchAndRewrite(ttg::LocalStoreOp store,
                   PatternRewriter &rewriter) const override {
     auto load = store.getSrc().getDefiningOp<triton::amdgpu::BufferLoadOp>();
-    if (!load || !canRetimeRead(store) || load.getOther() ||
+    if (!load || !canRetimeRead(load, store) || load.getOther() ||
         !load.getResult().hasOneUse() ||
         !isBufferLdsTensorAndMemDesc(cast<RankedTensorType>(load.getType()),
                                      store.getDst().getType()))
@@ -339,7 +358,7 @@ struct CombineBufferLdsBufferLoadAllocToLocal
     if (!load)
       return failure();
 
-    if (!canRetimeRead(alloc) || load.getOther() ||
+    if (!canRetimeRead(load, alloc) || load.getOther() ||
         !load.getResult().hasOneUse() ||
         !isBufferLdsTensorAndMemDesc(cast<RankedTensorType>(load.getType()),
                                      alloc.getType()))
@@ -441,7 +460,8 @@ struct TritonHCUConvertBufferLdsCopiesPass
           builder, copy.getLoc(), ValueRange{copy.getResult()});
       ttg::AsyncWaitOp::create(builder, copy.getLoc(),
                                ValueRange{commit.getResult()}, 0);
-      ttg::LocalBarrierOp::create(builder, copy.getLoc());
+      if (!copy->getParentOfType<ttg::WarpSpecializeOp>())
+        ttg::LocalBarrierOp::create(builder, copy.getLoc());
     }
   }
 };

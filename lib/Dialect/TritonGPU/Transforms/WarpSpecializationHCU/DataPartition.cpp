@@ -11,16 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "TritonHCU/BufferLdsEncoding.h"
+#include "TritonHCU/MlsGroup.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "triton/Analysis/Utility.h"
-#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
-#include "TritonHCU/MlsGroup.h"
-#include "TritonHCU/WaspSplitPlan.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -347,6 +348,49 @@ static bool getBackwardSliceToPartition(Value v,
 // allocation and write for each independent Producer/Consumer pair.
 static bool isMlsSharedEncoding(Attribute encoding) {
   return isa_and_nonnull<HCUMlsSharedEncodingAttr>(encoding);
+}
+
+static Attribute getProducerSlicedEncoding(MemDescType type,
+                                           ArrayRef<int64_t> shape,
+                                           Operation *op) {
+  auto encoding = dyn_cast<HCUBufferLdsSharedEncodingAttr>(type.getEncoding());
+  if (!encoding)
+    return type.getEncoding();
+  auto topology = hcuMls::getWaspTopologyFromModule(op);
+  if (!topology || !topology->producerSliced())
+    return type.getEncoding();
+
+  auto configAttr = op->getAttrOfType<DenseI32ArrayAttr>(
+      hcuMls::kBufferLdsProducerConfigAttrName);
+  auto target =
+      op->getParentOfType<ModuleOp>()->getAttrOfType<StringAttr>("ttg.target");
+  auto config = hcuMls::decodeBufferLdsConfig(configAttr);
+  if (!config || !target || !target.getValue().starts_with("hip:")) {
+    op->emitError("missing or invalid BufferLds producer configuration");
+    return type.getEncoding();
+  }
+  StringRef arch = target.getValue().drop_front(4);
+  auto profile = hcuMls::getBufferLdsTargetProfile(
+      std::string_view(arch.data(), arch.size()));
+  if (!profile) {
+    op->emitError("missing BufferLds target profile for producer slice");
+    return type.getEncoding();
+  }
+
+  unsigned contiguousDim = encoding.getContiguousDim();
+  auto tileShape = shape.take_back(2);
+  uint64_t actualRows = tileShape[1 - contiguousDim];
+  uint64_t actualRowBytes =
+      tileShape[contiguousDim] * encoding.getElementBytes();
+  if (config->rows != actualRows || config->rowBytes != actualRowBytes ||
+      config->waves != topology->getPartitionWarps(0) ||
+      !hcuMls::isBufferLdsConfigEncodable(*config, *profile)) {
+    op->emitError(
+        "preselected BufferLds configuration does not match producer slice");
+    return type.getEncoding();
+  }
+  return hcuMls::bufferLdsSharedEncoding(
+      type.getContext(), *config, encoding.getElementBytes(), contiguousDim);
 }
 
 static bool isMlsSharedMemDesc(Type type) {
@@ -1537,6 +1581,21 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
           newV.setType(newType);
         }
       }
+      if (!needRetype && partitionScheme.producerSliced) {
+        if (auto oldType = dyn_cast<MemDescType>(v.getType())) {
+          if (isa<HCUBufferLdsSharedEncodingAttr>(oldType.getEncoding())) {
+            auto currentType = cast<MemDescType>(newV.getType());
+            SmallVector<int64_t> allocShape(currentType.getAllocShape().begin(),
+                                            currentType.getAllocShape().end());
+            Attribute encoding =
+                getProducerSlicedEncoding(oldType, allocShape, op);
+            newV.setType(MemDescType::get(
+                currentType.getShape(), currentType.getElementType(), encoding,
+                currentType.getMemorySpace(), currentType.getMutableMemory(),
+                allocShape));
+          }
+        }
+      }
       mappings.map(v, newV);
       reverseMappings.map(newV, v);
     }
@@ -1602,13 +1661,14 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
         if (!allocShape.empty() && dim < allocShape.size())
           allocShape[dim] =
               allocShape[dim] / static_cast<int64_t>(numOfPartitions);
+        Attribute slicedEncoding = getProducerSlicedEncoding(memTy, shape, op);
         auto slicedTy =
             allocShape.empty()
                 ? MemDescType::get(shape, memTy.getElementType(),
-                                   memTy.getEncoding(), memTy.getMemorySpace(),
+                                   slicedEncoding, memTy.getMemorySpace(),
                                    memTy.getMutableMemory())
                 : MemDescType::get(shape, memTy.getElementType(),
-                                   memTy.getEncoding(), memTy.getMemorySpace(),
+                                   slicedEncoding, memTy.getMemorySpace(),
                                    memTy.getMutableMemory(), allocShape);
         allocOp.getResult().setType(slicedTy);
         // Tag with consumer task id so SplitMma can move the matching

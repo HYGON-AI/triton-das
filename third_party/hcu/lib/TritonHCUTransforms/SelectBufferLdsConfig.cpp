@@ -1,8 +1,10 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 // SPDX-License-Identifier: MIT
 
+#include "TritonHCU/BufferLdsConfigSelection.h"
 #include "TritonHCU/BufferLdsEncoding.h"
 #include "TritonHCU/Passes.h"
+#include "TritonHCU/WaspSplitPlan.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -76,6 +78,13 @@ struct AssignBufferLdsOperandEncoding : OpRewritePattern<tt::DotOp> {
 
   LogicalResult matchAndRewrite(tt::DotOp dot,
                                 PatternRewriter &rewriter) const override {
+    auto topology = tt::HCU::getWaspTopologyFromModule(dot);
+    auto plan = tt::HCU::getWaspSplitPlan(dot);
+    if (topology && topology->producerSliced() &&
+        (!plan || plan->factor != topology->numConsumerGroups()))
+      return rewriter.notifyMatchFailure(
+          dot, "missing matching WASP producer split plan");
+
     bool changed = false;
     for (unsigned index = 0; index < 2; ++index) {
       Value operand = dot->getOperand(index);
@@ -102,11 +111,52 @@ struct AssignBufferLdsOperandEncoding : OpRewritePattern<tt::DotOp> {
       unsigned waves = 1;
       for (unsigned count : mfma.getWarpsPerCTA())
         waves *= count;
+      unsigned maxCopyBytes = 0;
       auto sharedEncoding = tt::HCU::selectBufferLdsOperandEncoding(
           source, sourceType, consumer, std::nullopt,
-          operandType.getElementType(), waves, arch);
+          operandType.getElementType(), waves, arch, &maxCopyBytes);
       if (!sharedEncoding)
         continue;
+
+      unsigned kDim = consumer.getOpIdx() == 0 ? 1 : 0;
+      auto instr = mfma.getInstrShapeForOperand(consumer.getKWidth(),
+                                                consumer.getOpIdx());
+      bool matrixRead = mfma.getTilesPerWarp()[1 - kDim] == 2 &&
+                        mfma.getTilesPerWarp()[kDim] == 1;
+      if (topology && topology->producerSliced()) {
+        SmallVector<int64_t> producerShape(sourceType.getShape());
+        unsigned nonKDim = 1 - kDim;
+        if (plan->partitionedOperand == index) {
+          if (producerShape[nonKDim] <= 0 ||
+              producerShape[nonKDim] % plan->factor)
+            continue;
+          producerShape[nonKDim] /= plan->factor;
+        }
+
+        auto profile = tt::HCU::getBufferLdsTargetProfile(
+            std::string_view(arch.data(), arch.size()));
+        assert(profile && instr.size() == 2 && maxCopyBytes &&
+               "selected BufferLds operand must retain its search context");
+        unsigned contiguousDim = sharedEncoding.getContiguousDim();
+        auto producerConfig = tt::HCU::selectMmacBufferLdsConfig(
+            producerShape[1 - contiguousDim], producerShape[contiguousDim],
+            sharedEncoding.getElementBytes(), topology->getPartitionWarps(0),
+            /*copyBytes=*/0,
+            /*kContiguous=*/contiguousDim == kDim, instr[1 - kDim],
+            consumer.getKWidth(), profile->lds, matrixRead, maxCopyBytes,
+            profile->wrap, std::string_view(arch.data(), arch.size()));
+        if (!producerConfig)
+          continue;
+
+        Value loadSource = source;
+        while (auto convert = loadSource.getDefiningOp<ttg::ConvertLayoutOp>())
+          loadSource = convert.getSrc();
+        auto load = loadSource.getDefiningOp<tt::LoadOp>();
+        assert(load && "selected BufferLds operand must come from tt.load");
+        load->setAttr(tt::HCU::kBufferLdsProducerConfigAttrName,
+                      tt::HCU::encodeBufferLdsConfig(rewriter.getContext(),
+                                                     *producerConfig));
+      }
 
       Value convertedOperand = tt::HCU::materializeBufferLdsOperand(
           rewriter, dot.getLoc(), source, consumer, sharedEncoding);

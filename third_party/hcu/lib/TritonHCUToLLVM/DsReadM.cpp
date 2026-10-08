@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+
 #include "PatternTritonGPUOpToLLVM.h"
 #include "BufferLdsAddress.h"
 #include "TritonHCU/DsReadMLayout.h"
@@ -136,7 +139,7 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
   // Generic affine shared views remain unsupported.  The only affine panel
   // view accepted here was fully proved by buildDsReadMPanelViewPlan above.
   if (LLVM::SharedMemoryObject::isAffineSharedMemoryAccess(srcTy) &&
-      !panelMajor)
+      !panelMajor && !interleavedBufferLds)
     return std::nullopt;
 
   auto mfmaEnc = cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
@@ -201,6 +204,7 @@ SmallVector<SmallVector<Value>>
 emitBufferLdsMatrixReads(Location loc, RewriterBase &rewriter,
                  TritonLLVMOpBuilder &b, Type smemPtrTy, Type elemTy,
                  Value smemBase, Value laneId, Value warpNonK,
+                 ArrayRef<Value> logicalOffsets, unsigned nonKDim,
                  const BufferLdsConfig &copyConfig,
                  const DsReadMPlan &plan) {
   SmallVector<SmallVector<Value>> fragments;
@@ -218,6 +222,11 @@ emitBufferLdsMatrixReads(Location loc, RewriterBase &rewriter,
           b.mul(b.add(warpNonK, b.i32_val(panel * plan.warpsN)), b.i32_val(32)),
           b.mul(b.urem(laneId, b.i32_val(lanesPerRow)),
                 b.i32_val(elementsPerLane)));
+      if (logicalOffsets.size() >= 2) {
+        unsigned offsetBase = logicalOffsets.size() - 2;
+        row = b.add(row, logicalOffsets[offsetBase + 1 - nonKDim]);
+        col = b.add(col, logicalOffsets[offsetBase + nonKDim]);
+      }
       Value bytes =
           emitBufferLdsByteOffset(b, copyConfig, row, col, elementBytes);
       Value elementOffset = b.udiv(bytes, b.i32_val(elementBytes));
@@ -509,11 +518,11 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
     Type elemTy = typeConverter->convertType(srcTy.getElementType());
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          elemTy, rewriter);
-    // canUseDsReadM accepts an affine view only after proving that it is a
-    // panel-preserving K-tile translation. Fold that translation into the LDS
-    // base; otherwise K0 and K1 subslices would issue from the same address.
+    // Panel-major views use a linear affine base. BufferLds views instead add
+    // their logical offsets before applying interleave and M0 wrap below.
     Value smemBase =
-        LLVM::SharedMemoryObject::isAffineSharedMemoryAccess(srcTy)
+        !sharedEncoding &&
+                LLVM::SharedMemoryObject::isAffineSharedMemoryAccess(srcTy)
             ? smemObj.getShmemAffineBase(loc, rewriter, srcTy)
             : smemObj.getBase();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -529,7 +538,8 @@ struct HCUDsReadMConversion : public ConvertOpToLLVMPattern<LocalLoadOp> {
     SmallVector<SmallVector<Value>> elemsByKTile =
         sharedEncoding
             ? emitBufferLdsMatrixReads(loc, rewriter, b, smemPtrTy, elemTy, smemBase,
-                               laneId, warpNonK,
+                               laneId, warpNonK, smemObj.getOffsets(),
+                               cast<DotOperandEncodingAttr>(dstTy.getEncoding()).getOpIdx(),
                                getBufferLdsConfig(sharedEncoding), *plan)
         : plan->kind == DsReadMKind::B16
             ? emitB16Reads(loc, rewriter, b, smemPtrTy, elemTy, smemBase,

@@ -14,6 +14,9 @@
 
 namespace mlir::triton::HCU {
 
+inline constexpr StringLiteral kBufferLdsProducerConfigAttrName =
+    "hcu.buffer_lds_producer_config";
+
 inline bool isBufferLdsFloatType(Type type) {
   return type.isF16() || type.isBF16() ||
          isa<Float8E4M3FNType, Float8E5M2Type>(type);
@@ -103,6 +106,38 @@ getBufferLdsConfig(gpu::HCUBufferLdsSharedEncodingAttr enc) {
           enc.getTransferMajor()};
 }
 
+inline DenseI32ArrayAttr encodeBufferLdsConfig(MLIRContext *ctx,
+                                               const BufferLdsConfig &config) {
+  return DenseI32ArrayAttr::get(
+      ctx,
+      {static_cast<int32_t>(config.rows), static_cast<int32_t>(config.rowBytes),
+       static_cast<int32_t>(config.waves),
+       static_cast<int32_t>(config.copyBytesPerLane),
+       static_cast<int32_t>(config.waveSize),
+       static_cast<int32_t>(config.rowsPerChunk),
+       static_cast<int32_t>(config.wrapCount),
+       static_cast<int32_t>(config.wrapStepBytes),
+       static_cast<int32_t>(config.wavesPerRowGroup)});
+}
+
+inline std::optional<BufferLdsConfig>
+decodeBufferLdsConfig(DenseI32ArrayAttr attr) {
+  if (!attr || attr.size() != 9)
+    return std::nullopt;
+  auto values = attr.asArrayRef();
+  if (llvm::any_of(values, [](int32_t value) { return value < 0; }) ||
+      !values[0] || !values[1] || !values[2] || !values[3] || !values[4] ||
+      !values[5] || !values[6] || !values[8])
+    return std::nullopt;
+  BufferLdsConfig config{
+      static_cast<unsigned>(values[0]), static_cast<unsigned>(values[1]),
+      static_cast<unsigned>(values[2]), static_cast<unsigned>(values[3]),
+      static_cast<unsigned>(values[4]), static_cast<unsigned>(values[5]),
+      static_cast<unsigned>(values[6]), static_cast<unsigned>(values[7])};
+  config.wavesPerRowGroup = static_cast<unsigned>(values[8]);
+  return config;
+}
+
 inline gpu::LinearEncodingAttr
 getBufferLdsProducerEncoding(gpu::HCUBufferLdsSharedEncodingAttr enc) {
   return bufferLdsProducerEncoding(enc.getContext(), getBufferLdsConfig(enc),
@@ -186,7 +221,7 @@ inline bool hasBufferLdsEncoding(ModuleOp module) {
 gpu::HCUBufferLdsSharedEncodingAttr selectBufferLdsOperandEncoding(
     Value value, RankedTensorType type, gpu::DotOperandEncodingAttr consumer,
     std::optional<gpu::DotOperandEncodingAttr> compatible, Type instructionType,
-    unsigned waves, llvm::StringRef arch);
+    unsigned waves, llvm::StringRef arch, unsigned *maxCopyBytes = nullptr);
 inline Value materializeBufferLdsOperand(
     PatternRewriter &rewriter, Location loc, Value value,
     gpu::DotOperandEncodingAttr consumer,

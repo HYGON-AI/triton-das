@@ -89,6 +89,122 @@ def direct_gemm(a, b, c, m, n, k,
              (out_rows[:, None] < m) & (out_cols[None, :] < n))
 
 
+@triton.jit
+def wasp_gemm(a, b, c, m: tl.constexpr, n: tl.constexpr, k: tl.constexpr,
+              BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    rows = tl.arange(0, BM)
+    cols = tl.arange(0, BN)
+    ks = tl.arange(0, BK)
+    ap = a + rows[:, None] * k + ks[None, :]
+    bp = b + ks[:, None] * n + cols[None, :]
+    acc = tl.zeros((BM, BN), tl.float32)
+    for _ in tl.range(0, tl.cdiv(k, BK), warp_specialize=True):
+        av = tl.load(ap)
+        bv = tl.load(bp)
+        acc = tl.dot(av, bv, acc)
+        ap += BK
+        bp += BK * n
+    tl.store(c + rows[:, None] * n + cols[None, :], acc)
+
+
+def test_shaobo_wasp_async_buffer_lds(monkeypatch):
+    """WASP load waves use async BufferLds without a whole-CTA barrier."""
+    if not torch.cuda.is_available():
+        pytest.skip("HCU device required")
+    if "gfx946" not in torch.cuda.get_device_properties(0).gcnArchName:
+        pytest.skip("gfx946 validation")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    m, n, k = 64, 64, 112
+    generator = torch.Generator().manual_seed(1946)
+    a_host = torch.randn((m, k), generator=generator, dtype=torch.float16)
+    b_host = torch.randn((k, n), generator=generator, dtype=torch.float16)
+    a, b = a_host.cuda(), b_host.cuda()
+    c = torch.empty((m, n), device="cuda", dtype=torch.float16)
+    compiled = wasp_gemm[(1,)](
+        a, b, c, m, n, k, BM=m, BN=n, BK=16, num_stages=2,
+        use_async_copy=True, use_block_pingpong=False,
+        wasp_wdra=False, wasp_partition_warps=(4, 4),
+        matrix_instr_nonkdim=16, optimize_epilogue=False)
+    expected = (a_host.float() @ b_host.float()).half()
+    torch.testing.assert_close(c.cpu(), expected, atol=0.02, rtol=0.02)
+    assert compiled.metadata.uses_bank_conflict_aware_lds_placement
+    assert "#ttg.hcu_buffer_lds_shared" in compiled.asm["ttgir"]
+    assert "amdg.buffer_load_to_local" in compiled.asm["ttgir"]
+    assert "ttg.local_barrier" not in compiled.asm["ttgir"]
+    assert "llvm.amdgcn.raw.ptr.buffer.load.async.lds" in compiled.asm["llir"]
+    assert re.search(r"buffer_load_\w+.*\blds\b", compiled.asm["amdgcn"])
+
+
+@pytest.mark.parametrize("wdra,waves", [
+    pytest.param(False, (1, 1, 1, 1), id="wasp-1wave"),
+    pytest.param(False, (2, 2, 2, 2), id="wasp-2wave"),
+    pytest.param(False, (4, 4, 4, 4), id="wasp-4wave"),
+    pytest.param(True, (4, 4, 4, 4), id="wdra-4wave"),
+])
+def test_shaobo_wasp_two_producer_async_buffer_lds(
+        monkeypatch, tmp_path, wdra, waves):
+    """Two WASP producers issue async BufferLds into pair-private tiles."""
+    if not torch.cuda.is_available():
+        pytest.skip("HCU device required")
+    if "gfx946" not in torch.cuda.get_device_properties(0).gcnArchName:
+        pytest.skip("gfx946 validation")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    m, n, k = 64, 64, 512
+    generator = torch.Generator().manual_seed(2946)
+    a_host = torch.randn((m, k), generator=generator, dtype=torch.float16)
+    b_host = torch.randn((k, n), generator=generator, dtype=torch.float16)
+    a, b = a_host.cuda(), b_host.cuda()
+    c = torch.empty((m, n), device="cuda", dtype=torch.float16)
+    compiled = wasp_gemm[(1,)](
+        a, b, c, m, n, k, BM=m, BN=n, BK=16, num_stages=2,
+        use_async_copy=True, use_block_pingpong=False,
+        wasp_wdra=wdra, wasp_partition_warps=waves,
+        matrix_instr_nonkdim=16, optimize_epilogue=False)
+    expected = (a_host.float() @ b_host.float()).half()
+    torch.testing.assert_close(c.cpu(), expected, atol=0.02, rtol=0.02)
+    assert compiled.metadata.uses_bank_conflict_aware_lds_placement
+    ttgir = compiled.asm["ttgir"]
+    assert "hcu.buffer_lds_producer_config" in ttgir
+    assert ttgir.count("ttg.local_alloc") == 4
+    assert ttgir.count("amdg.buffer_load_to_local") >= 4
+    assert "ttg.local_barrier" not in ttgir
+    assert "llvm.amdgcn.raw.ptr.buffer.load.async.lds" in compiled.asm["llir"]
+    assert re.search(r"buffer_load_\w+.*\blds\b", compiled.asm["amdgcn"])
+    for stage in ("ttgir", "llir", "amdgcn"):
+        (tmp_path / f"wasp-2p-buffer-lds.{stage}").write_text(
+            compiled.asm[stage])
+
+
+def test_shaobo_wdra_async_buffer_lds(monkeypatch):
+    """WDRA 4+8 keeps async BufferLds across consumer tile views."""
+    if not torch.cuda.is_available():
+        pytest.skip("HCU device required")
+    if "gfx946" not in torch.cuda.get_device_properties(0).gcnArchName:
+        pytest.skip("gfx946 validation")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    m, n, k = 64, 64, 112
+    generator = torch.Generator().manual_seed(4948)
+    a_host = torch.randn((m, k), generator=generator, dtype=torch.float16)
+    b_host = torch.randn((k, n), generator=generator, dtype=torch.float16)
+    a, b = a_host.cuda(), b_host.cuda()
+    c = torch.empty((m, n), device="cuda", dtype=torch.float16)
+    compiled = wasp_gemm[(1,)](
+        a, b, c, m, n, k, BM=m, BN=n, BK=16, num_stages=2,
+        use_async_copy=True, use_block_pingpong=False,
+        wasp_wdra=True, wasp_partition_warps=(4, 4, 4),
+        wasp_partition_regs=(88, 144, 140),
+        matrix_instr_nonkdim=16, optimize_epilogue=False)
+    expected = (a_host.float() @ b_host.float()).half()
+    torch.testing.assert_close(c.cpu(), expected, atol=0.02, rtol=0.02)
+    assert compiled.metadata.uses_bank_conflict_aware_lds_placement
+    assert "#ttg.hcu_buffer_lds_shared" in compiled.asm["ttgir"]
+    assert "ttg.memdesc_subslice" in compiled.asm["ttgir"]
+    assert "amdg.buffer_load_to_local" in compiled.asm["ttgir"]
+    assert "ttg.local_barrier" not in compiled.asm["ttgir"]
+    assert "llvm.amdgcn.raw.ptr.buffer.load.async.lds" in compiled.asm["llir"]
+    assert re.search(r"buffer_load_\w+.*\blds\b", compiled.asm["amdgcn"])
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("column_b", [False, True])
 @pytest.mark.parametrize("bm,bn,bk,waves", [(64, 64, 16, 4),
