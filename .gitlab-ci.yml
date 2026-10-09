@@ -5,14 +5,10 @@ stages:
   - mirror
 
 variables:
-  PIP_INDEX_URL: "http://10.16.1.201:9929/nightly/dtk2604/+simple/"
-  PIP_TRUSTED_HOST: "10.16.1.201"
-  DTK_PKG: "/ArchivedFile/dtk-pkg/dtk26.04/DTK-26.04-rc4-centos8-x86_64.tar.gz"
+  # PIP_INDEX_URL 由各 job 的 before_script 按 DTK 版本动态设置（dtk2604/dtk2610）
   DEVPI_URL: "http://10.16.1.201:9929/"
   CISMI_TIMEOUT: "3600"
   TORCH_VERSION: "2.11.0"
-  BASE_COMPILE_IMAGE_ROCKY_PY310: "harbor.sourcefind.cn:5443/hcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.10-mkl2020.4.304"
-  BASE_COMPILE_IMAGE_ROCKY_PY312: "harbor.sourcefind.cn:5443/hcu/admin/base/dev:rockylinux8.6-mpi5.0-gcc10.3-cmake3.29-py3.12-mkl2020.4.304"
   # GitHub mirror target (override in CI Variables if needed).
   # Auth: set masked CI Variable GITHUB_MIRROR_TOKEN (fine-grained PAT with contents:write).
   GITHUB_MIRROR_REPO: "github.com/HYGON-AI/triton-das.git"
@@ -31,6 +27,7 @@ quality-gate:
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
     - quality-pr-scan --base origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --head ${CI_COMMIT_SHA}
 
+# 版本对应关系: dtk26.04 -> AICC 1.0.0, dtk26.10 -> AICC 2.0.0
 build:triton-wheel:
   stage: build
   timeout: 3h
@@ -38,14 +35,24 @@ build:triton-wheel:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(release\/|staging)/'
   tags:
     - nmz
+  parallel:
+    matrix:
+      - BASE_COMPILE_IMAGE:
+          - "10.16.1.152:5000/hcu/base/dtk:26.04-rockylinux8.6-py3.10"
+          - "10.16.1.152:5000/hcu/base/dtk:26.10-rockylinux8.6-py3.12"
+  image: ${BASE_COMPILE_IMAGE}
   before_script:
-    # 安装 DTK
-    - cp -f ${DTK_PKG} /opt/
-    - cd /opt && tar -xzf $(basename ${DTK_PKG}) && mv dtk-* dtk
+    # 加载 DTK 环境（镜像内已预装 DTK）
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
+    # 从镜像 tag 推导 DTK 版本，决定 AICC 大版本: dtk26.04 -> 1.0.0, dtk26.10 -> 2.0.0
+    - export DTK_VERSION=$(echo ${BASE_COMPILE_IMAGE##*dtk:} | grep -oP '^\K[0-9]+\.[0-9]+')
+    - test -n "${DTK_VERSION}" || (echo "Cannot parse DTK version from ${BASE_COMPILE_IMAGE}" && exit 1)
+    - case "${DTK_VERSION}" in 26.04) export AICC_MAJOR=1.0.0;; 26.10) export AICC_MAJOR=2.0.0;; *) echo "No AICC major mapped for DTK ${DTK_VERSION}" && exit 1;; esac
+    # 按镜像内 DTK 版本切换 pip 源，确保 torch 等包从对应 dtk 版本的索引下载
+    - export PIP_INDEX_URL="http://10.16.1.201:9929/nightly/dtk$(echo ${DTK_VERSION} | tr -d '.')/+simple/" PIP_TRUSTED_HOST="10.16.1.201"
     # 安装 AICC
     - wget http://42.228.13.241:18000/ai_cc/Nightly/hcu_llvm_installer.sh
-    - bash hcu_llvm_installer.sh  --major 1.0.0
+    - bash hcu_llvm_installer.sh --major ${AICC_MAJOR}
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'
@@ -63,7 +70,7 @@ build:triton-wheel:
     - git merge origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --no-edit
     - pip install -r python/requirements.txt -r python/test-requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
     - pip install torch==${TORCH_VERSION} cismi auditwheel patchelf==0.17.2.4
-    - pip install numpy==1.24.3
+    - pip install numpy==2.0.2
     - pip install amdsmi==1.0.0+630c16a6.dirty
     - yum install -y expect rsync
   script:
@@ -103,31 +110,33 @@ publish:
       - TRITON_VERSION: ["3.4.0"]
         TORCH_VERSION: ["2.8.0"]
         BASE_COMPILE_IMAGE:
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+          - "10.16.1.152:5000/hcu/base/dtk:26.10-rockylinux8.6-py3.12"
       - TRITON_VERSION: ["3.5.1"]
         TORCH_VERSION: ["2.9.0"]
         BASE_COMPILE_IMAGE:
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+          - "10.16.1.152:5000/hcu/base/dtk:26.10-rockylinux8.6-py3.12"
       - TRITON_VERSION: ["3.6.0"]
         TORCH_VERSION: ["2.10.0"]
         BASE_COMPILE_IMAGE:
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+          - "10.16.1.152:5000/hcu/base/dtk:26.10-rockylinux8.6-py3.12"
       - TRITON_VERSION: ["3.6.0"]
         TORCH_VERSION: ["2.11.0"]
         BASE_COMPILE_IMAGE:
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY310}"
-          - "${BASE_COMPILE_IMAGE_ROCKY_PY312}"
+          - "10.16.1.152:5000/hcu/base/dtk:26.04-rockylinux8.6-py3.10"
+          - "10.16.1.152:5000/hcu/base/dtk:26.04-rockylinux8.6-py3.12"
+          - "10.16.1.152:5000/hcu/base/dtk:26.10-rockylinux8.6-py3.12"
   before_script:
-    # 安装 DTK
-    - cp -f ${DTK_PKG} /opt/
-    - cd /opt && tar -xzf $(basename ${DTK_PKG}) && mv dtk-* dtk
+    # 加载 DTK 环境（镜像内已预装 DTK）
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
+    # 从镜像 tag 推导 DTK 版本，决定 AICC 大版本: dtk26.04 -> 1.0.0, dtk26.10 -> 2.0.0
+    - export DTK_VERSION=$(echo ${BASE_COMPILE_IMAGE##*dtk:} | grep -oP '^\K[0-9]+\.[0-9]+')
+    - test -n "${DTK_VERSION}" || (echo "Cannot parse DTK version from ${BASE_COMPILE_IMAGE}" && exit 1)
+    - case "${DTK_VERSION}" in 26.04) export AICC_MAJOR=1.0.0;; 26.10) export AICC_MAJOR=2.0.0;; *) echo "No AICC major mapped for DTK ${DTK_VERSION}" && exit 1;; esac
+    # 按镜像内 DTK 版本切换 pip 源，确保 torch 等包从对应 dtk 版本的索引下载
+    - export PIP_INDEX_URL="http://10.16.1.201:9929/nightly/dtk$(echo ${DTK_VERSION} | tr -d '.')/+simple/" PIP_TRUSTED_HOST="10.16.1.201"
     # 安装 AICC
     - wget http://42.228.13.241:18000/ai_cc/Nightly/hcu_llvm_installer.sh
-    - bash hcu_llvm_installer.sh  --major 1.0.0
+    - bash hcu_llvm_installer.sh --major ${AICC_MAJOR}
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'
@@ -152,9 +161,9 @@ publish:
     # manylinux repair
     - bash scripts/hcu/repair_manylinux.sh
     # repair wheel (only manylinux wheels, plain linux_x86_64 is not uploaded)
-    - CIUpload REPAIR --dtk_version $(echo ${DTK_PKG} | grep -oP 'dtk\K[0-9]+\.[0-9]+' | tr -d '.') --torch_version ${TORCH_VERSION} --git_commit $(git rev-parse --short=6 HEAD) --outputdir output -f dist/*manylinux*.whl
+    - CIUpload REPAIR --dtk_version $(echo ${DTK_VERSION} | tr -d '.') --torch_version ${TORCH_VERSION} --git_commit $(git rev-parse --short=6 HEAD) --outputdir output -f dist/*manylinux*.whl
     # upload
-    - CIUpload NIGHTLY --password ${devpi_nightly_password} --dtk_pkg_name $(basename ${DTK_PKG}) -f output/*.whl --record
+    - CIUpload NIGHTLY --password ${devpi_nightly_password} --dtk_version $(echo ${DTK_VERSION} | tr -d '.') -f output/*.whl --record
   artifacts:
     paths:
       - output/*.whl
