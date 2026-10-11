@@ -425,15 +425,19 @@ SmallVector<int64_t> getMlsExpandedShape(Attribute layout,
 
     unsigned mlsScaledExt = dotLayout.getMlsScaledExt();
     auto elemBitTyKind = static_cast<MlsElemBitTyKind>(mlsScaledExt & 0xFu);
-    if (!expandsMlsShapeInDialectView(elemBitTyKind,
-                                      MlsFlowView::DotOperand))
-      return retShape;
-
     int rank = static_cast<int>(retShape.size());
     int kDim = dotLayout.getOpIdx() == 0 ? rank - 1 : rank - 2;
     int nonKDim = dotLayout.getOpIdx() == 0 ? rank - 2 : rank - 1;
     bool isNonKPack = ((mlsScaledExt >> 4) & 0x1u) != 0;
+    if (!isMlsBit4ElemTyKindLocal(elemBitTyKind))
+      return retShape;
+
+    // Restore the logical shape from the global packing axis first.
     retShape[isNonKPack ? nonKDim : kDim] *= 2;
+    // B4 dot encoding interprets packed bytes along K; padded types keep
+    // the logical shape. For K-packed B4 this cancels the expansion above.
+    if (elemBitTyKind == MlsElemBitTyKind::B4)
+      retShape[kDim] /= 2;
   }
 
   return retShape;

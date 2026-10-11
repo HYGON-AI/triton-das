@@ -306,18 +306,13 @@ struct DotOpMFMAConversionHelper {
 
     bool allowXF32 =
         op.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
-    bool capFP8 = isa<mlir::FloatType>(aTensorTy.getElementType()) &&
-                  aTensorTy.getElementType().getIntOrFloatBitWidth() == 8;
     StringRef intrinsicName;
-    HCUISAFeature intrinsicFeatures =
-        capFP8 ? HCUISAFeature::MAMC_FP8 : HCUISAFeature::NONE;
+    auto arch = getAMDArch(op->getParentOfType<ModuleOp>());
+    assert(arch.has_value() && "expected arch");
+    auto intrinsicFeatures = mlir::triton::HCU::deduceHCUISAFeature(*arch);
     Type elemTyD = dTensorTy.getElementType();
-    if (elemTyD.isF16())
-      intrinsicFeatures = intrinsicFeatures | HCUISAFeature::MMAC_ACC_FP16;
-    else if (elemTyD.isBF16())
-      intrinsicFeatures = intrinsicFeatures | HCUISAFeature::MMAC_ACC_BF16;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        op.getLoc(), mfmaVersion, mDim, nDim, kDim, elemTyA, elemTyB,
+        op.getLoc(), mfmaVersion, mDim, nDim, kDim, elemTyA, elemTyB, elemTyD,
         /*withScale=*/false, allowXF32,
         intrinsicFeatures);
     if (failed(maybeMfmaIntrinsic))
@@ -643,6 +638,15 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                              Value valC, Type elemTypeA, Type elemTypeB) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
+    // This overload has no scale operands. Use the corresponding native
+    // operation with the same M/N/K and operand format, preserving the layout
+    // selected earlier while emitting the unscaled ABI.
+    if (intrinsicName ==
+        ROCDL::mmac_scale_f32_16x16x64_fp4::getOperationName())
+      intrinsicName = ROCDL::mmac_f32_16x16x64_fp4::getOperationName();
+    else if (intrinsicName ==
+             ROCDL::mmac_scale_f32_16x16x32_f8f6f4::getOperationName())
+      intrinsicName = ROCDL::mmac_f32_16x16x32_f8f6f4::getOperationName();
     OperationState loweredOp(loc, intrinsicName);
     loweredOp.addTypes(resType);
 
@@ -756,8 +760,14 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto aMlsScaledExt = aEncoding.getMlsScaledExt();
     auto bMlsScaledExt = bEncoding.getMlsScaledExt();
-    auto aShapeE = aMlsScaledExt ? getScaledDotOpElemsShape(op, 0) : aTensorTy.getShape();
-    auto bShapeE = bMlsScaledExt ? getScaledDotOpElemsShape(op, 0) : bTensorTy.getShape();
+    // Own the expanded shapes: an ArrayRef to the helper's temporary vector
+    // dangles at the end of the conditional expression.
+    auto aShapeE = llvm::to_vector(aTensorTy.getShape());
+    auto bShapeE = llvm::to_vector(bTensorTy.getShape());
+    if (aMlsScaledExt)
+      aShapeE = getScaledDotOpElemsShape(op, 0);
+    if (bMlsScaledExt)
+      bShapeE = getScaledDotOpElemsShape(op, 1);
     auto aMlsElemBitTyKind = getMlsElemBitTyKind(aMlsScaledExt);
     auto bMlsElemBitTyKind = getMlsElemBitTyKind(bMlsScaledExt);
     auto aFlow = getMlsDataFlowInfo(aMlsElemBitTyKind);
@@ -791,19 +801,14 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto ctx = op.getContext();
     constexpr bool allowXF32 = false;
-    auto features =
-        llvm::isa<BFloat16Type>(elemTyD) ? HCUISAFeature::MMAC_ACC_BF16
-        : llvm::isa<Float16Type>(elemTyD) ? HCUISAFeature::MMAC_ACC_FP16
-                                          : HCUISAFeature::NONE;
-
     auto arch = getAMDArch(op->getParentOfType<ModuleOp>());
     assert(arch.has_value() && "expected arch");
+    auto features = mlir::triton::HCU::deduceHCUISAFeature(*arch);
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         op.getLoc(), mfmaVersion, mDim, nDim,
-        aElemType == ScaleDotElemType::E2M1 ? kDimOperandSize * 2
-                                            : kDimOperandSize,
+        isAElemB4Packed ? kDimOperandSize * 2 : kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
-        scaleDotElemTypeToMLIRType(ctx, bElemType),
+        scaleDotElemTypeToMLIRType(ctx, bElemType), elemTyD,
         /*withScale=*/true, allowXF32, features);
     if (failed(maybeMfmaIntrinsic))
       return op.emitError(

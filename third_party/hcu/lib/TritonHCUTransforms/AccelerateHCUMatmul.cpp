@@ -600,6 +600,7 @@ chooseMfmaInstructionWithMLS(tt::DotOpInterface dot,
     inputKDim = std::min<unsigned>(inputKDim, selectedKTile);
   maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
       dot.getLoc(), mfmaVersion, 16, 16, inputKDim, aElemType, bElemType,
+      cType.getElementType(),
       /*withScale=*/withScale, /*allowXF32=*/false, features);
   if (failed(maybeMfmaIntrinsic))
     return emitError(dot.getLoc(), withScale
@@ -668,8 +669,9 @@ chooseMfmaInstruction(Location loc, int mfmaVersion, RankedTensorType cType,
     return failure();
   FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic =
       MfmaIntrinsic::selectFor(loc, mfmaVersion, mDim, nDim, inputKSize,
-                               aElemType, bElemType, withScale, allowXF32,
-                               features);
+                               aElemType, bElemType,
+                               cType.getElementType(),
+                               withScale, allowXF32, features);
   // Fallback to FMA if the M/N dim is not supported by MFMA.
   if (failed(maybeMfmaIntrinsic)) {
     mlir::emitRemark(loc) << "Unable to select MFMA intrinsic for the request: "
@@ -732,7 +734,7 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   return chooseMfmaInstruction(dot.getLoc(), mfmaVersion, dot.getC().getType(),
                                aElemType, bElemType, inputKDim, nonKDim,
                                /*withScale=*/true, /*allowXF32=*/false,
-                               /*features=*/HCUISAFeature::NONE, *arch);
+                               /*features=*/deduceHCUISAFeature(*arch), *arch);
 }
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
                                                int mfmaVersion, int nonKDim,
@@ -888,10 +890,11 @@ Value convertAndCastTensor(PatternRewriter &rewriter, Value value,
       castedTensor =
           arith::ExtUIOp::create(rewriter, loc, castedType, convertedTensor);
   } else {
-    if (oldElemType.isF16() && newElemType.isF32())
+    if ((oldElemType.isF16() || oldElemType.isBF16()) && newElemType.isF32())
       castedTensor =
           arith::ExtFOp::create(rewriter, loc, castedType, convertedTensor);
-    else if (oldElemType.isF32() && newElemType.isF16())
+    else if (oldElemType.isF32() &&
+             (newElemType.isF16() || newElemType.isBF16()))
       castedTensor =
           arith::TruncFOp::create(rewriter, loc, castedType, convertedTensor);
     else
@@ -1042,6 +1045,8 @@ public:
       mfmaInstr = chooseMfmaInstructionWithMLS(dotOp, mfmaVersion, nonKDim,
                                                aMatInfo, bMatInfo, features,
                                                waspPlan ? &*waspPlan : nullptr);
+      if (failed(mfmaInstr))
+        return failure();
     } else {
       // If mfmaVersion == 4 and both inputs are of F8F6F4 types, we will try to
       // use the V_MFMA_*_F8F6F4 instructions since it has higher FLOPs per cycle.
@@ -1139,19 +1144,7 @@ public:
       dsReadMDot = true;
     }
 
-    Type mfmaAccType;
-    if (oldRetType.getElementType().isIntOrIndex())
-      mfmaAccType = rewriter.getIntegerType(32);
-    else if (oldRetType.getElementType().isF64())
-      mfmaAccType = rewriter.getF64Type();
-    else if (oldRetType.getElementType().isF16() &&
-             (features & HCUISAFeature::MMAC_ACC_FP16) != 0)
-      mfmaAccType = rewriter.getF16Type();
-    else if (oldRetType.getElementType().isBF16() &&
-             (features & HCUISAFeature::MMAC_ACC_BF16) != 0)
-      mfmaAccType = rewriter.getBF16Type();
-    else
-      mfmaAccType = rewriter.getF32Type();
+    Type mfmaAccType = mfmaInstr->cElementType;
     // HCU MMAC only supports 16x16 instructions (no 4x64/64x4/32x32),
     // so isTransposed is always true as the 4x64 exception never applies.
     bool isTransposed = true;
@@ -1613,6 +1606,8 @@ public:
       mfmaInstr = chooseMfmaInstructionWithMLS(dotOp, mfmaVersion, nonKDim,
                                                aMatInfo, bMatInfo, hcuFeatures,
                                                waspPlan ? &*waspPlan : nullptr);
+      if (failed(mfmaInstr))
+        return failure();
     } else {
       // Choose a suitable Scaled MFMA instruction for this scaled dot op.
       mfmaInstr = chooseMfmaInstruction(dotOp, mfmaVersion, nonKDim);
@@ -1620,6 +1615,7 @@ public:
         return rewriter.notifyMatchFailure(dotOp,
                                           "cannot choose scaled mfma intrinsic");
     }
+    Type mfmaAccType = mfmaInstr->cElementType;
     auto mDim = mfmaInstr->mDim;
     auto nDim = mfmaInstr->nDim;
     auto kDim = mfmaInstr->kDim;
@@ -1664,19 +1660,19 @@ public:
       mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
           ctx, /*verison=*/mfmaVersion, warpsPerTile, {mDim, nDim, kDim},
           /*isTransposed=*/false, ctaLayout, tilesPerWarp,
-          oldRetType.getElementType().getIntOrFloatBitWidth(),
+          mfmaAccType.getIntOrFloatBitWidth(),
           effectiveMmacLayout);
     } else {
       mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
           ctx, /*verison=*/mfmaVersion, warpsPerTile, {mDim, nDim, kDim},
           /*isTransposed=*/false, ctaLayout, {},
-          oldRetType.getElementType().getIntOrFloatBitWidth(),
+          mfmaAccType.getIntOrFloatBitWidth(),
           effectiveMmacLayout);
     }
     auto newRetType =
-        RankedTensorType::get(oldShape, oldRetType.getElementType(), mfmaEnc);
-    auto newAcc = rewriter.create<ttg::ConvertLayoutOp>(
-        dotOp.getC().getLoc(), newRetType, dotOp.getC());
+        RankedTensorType::get(oldShape, mfmaAccType, mfmaEnc);
+    auto newAcc =
+        convertAndCastTensor(rewriter, dotOp.getC(), mfmaEnc, mfmaAccType);
     auto order = ttg::getMatrixOrder(rank, /*rowMajor=*/true);
     auto standardOutDims = standardOutDimNames(ctx, rank);
     // B4: For the mfma_scale_f32_*_f8f6f4 instructions, each thread consumes 16
@@ -1816,10 +1812,12 @@ public:
         convertScaleLayout(aScale, aShape, aEncLL, /*dotOperandIdx=*/0,
                            /*rowBase=*/rowBase);
 
-    auto aScaleShape = aScale.getType().getShape();
-    // 16 cols per row. Since repeat mapping of the second half lanes,
-    // valid rows *= 2.
-    rowBase += (aScaleShape[0] / 16) * aScaleShape[1] * 2;
+    if (aScale) {
+      auto aScaleShape = aScale.getType().getShape();
+      // 16 cols per row. Since repeat mapping of the second half lanes,
+      // valid rows *= 2.
+      rowBase += (aScaleShape[0] / 16) * aScaleShape[1] * 2;
+    }
 
     auto newBScale =
         convertScaleLayout(bScale, bShape, bEncLL, /*dotOperandIdx=*/1,
@@ -1829,8 +1827,10 @@ public:
         aElemType, bElemType, dotOp.getFastMath(), dotOp.getLhsKPack(), dotOp.getRhsKPack());
     if (waspPlan)
       HCU::setWaspSplitPlan(newDot, *waspPlan);
-    rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dotOp, oldRetType,
-                                                      newDot);
+    Value dotOutput =
+        convertAndCastTensor(rewriter, newDot, oldRetType.getEncoding(),
+                             oldRetType.getElementType());
+    rewriter.replaceOp(dotOp, dotOutput);
     return success();
   }
 };

@@ -451,11 +451,19 @@ public:
 
       // 3. try to construct a mfma encoding for the matrix load
       constexpr unsigned mfmaVersion = 3;
+      // This encoding-only query uses the default accumulator format for
+      // standalone matrix loads, before a dot consumer is available.
+      Type accumulatorType = Float32Type::get(matrixOp.getContext());
+      if (elemType.isInteger(8))
+        accumulatorType = IntegerType::get(matrixOp.getContext(), 32);
+      else if (elemType.isF64())
+        accumulatorType = elemType;
       auto maybeMfmaInsn = MfmaIntrinsic::selectFor(matrixOp.getLoc(),
                                                     mfmaVersion,
                                                     16, 16,
                                                     blockK, elemType,
                                                     elemType,
+                                                    accumulatorType,
                                                     false, false,
                                                     HCUISAFeature::MAMC_FP8);
       if (failed(maybeMfmaInsn))

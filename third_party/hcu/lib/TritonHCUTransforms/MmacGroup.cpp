@@ -17,7 +17,25 @@ using MfmaKey =
     std::tuple<unsigned /*version*/, unsigned /*mDim*/, unsigned /*nDim*/,
                TypeID /*aElemType*/, TypeID /*bElemType*/, TypeID /*cElemType*/>;
 
-// Returns a key for querying an MFMA intrinsic for the given parameters.
+using MfmaMapValue =
+    std::tuple<StringRef /*symbol*/, unsigned /*kDim*/, unsigned /*kBase*/>;
+using MfmaMap = llvm::DenseMap<MfmaKey, SmallVector<MfmaMapValue, 2>>;
+
+class MfmaDatabase {
+public:
+  static const MfmaMap &get(MLIRContext *context) {
+    static MfmaDatabase db(context);
+    return db.mfmaMap;
+  }
+
+private:
+  explicit MfmaDatabase(MLIRContext *context);
+
+  MfmaMap mfmaMap;
+};
+
+
+// Returns the query key for an MFMA intrinsic.
 // Updates the passed-in A/B element type to the chosen MFMA intrinsic's A/B
 // element type if the chosen intrinsic is not a direct hit and will require
 // emulation.
@@ -26,7 +44,7 @@ using MfmaKey =
 // to query with "mismatches".
 MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
                           unsigned nDim, Type &aElemType, Type &bElemType,
-                          bool withScale, bool useTF32,
+                          Type cElemType, bool withScale, bool useTF32,
                           HCUISAFeature features) {
   Type aET = aElemType, bET = bElemType;
   Builder b(aElemType.getContext());
@@ -58,41 +76,52 @@ MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
     aElemType = bElemType = aET = bET = b.getF16Type();
   }
 
-  bool cETIsI8 = isa<IntegerType>(aET) && isa<IntegerType>(bET) &&
-                 cast<IntegerType>(aET).getWidth() == 8 &&
-                 cast<IntegerType>(bET).getWidth() == 8;
-  bool cETIsF64 = aET.isF64() && bET.isF64();
-  bool cETIsFP16 = features & HCUISAFeature::MMAC_ACC_FP16;
-  bool cETIsBF16 = features & HCUISAFeature::MMAC_ACC_BF16;
-  auto cETID = cETIsI8 ? b.getI32Type().getTypeID()
-               : cETIsF64   ? b.getF64Type().getTypeID()
-               : cETIsFP16
-                   ? b.getType<Float16Type>().getTypeID()
-               : cETIsBF16 ? b.getType<BFloat16Type>().getTypeID()
-                            : b.getType<Float32Type>().getTypeID();
-  return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID(), cETID};
+  // cElemType is the user's requested output/accumulator type. The key must
+  // use an accumulator type supported by this instruction and target instead.
+  // Keep a fixed preference order: FP32 is the default for floating-point
+  // dots; integer and FP64 dots have their own unique database entries.
+  const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
+  SmallVector<Type> supportedTypes;
+  for (Type type : {Type(b.getF32Type()), Type(b.getF16Type()),
+                    Type(b.getBF16Type()), Type(b.getI32Type()),
+                    Type(b.getF64Type())}) {
+    if ((type.isF16() && !(features & HCUISAFeature::MMAC_ACC_FP16)) ||
+        (type.isBF16() && !(features & HCUISAFeature::MMAC_ACC_BF16)))
+      continue;
+    MfmaKey key = {version, mDim, nDim, aET.getTypeID(), bET.getTypeID(),
+                   type.getTypeID()};
+    if (mfmaMap.count(key))
+      supportedTypes.push_back(type);
+  }
+
+  // One supported type: use it regardless of the request. Multiple types:
+  // retain the requested type if supported, otherwise use the first default.
+  // Only the key uses the hardware type; cElemType remains the user request.
+  Type intrinsicCType = cElemType;
+  if (!supportedTypes.empty() &&
+      (supportedTypes.size() == 1 ||
+       !llvm::is_contained(supportedTypes, cElemType)))
+    intrinsicCType = supportedTypes.front();
+
+  return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID(),
+          intrinsicCType.getTypeID()};
+}
+
+// Recover the selected hardware type in the caller's context, not the user's
+// requested type. The database stores TypeIDs and can be reused across contexts.
+Type getAccumulatorTypeForKey(const MfmaKey &key, MLIRContext *context) {
+  Builder b(context);
+  for (Type type : {Type(b.getF32Type()), Type(b.getF16Type()),
+                    Type(b.getBF16Type()), Type(b.getI32Type()),
+                    Type(b.getF64Type())})
+    if (type.getTypeID() == std::get<5>(key))
+      return type;
+  llvm_unreachable("unsupported MMAC accumulator type");
 }
 
 //===----------------------------------------------------------------------===//
 // MFMA intrinsic map
 //===----------------------------------------------------------------------===//
-
-using MfmaMapValue =
-    std::tuple<StringRef /*symbol*/, unsigned /*kDim*/, unsigned /*kBase*/>;
-using MfmaMap = llvm::DenseMap<MfmaKey, SmallVector<MfmaMapValue, 2>>;
-
-class MfmaDatabase {
-public:
-  static const MfmaMap &get(MLIRContext *context) {
-    static MfmaDatabase db(context);
-    return db.mfmaMap;
-  }
-
-private:
-  explicit MfmaDatabase(MLIRContext *context);
-
-  MfmaMap mfmaMap;
-};
 
 MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 // Macro for defining MFMA intrinsics at a specific gfx version.
@@ -392,15 +421,17 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 FailureOr<MfmaIntrinsic>
 MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
                          unsigned nDim, unsigned inputKDim, Type aElemType,
-                         Type bElemType, bool withScale, bool useTF32,
+                         Type bElemType, Type cElemType, bool withScale, bool useTF32,
                          HCUISAFeature features) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
-  MfmaKey key = composeMfmaKeyFor(loc, version, mDim, nDim, aElemType,
-                                  bElemType, withScale, useTF32, features);
+  MfmaKey key =
+      composeMfmaKeyFor(loc, version, mDim, nDim, aElemType, bElemType,
+                        cElemType, withScale, useTF32, features);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())
     return failure();
+  Type intrinsicCType = getAccumulatorTypeForKey(key, aElemType.getContext());
 
   ArrayRef<MfmaMapValue> values = it->second;
   // No MMAC_F32_K8: only expose f32 x4. NONE keeps both for layout kDim match.
@@ -412,28 +443,32 @@ MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
   // If We have more than one instrinsics, prefer those with a larger K.
   for (const auto [symbol, k, kBase] : llvm::drop_end(values)) {
     if (inputKDim >= k) {
-      return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType);
+      return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType,
+                       intrinsicCType);
     }
   }
 
   // We always have one choice--the only / smallest-K intrinsic.
   auto [symbol, k, kBase] = values.back();
-  return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType);
+  return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType,
+                       intrinsicCType);
 }
 
 FailureOr<MfmaIntrinsic> MfmaIntrinsic::get(Location loc, int version,
                                             unsigned mDim, unsigned nDim,
                                             unsigned kDim, Type aElemType,
-                                            Type bElemType, bool withScale,
+                                            Type bElemType, Type cElemType, bool withScale,
                                             bool useTF32,
                                             HCUISAFeature features) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
-  MfmaKey key = composeMfmaKeyFor(loc, version, mDim, nDim, aElemType,
-                                  bElemType, withScale, useTF32, features);
+  MfmaKey key =
+      composeMfmaKeyFor(loc, version, mDim, nDim, aElemType, bElemType,
+                        cElemType, withScale, useTF32, features);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())
     return failure();
+  Type intrinsicCType = getAccumulatorTypeForKey(key, aElemType.getContext());
 
   ArrayRef<MfmaMapValue> values = it->second;
   if (features != HCUISAFeature::NONE &&
@@ -448,6 +483,7 @@ FailureOr<MfmaIntrinsic> MfmaIntrinsic::get(Location loc, int version,
     return failure();
 
   auto [symbol, k, kBase] = *match;
-  return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType);
+  return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType,
+                       intrinsicCType);
 }
 } // namespace mlir

@@ -3,6 +3,7 @@ from enum import IntEnum
 from typing import Optional
 
 import os
+import re
 import pytest
 import torch
 
@@ -14,13 +15,16 @@ from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 
 
 def is_hcu_support_mls():
-    """与 third_party/hcu/test/mls-unit-test.py 保持一致：仅部分 HCU arch 支持 MLS。"""
+    """Keep the MLS hardware check consistent with mls-unit-test.py."""
     target = triton.runtime.driver.active.get_current_target()
     if target is None:
         return False
-    return target.backend == 'hip' and (
-        target.arch == 'gfx938' or target.arch == 'gfx946' or target.arch == 'gfx92a'
-    )
+    return target.backend == 'hip' and target.arch in ('gfx938', 'gfx946', 'gfx92a')
+
+def is_hcu_support_dot_scaled():
+    # These FP4/FP8 dot-scaled cases require gfx946, independently of MLS support.
+    return is_hcu_support_mls() and triton.runtime.driver.active.get_current_target().arch == 'gfx946'
+
 
 def is_hcu_support_mmac_layout():
     target = triton.runtime.driver.active.get_current_target()
@@ -32,6 +36,9 @@ def is_hcu_support_mmac_layout():
 
 # import os
 # os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
+
+
+regression_run = True
 
 
 class F8F6F4DataType(IntEnum):
@@ -450,8 +457,8 @@ def _validate_scale_tensor(scale, name, rows, k, scale_vec_size):
 
 
 def _skip_unsupported_mls_case(M, N, K, a_layout, b_layout, config, scale_vec_size=None, with_scale=False):
-    if not is_hcu_support_mls():
-        pytest.skip("skip: HCU MLS not supported on this target")
+    if not is_hcu_support_dot_scaled():
+        pytest.skip("skip: FP4/FP8 dot-scaled MLS requires gfx946")
 
     block_m = config['BLOCK_M']
     block_n = config['BLOCK_N']
@@ -591,7 +598,7 @@ def matmul_with_layout(a, b, a_layout='row', b_layout='row', mix_load=0b00,
             raise AssertionError("FP4 B K-pack requires BLOCK_K to be even")
 
     # 分配输出张量
-    c = torch.ones((M, N), device=a.device, dtype=output_dtype)
+    c = torch.ones((M, N), device="cpu", dtype=output_dtype).to(a.device)
 
     # 1D launch kernel
     grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']), )
@@ -904,6 +911,26 @@ def create_test_matrices_f8f6f4(M, K, N, a_layout, b_layout, lhs_data_type: F8F6
     )
 
 
+@pytest.mark.parametrize("block_m,block_n,block_k", [(32, 256, 256), (32, 256, 512), (64, 64, 64)])
+@pytest.mark.parametrize("mmac_layout_force", [1, 2])
+def test_mls_fp4_atbt(block_m, block_n, block_k, mmac_layout_force):
+    if not is_hcu_support_dot_scaled():
+        pytest.skip("FP4 MLS requires gfx946")
+    # Large ATBT tiles keep both operands packed (B4); small tiles use F4.
+    fp4 = F8F6F4DataType.FP4
+    inputs = create_test_matrices_f8f6f4(
+        block_m, block_k, block_n, 'row', 'row', fp4, fp4, device='cpu')
+    config = dict(BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+                  num_warps=4, GROUP_SIZE_M=1, mmac_layout_force=mmac_layout_force)
+    output = matmul_with_layout(
+        inputs.a.to('cuda'), inputs.b.to('cuda'), a_layout='row', b_layout='row',
+        mix_load=0, lhs_data_type=fp4, rhs_data_type=fp4, config=config,
+        output_dtype=torch.float16)
+    a_ref, b_ref = _build_reference_operands(inputs, 'row', 'row', SCALE_VEC_SIZE)
+    reference = (a_ref.float() @ b_ref.float()).to(torch.float16)
+    torch.testing.assert_close(output.cpu(), reference, atol=1e-2, rtol=0)
+
+
 #test mls_ds_mmac.f8f6f4
 @pytest.mark.parametrize("lhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
 @pytest.mark.parametrize("rhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
@@ -911,11 +938,14 @@ def create_test_matrices_f8f6f4(M, K, N, a_layout, b_layout, lhs_data_type: F8F6
 @pytest.mark.parametrize("instruction_sched_variant", ["none"])
 @pytest.mark.parametrize("optimize_epilogue", [False])
 @pytest.mark.parametrize("mix_load", [0b00])
-@pytest.mark.parametrize("boundary_check", [False])
-@pytest.mark.parametrize("layout_case", ["atbn", "anbt"])
+@pytest.mark.parametrize("boundary_check", [False, True] if regression_run else [False])
+@pytest.mark.parametrize("layout_case", ["atbn"] if regression_run else ["atbn", "anbt"])
 @pytest.mark.parametrize("with_a_scale", [False])
 @pytest.mark.parametrize("with_b_scale", [False])
 @pytest.mark.parametrize("config_list", [
+    {'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': k, 'num_warps': 4, "GROUP_SIZE_M": 1}
+    for k in [64, 128]
+] if regression_run else [
     config for config in [
         {'BLOCK_M': m, 'BLOCK_N': n, 'BLOCK_K': k, 'num_warps': w, "GROUP_SIZE_M": 1}
         for m in [16, 32, 64]
@@ -924,7 +954,7 @@ def create_test_matrices_f8f6f4(M, K, N, a_layout, b_layout, lhs_data_type: F8F6
         for w in [2, 4]
     ]
 ])
-@pytest.mark.parametrize("size_multiplier", [2, 4])
+@pytest.mark.parametrize("size_multiplier", [2] if regression_run else [2, 4])
 @pytest.mark.parametrize("mmac_layout_force", [1])
 def test_mls_f8f6f4_comprehensive(config_list, layout_case, with_a_scale, with_b_scale,
                                   size_multiplier, mix_load, optimize_epilogue,
@@ -1160,3 +1190,122 @@ torch.manual_seed(0)
 # if __name__ == "__main__":
 #     pytest.main(["-v", "-s", "mls-dot-scaled-test.py::test_mls_f8f6f4_comprehensive[1-2-config_list0-False-False-atbn-False-0-False-none-False-2-F8F6F4DataType.FP4-F8F6F4DataType.FP4]"])
 #     # pytest.main(["-v", "-s", "mls-dot-scaled-test.py"])
+
+
+@triton.jit
+def _dot_compile_check_kernel(A, B, C, Acc, OUT: tl.constexpr,
+                              SCALED: tl.constexpr,
+                              A_FP4: tl.constexpr, B_FP4: tl.constexpr, B_T: tl.constexpr):
+    m = tl.arange(0, 64)
+    n = tl.arange(0, 64)
+    acc = tl.load(Acc + m[:, None] * 64 + n[None, :])
+    if SCALED:
+        AK: tl.constexpr = 64 if A_FP4 else 128
+        BK: tl.constexpr = 64 if B_FP4 and not B_T else 128
+        BN: tl.constexpr = 32 if B_FP4 and B_T else 64
+        a = tl.matrix_load(A, shape=[64, AK], strides=[AK, 1],
+                           block_shape=[64, AK], offsets=[0, 0])
+        if B_T:
+            b = tl.matrix_load(B, shape=[BK, BN], strides=[BN, 1],
+                               block_shape=[BK, BN], offsets=[0, 0])
+        else:
+            b = tl.matrix_load(B, shape=[BK, BN], strides=[1, BK],
+                               block_shape=[BK, BN], offsets=[0, 0])
+        a_format: tl.constexpr = "e2m1" if A_FP4 else "e4m3"
+        b_format: tl.constexpr = "e2m1" if B_FP4 else "e4m3"
+        out = tl.dot_scaled(a, None, a_format, b, None, b_format, acc,
+                            rhs_k_pack=not (B_FP4 and B_T))
+    else:
+        k = tl.arange(0, 128)
+        a = tl.load(A + m[:, None] * 128 + k[None, :])
+        if B_T:
+            b = tl.load(B + k[:, None] * 64 + n[None, :])
+        else:
+            b = tl.load(B + k[:, None] + n[None, :] * 128)
+        out = tl.dot(a, b, acc=acc, out_dtype=OUT)
+    tl.store(C + m[:, None] * 64 + n[None, :], out)
+
+
+def _compile_dot_ir(a_dtype, b_dtype, out_dtype, scaled=False, a_fp4=False, b_fp4=False,
+                    layout="atbn"):
+    from triton._C.libtriton import ir
+    from triton.compiler.compiler import ASTSource, make_backend
+
+    target = triton.runtime.driver.active.get_current_target()
+    backend = make_backend(target)
+    options = backend.parse_options({"num_warps": 4})
+    context = ir.context()
+    ir.load_dialects(context)
+    backend.load_dialects(context)
+    source = ASTSource(
+        _dot_compile_check_kernel,
+        signature={"A": "*" + a_dtype.mangle(), "B": "*" + b_dtype.mangle(),
+                   "C": "*" + out_dtype.mangle(), "Acc": "*" + out_dtype.mangle()},
+        constexprs={"OUT": out_dtype, "SCALED": scaled,
+                    "A_FP4": a_fp4, "B_FP4": b_fp4, "B_T": layout == "atbt"})
+    module = source.make_ir(target, options, backend.get_codegen_implementation(options),
+                            backend.get_module_map(), context)
+    metadata = {"target": target, **options.__dict__}
+    # Check the same IR stages as normal compilation, without launching a kernel.
+    module = backend.make_ttir(module, metadata, options)
+    ttir = str(module)
+    module = backend.make_ttgir(module, metadata, options)
+    return ttir, str(module)
+
+
+@pytest.mark.parametrize("layout", ["atbn", "atbt"])
+@pytest.mark.parametrize("input_dtype, output_dtype, hardware_type", [
+    (torch.float8_e4m3fn, torch.float32, "f32"),
+    (torch.float8_e4m3fn, torch.float16, "f32"),
+    (torch.float8_e4m3fn, torch.bfloat16, "f32"),
+    (torch.float16, torch.float32, "f32"),
+    (torch.float16, torch.float16, "f16"),
+    (torch.float16, torch.bfloat16, "bf16"),
+    (torch.bfloat16, torch.float32, "f32"),
+    (torch.bfloat16, torch.float16, "f16"),
+    (torch.bfloat16, torch.bfloat16, "bf16"),
+    (torch.int8, torch.int32, "i32"),
+    (torch.float64, torch.float64, "f64"),
+])
+def test_dot_accumulator_compile(input_dtype, output_dtype, hardware_type, layout):
+    if not is_hcu_support_dot_scaled():
+        pytest.skip("compile checks require gfx946")
+    out_types = {
+        torch.float32: (tl.float32, "f32"),
+        torch.float16: (tl.float16, "f16"),
+        torch.bfloat16: (tl.bfloat16, "bf16"),
+        torch.int32: (tl.int32, "i32"),
+        torch.float64: (tl.float64, "f64"),
+    }
+    out_dtype, requested_type = out_types[output_dtype]
+    input_types = {
+        torch.float8_e4m3fn: tl.float8e4nv, torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16, torch.int8: tl.int8, torch.float64: tl.float64,
+    }
+    ttir, ttgir = _compile_dot_ir(input_types[input_dtype], input_types[input_dtype], out_dtype,
+                                 layout=layout)
+    assert re.search(r"tt\.dot .* -> tensor<64x64x" + requested_type + r"[,>]",
+                     ttir)
+    assert re.search(r"tt\.dot .* -> tensor<64x64x" + hardware_type + r", #mma",
+                     ttgir)
+    if requested_type != hardware_type:
+        assert re.search(r"arith\.extf .* to tensor<64x64x" + hardware_type, ttgir)
+        assert re.search(r"arith\.truncf .* to tensor<64x64x" + requested_type, ttgir)
+    assert re.search(r"(?:tt\.store|amdg\.buffer_store).*tensor<64x64x(?:!tt.ptr<)?"
+                     + requested_type + r"[,>]", ttgir)
+
+
+@pytest.mark.parametrize("layout", ["atbn", "atbt"])
+@pytest.mark.parametrize("a_fp4, b_fp4", [(True, True), (True, False),
+                                          (False, True), (False, False)])
+def test_mls_dot_scaled_compile(a_fp4, b_fp4, layout):
+    if not is_hcu_support_dot_scaled():
+        pytest.skip("compile checks require gfx946")
+    ttir, ttgir = _compile_dot_ir(
+        tl.uint8 if a_fp4 else tl.float8e4nv,
+        tl.uint8 if b_fp4 else tl.float8e4nv,
+        tl.float32, scaled=True, a_fp4=a_fp4, b_fp4=b_fp4, layout=layout)
+    assert "tt.matrix_load" in ttir and "tt.dot_scaled" in ttir
+    assert "amdg.matrix_load_to_local" in ttgir
+    dot_op = "tt.dot_scaled" if a_fp4 or b_fp4 else "tt.dot"
+    assert re.search(re.escape(dot_op) + r" .* -> tensor<64x64xf32, #mma", ttgir)

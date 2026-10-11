@@ -322,13 +322,6 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
                 MLS_DS_FLAGS_PACK(0, 3, 2, 0), {0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}}
       }
     },
-    // matrix_load_128x16_b4: AN/BT(transpose = 0), interleave 0,  mnk required elems tile: [128, 128, 32] -> load tile: [64, 64, 32] -> lds tile: [64, 64, 32]
-    {{128, 32, false, 8, MlsElemBitTyKind::B4, MlsInterleaveKind::InterleaveNone, 3},
-      {{128, 16, ROCDL::hcu_matrix_load_128X16_b4::getOperationName(), {0, 1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-        {64, 32, ROCDL::hcu_ds_read_matrix_format::getOperationName(),
-                MLS_DS_FLAGS_PACK(0, 3, 2, 0), {0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}}
-      }
-    },
     // matrix_load_256x16_b4: AT/BN(transpose = 1), interleave 0,  mnk required elems tile: [64, 64, 256] -> load tile: [64, 64, 128] -> lds tile: [64, 64, 128]
     {{64, 256, true, 8, MlsElemBitTyKind::B4, MlsInterleaveKind::InterleaveNone, 3},
       {{16, 256, ROCDL::hcu_matrix_load_256X16_b4::getOperationName(), {0, 1024, 2048, 3072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
@@ -336,11 +329,13 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
                 MLS_DS_FLAGS_PACK(0, 3, 2, 0), {0, 32, 4096, 4128, 2048, 2080, 6144, 6176, 0, 0, 0, 0, 0, 0, 0, 0}}
       }
     },
+    // Non-transposed packed B4 reads use N32/K64 (row:2 col:3).
+    // The K32 MLS tile cannot contain this read or a packed FP4 MMAC.
     // matrix_load_256x16_b4: AN/BT(transpose = 0), interleave 0,  mnk required elems tile: [256, 256, 64] -> load tile: [128, 128, 64] -> lds tile: [128, 128, 64]
     {{256, 64, false, 8, MlsElemBitTyKind::B4, MlsInterleaveKind::InterleaveNone, 3},
       {{256, 16, ROCDL::hcu_matrix_load_256X16_b4::getOperationName(), {0, 1024, 2048, 3072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-        {64, 32, ROCDL::hcu_ds_read_matrix_format::getOperationName(),
-                MLS_DS_FLAGS_PACK(0, 3, 2, 0), {0, 32, 4096, 4128, 2048, 2080, 6144, 6176, 0, 0, 0, 0, 0, 0, 0, 0}}
+        {32, 64, ROCDL::hcu_ds_read_matrix_format::getOperationName(),
+                MLS_DS_FLAGS_PACK(0, 2, 3, 0), {0, 16, 32, 48, 4096, 4112, 4128, 4144, 0, 0, 0, 0, 0, 0, 0, 0}}
       }
     },
   };

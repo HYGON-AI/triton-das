@@ -20,6 +20,8 @@ inline bool isF8F6F4(mlir::Type type) {
 struct MfmaIntrinsic {
   // Chooses a suitable mfma instrinsic for the given input case.s.
   // The overload without HCUISAFeature is the upstream AMD version.
+  // HCU queries take the requested accumulator type and return the selected
+  // hardware type in cElementType; features describe target capabilities.
   static FailureOr<MfmaIntrinsic> selectFor(Location loc, int version,
                                             unsigned mDim, unsigned nDim,
                                             unsigned inputKDim,
@@ -29,6 +31,7 @@ struct MfmaIntrinsic {
                                             unsigned mDim, unsigned nDim,
                                             unsigned inputKDim,
                                             Type aElemType, Type bElemType,
+                                            Type cElemType,
                                             bool withScale, bool useTF32,
                                             HCUISAFeature features);
   // Gets the mfma intrinsic based on exact match of all parameters.
@@ -39,13 +42,14 @@ struct MfmaIntrinsic {
   static FailureOr<MfmaIntrinsic> get(Location loc, int version, unsigned mDim,
                                       unsigned nDim, unsigned kDim,
                                       Type aElemType, Type bElemType,
+                                      Type cElemType,
                                       bool withScale, bool useTF32,
                                       HCUISAFeature features);
 
   MfmaIntrinsic(StringRef symbol, unsigned m, unsigned n, unsigned k,
-                unsigned kB, Type aET, Type bET)
+                unsigned kB, Type aET, Type bET, Type cET = {})
       : name(symbol), mDim(m), nDim(n), kDim(k), kBase(kB), aElementType(aET),
-        bElementType(bET) {}
+        bElementType(bET), cElementType(cET) {}
 
   MfmaIntrinsic(const MfmaIntrinsic &other) = default;
   MfmaIntrinsic(MfmaIntrinsic &&other) = default;
@@ -67,6 +71,7 @@ struct MfmaIntrinsic {
 
   Type aElementType;
   Type bElementType;
+  Type cElementType;
 };
 } // namespace mlir
 

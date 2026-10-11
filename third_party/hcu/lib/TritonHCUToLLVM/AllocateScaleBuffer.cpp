@@ -26,13 +26,15 @@ static constexpr llvm::StringLiteral kScaleBufferAttrName =
     "hcu.scale_buffer";
 
 static int64_t getScaleBufferNumRows(DotScaledOp dotOp) {
-  auto aScaleShape = dotOp.getAScale().getType().getShape();
-  auto bScaleShape = dotOp.getBScale().getType().getShape();
-
   // 16 cols per row. Since repeat mapping of the second half lanes,
   // valid rows *= 2.
-  int64_t totalRows = (aScaleShape[0] / 16) * aScaleShape[1] * 2;
-  totalRows += (bScaleShape[0] / 16) * bScaleShape[1] * 2;
+  int64_t totalRows = 0;
+  for (auto scale : {dotOp.getAScale(), dotOp.getBScale()}) {
+    if (!scale)
+      continue;
+    auto shape = scale.getType().getShape();
+    totalRows += (shape[0] / 16) * shape[1] * 2;
+  }
 
   return totalRows;
 }
