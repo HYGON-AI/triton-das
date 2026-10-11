@@ -684,6 +684,15 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     StringRef suffix = intrinsicName.drop_front(StringRef("rocdl.").size());
     std::string mnemonic = suffix.str();
+    if (intrinsicName.ends_with(".f8f6f4")) {
+      // Assembly uses concrete A/B formats, unlike the generic ROCDL op.
+      constexpr StringLiteral formats[] = {"fp8", "bf8", "fp6", "bf6", "fp4"};
+      int aFormat = getMfmaF8F6F4MatrixFormat(elemTypeA);
+      int bFormat = getMfmaF8F6F4MatrixFormat(elemTypeB);
+      assert(aFormat >= 0 && bFormat >= 0 && "unsupported scaled MMAC format");
+      mnemonic = suffix.drop_back(StringRef("f8f6f4").size()).str() +
+                 formats[aFormat].str() + "_" + formats[bFormat].str();
+    }
     std::replace(mnemonic.begin(), mnemonic.end(), '.', '_');
 
     std::string flags;
@@ -1115,6 +1124,7 @@ LogicalResult convertMXScale(triton::amdgpu::MXScaleCopyDs2BufOp op,
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(dotOpEnc.getParent());
   unsigned kWidth = dotOpEnc.getKWidth();
   auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+  int64_t scalesPerInst = mfmaLayout.getInstrShape()[2] / 32;
 
   auto elems = unpackLLElements(loc, adaptor.getScale(), rewriter);
   auto elem_size = elems.size();
@@ -1171,10 +1181,10 @@ LogicalResult convertMXScale(triton::amdgpu::MXScaleCopyDs2BufOp op,
     Value destAddr = b.gep(smemBase.getType(), rewriter.getI8Type(),
                             smemBase, destOffset);
 
-    // Mapping to scale tile, tile size = 16x2xi8
+    // A copy covers 16 rows and instrK/32 distinct scale groups.
     Value tileRow = b.udiv(mIdx, b.i32_val(16));
-    Value tileCol = b.udiv(kGlobal, b.i32_val(2));
-    Value tileId  = b.add(b.mul(tileRow, b.i32_val(K / 2)), tileCol);
+    Value tileCol = b.udiv(kGlobal, b.i32_val(scalesPerInst));
+    Value tileId = b.add(b.mul(tileRow, b.i32_val(K / scalesPerInst)), tileCol);
 
     destAddrs[elemIdx] = destAddr;
     tileIds[elemIdx] = tileId;
@@ -1219,6 +1229,10 @@ LogicalResult convertMXScale(triton::amdgpu::MXScaleCopyDs2BufOp op,
         rewriter.getI8IntegerAttr(0));
     rowVals[canonicalPos[elemIdx]] = rowSoffset;
   }
+
+  // Complete the LDS-to-scale-buffer copies and synchronize the CTA before
+  // subsequent MMACs consume the scales or the source LDS storage is reused.
+  rewriter.create<triton::gpu::LocalBarrierOp>(loc);
 
   Type structTy = LLVM::LLVMStructType::getLiteral(
       ctx, SmallVector<Type>(rowVals.size(), rewriter.getI32Type()));

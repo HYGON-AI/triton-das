@@ -1047,15 +1047,19 @@ def test_mls_f8f6f4_comprehensive(config_list, layout_case, with_a_scale, with_b
     )
 
 
+# Four waves, asymmetric M/N tiles, and multiple K32 scale groups.
+# Runtime matrices are twice these tile sizes, exercising CTA and K loops.
 SCALED_CONFIGS = [
-    {'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': 64, 'num_warps': 4, 'GROUP_SIZE_M': 1},
+    {'BLOCK_M': m, 'BLOCK_N': n, 'BLOCK_K': k, 'num_warps': 4, 'GROUP_SIZE_M': 1}
+    for m, n, k in [(64, 64, 64), (64, 128, 128),
+                    (128, 64, 128), (64, 64, 256)]
 ]
 
 
 @pytest.mark.parametrize("lhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
 @pytest.mark.parametrize("rhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
-@pytest.mark.parametrize("layout_case", ["atbn", "anbt"])
-@pytest.mark.parametrize(("with_a_scale", "with_b_scale"), [(False, False)]) #[(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("layout_case", ["atbn", "atbt", "anbt"])
+@pytest.mark.parametrize(("with_a_scale", "with_b_scale"), [(False, False), (True, True)])
 @pytest.mark.parametrize("config", SCALED_CONFIGS)
 def test_mls_f8f6f4_scaled_values(layout_case, with_a_scale, with_b_scale, config, lhs_data_type, rhs_data_type):
     a_layout, b_layout = LAYOUT_CASES[layout_case]
@@ -1193,9 +1197,10 @@ torch.manual_seed(0)
 
 
 @triton.jit
-def _dot_compile_check_kernel(A, B, C, Acc, OUT: tl.constexpr,
+def _dot_compile_check_kernel(A, B, C, Acc, AScale, BScale, OUT: tl.constexpr,
                               SCALED: tl.constexpr,
-                              A_FP4: tl.constexpr, B_FP4: tl.constexpr, B_T: tl.constexpr):
+                              A_FP4: tl.constexpr, B_FP4: tl.constexpr, B_T: tl.constexpr,
+                              WITH_SCALE: tl.constexpr):
     m = tl.arange(0, 64)
     n = tl.arange(0, 64)
     acc = tl.load(Acc + m[:, None] * 64 + n[None, :])
@@ -1213,7 +1218,14 @@ def _dot_compile_check_kernel(A, B, C, Acc, OUT: tl.constexpr,
                                block_shape=[BK, BN], offsets=[0, 0])
         a_format: tl.constexpr = "e2m1" if A_FP4 else "e4m3"
         b_format: tl.constexpr = "e2m1" if B_FP4 else "e4m3"
-        out = tl.dot_scaled(a, None, a_format, b, None, b_format, acc,
+        if WITH_SCALE:
+            groups = tl.arange(0, 4)
+            a_scale = tl.load(AScale + m[:, None] * 4 + groups[None, :])
+            b_scale = tl.load(BScale + n[:, None] * 4 + groups[None, :])
+        else:
+            a_scale = None
+            b_scale = None
+        out = tl.dot_scaled(a, a_scale, a_format, b, b_scale, b_format, acc,
                             rhs_k_pack=not (B_FP4 and B_T))
     else:
         k = tl.arange(0, 128)
@@ -1227,7 +1239,7 @@ def _dot_compile_check_kernel(A, B, C, Acc, OUT: tl.constexpr,
 
 
 def _compile_dot_ir(a_dtype, b_dtype, out_dtype, scaled=False, a_fp4=False, b_fp4=False,
-                    layout="atbn"):
+                    layout="atbn", with_scale=False, lower_to_llvm=False):
     from triton._C.libtriton import ir
     from triton.compiler.compiler import ASTSource, make_backend
 
@@ -1240,9 +1252,11 @@ def _compile_dot_ir(a_dtype, b_dtype, out_dtype, scaled=False, a_fp4=False, b_fp
     source = ASTSource(
         _dot_compile_check_kernel,
         signature={"A": "*" + a_dtype.mangle(), "B": "*" + b_dtype.mangle(),
-                   "C": "*" + out_dtype.mangle(), "Acc": "*" + out_dtype.mangle()},
+                   "C": "*" + out_dtype.mangle(), "Acc": "*" + out_dtype.mangle(),
+                   "AScale": "*u8", "BScale": "*u8"},
         constexprs={"OUT": out_dtype, "SCALED": scaled,
-                    "A_FP4": a_fp4, "B_FP4": b_fp4, "B_T": layout == "atbt"})
+                    "A_FP4": a_fp4, "B_FP4": b_fp4, "B_T": layout == "atbt",
+                    "WITH_SCALE": with_scale})
     module = source.make_ir(target, options, backend.get_codegen_implementation(options),
                             backend.get_module_map(), context)
     metadata = {"target": target, **options.__dict__}
@@ -1250,7 +1264,10 @@ def _compile_dot_ir(a_dtype, b_dtype, out_dtype, scaled=False, a_fp4=False, b_fp
     module = backend.make_ttir(module, metadata, options)
     ttir = str(module)
     module = backend.make_ttgir(module, metadata, options)
-    return ttir, str(module)
+    ttgir = str(module)
+    if lower_to_llvm:
+        return ttir, ttgir, backend.make_llir(module, metadata, options)
+    return ttir, ttgir
 
 
 @pytest.mark.parametrize("layout", ["atbn", "atbt"])
@@ -1309,3 +1326,30 @@ def test_mls_dot_scaled_compile(a_fp4, b_fp4, layout):
     assert "amdg.matrix_load_to_local" in ttgir
     dot_op = "tt.dot_scaled" if a_fp4 or b_fp4 else "tt.dot"
     assert re.search(re.escape(dot_op) + r" .* -> tensor<64x64xf32, #mma", ttgir)
+
+
+@pytest.mark.parametrize("layout", ["atbn", "atbt"])
+@pytest.mark.parametrize("a_fp4, b_fp4", [(True, True), (True, False),
+                                          (False, True), (False, False)])
+def test_mls_with_scales_lowering(a_fp4, b_fp4, layout):
+    if not is_hcu_support_dot_scaled():
+        pytest.skip("compile checks require gfx946")
+    ttir, ttgir, llir = _compile_dot_ir(
+        tl.uint8 if a_fp4 else tl.float8e4nv,
+        tl.uint8 if b_fp4 else tl.float8e4nv, tl.float32,
+        scaled=True, a_fp4=a_fp4, b_fp4=b_fp4, layout=layout,
+        with_scale=True, lower_to_llvm=True)
+    assert "tt.dot_scaled" in ttir
+    assert "amdg.mxscale_copy_ds2buf" in ttgir
+    assert "llvm.hcu.ds.scale.copy.ds2buf" in llir
+    if a_fp4 and b_fp4 and layout == "atbn":
+        instruction = "v_mmac_scale_f32_16x16x64_fp4"
+    else:
+        # This small ATBT FP4 tile uses F4 padding in LDS/registers,
+        # which consumes the K32 fp4_fp4 instruction rather than packed K64.
+        if a_fp4 and b_fp4:
+            assert "elemBitTyKind = f4" in ttgir
+        instruction = "v_mmac_scale_f32_16x16x32_" + (
+            "fp4" if a_fp4 else "fp8") + "_" + ("fp4" if b_fp4 else "fp8")
+    assert instruction in llir
+    assert "scale_a_offset:0 scale_b_offset:0" in llir

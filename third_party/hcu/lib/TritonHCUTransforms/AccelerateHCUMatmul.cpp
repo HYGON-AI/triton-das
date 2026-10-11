@@ -1780,7 +1780,7 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
       LinearLayout newLL = chooseScaledMfmaScaleLayout(
-          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile);
+          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile, kDim);
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8
       auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
@@ -1817,9 +1817,9 @@ public:
 
     if (aScale) {
       auto aScaleShape = aScale.getType().getShape();
-      // 16 cols per row. Since repeat mapping of the second half lanes,
-      // valid rows *= 2.
-      rowBase += (aScaleShape[0] / 16) * aScaleShape[1] * 2;
+      // Each ds_scale_copy writes four rows: two K32 groups for K64,
+      // or one repeated K32 group for K32 instructions.
+      rowBase += (aScaleShape[0] / 16) * aScaleShape[1] * (128 / kDim);
     }
 
     auto newBScale =

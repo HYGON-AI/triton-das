@@ -26,24 +26,24 @@ static constexpr llvm::StringLiteral kScaleBufferAttrName =
     "hcu.scale_buffer";
 
 static int64_t getScaleBufferNumRows(DotScaledOp dotOp) {
-  auto aScale = dotOp.getAScale();
-  auto bScale = dotOp.getBScale();
-
-  if (!aScale && !bScale) {
+  if (!dotOp.getAScale() && !dotOp.getBScale())
     return 0;
-  }
-
-  auto aScaleShape = aScale.getType().getShape();
-  auto bScaleShape = bScale.getType().getShape();
-
-  // 16 cols per row. Since repeat mapping of the second half lanes,
-  // valid rows *= 2.
+  constexpr int64_t kRowsPerWave64ByteCopy = 4;
+  constexpr int64_t kElementsPerScaleGroup = 32;
+  auto mma = cast<AMDMfmaEncodingAttr>(dotOp.getType().getEncoding());
+  int64_t instrK = mma.getInstrShape()[2];
+  // Each M16/N16 scale tile covers instrK / 32 scale columns, while a full
+  // Wave64 byte-mode copy writes 4 buffer rows (including repeated values).
+  // Rows per scale column = 4 / (instrK / 32) = (4 * 32) / instrK:
+  // 2 for K64 and 4 for K32. This is allocation footprint, not MMAC read size.
+  int64_t rowsPerScale =
+      (kRowsPerWave64ByteCopy * kElementsPerScaleGroup) / instrK;
   int64_t totalRows = 0;
   for (auto scale : {dotOp.getAScale(), dotOp.getBScale()}) {
     if (!scale)
       continue;
     auto shape = scale.getType().getShape();
-    totalRows += (shape[0] / 16) * shape[1] * 2;
+    totalRows += (shape[0] / 16) * shape[1] * rowsPerScale;
   }
 
   return totalRows;

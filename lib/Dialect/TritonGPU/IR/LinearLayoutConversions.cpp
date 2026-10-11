@@ -1515,7 +1515,8 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          ArrayRef<int64_t> dotOperandShape,
                                          unsigned mfmaMDim,
                                          ArrayRef<unsigned> tilesPerWarp,
-                                         ArrayRef<unsigned> warpsPerCTA) {
+                                         ArrayRef<unsigned> warpsPerCTA,
+                                         unsigned instrK) {
   StringAttr kRegister = StringAttr::get(ctx, "register");
   StringAttr kLane = StringAttr::get(ctx, "lane");
   StringAttr kWarp = StringAttr::get(ctx, "warp");
@@ -1526,24 +1527,27 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   std::vector<std::vector<int32_t>> registerBase;
   std::vector<std::vector<int32_t>> laneBase;
 
-  for (int32_t colBit = 2; colBit < kSize; colBit <<= 1)
+  // A K64 FP4 instruction consumes two K32 scales; K32 mixed/FP8
+  // instructions consume one. Scale replicas must match MMAC K replicas.
+  assert((instrK == 32 || instrK == 64) && "unsupported scaled MMAC K");
+  int32_t scalesPerInst = instrK / 32;
+  for (int32_t colBit = scalesPerInst; colBit < kSize; colBit <<= 1)
     registerBase.push_back({0, colBit});
 
   assert(mfmaMDim == 16 && "only mfmaMDim = 16 is supported");
 
-  // In scaled dot, the shapes of operands(without batch dimension) are,
-  // respectively:
-  // - A: [M, K]
-  // - B: [K, N]
-  // - aScale: [M, K / 32]
-  // - bScale: [N, K / 32]
-  //
-  // For ROCDL::mmac_scale_f32_16x16x64_fp4 with int8 input, each MMAC
-  // consumes 2 scales from aScale and 2 scales from bScale,
-  // aScale copy 16 elements alone M dimension to a scale buffer row,
-  // and each lane takes 2 * N scales from aScale alone K dimension.
-  // Similar to bScale.
-  laneBase = { {1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 1}, {0, 0}, };
+  // Put the in-warp M/N tiles in registers before distributing tiles to
+  // warps, just as the corresponding dot operand layout does. Otherwise a
+  // 2x2 tilesPerWarp layout swaps the scale rows for tiles 16 and 32.
+  unsigned nonKTiles = tilesPerWarp[dotOperandIdx];
+  for (unsigned rowBit = 16; rowBit < 16 * nonKTiles; rowBit <<= 1)
+    registerBase.push_back({static_cast<int32_t>(rowBit), 0});
+
+  // ds_scale_copy writes four 16-byte rows per wave. For K64 the lanes
+  // supply two K groups, repeated in the upper half-wave; for K32 all
+  // four lane groups supply the same K group.
+  laneBase = {{1, 0}, {2, 0}, {4, 0}, {8, 0},
+              {0, scalesPerInst == 2 ? 1 : 0}, {0, 0}};
 
   LinearLayout tileLayout({{kRegister, registerBase}, {kLane, laneBase}},
                           {outDimNames[0], outDimNames[1]});
