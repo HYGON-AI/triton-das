@@ -26,6 +26,16 @@ static constexpr llvm::StringLiteral kScaleBufferAttrName =
     "hcu.scale_buffer";
 
 static int64_t getScaleBufferNumRows(DotScaledOp dotOp) {
+  auto aScale = dotOp.getAScale();
+  auto bScale = dotOp.getBScale();
+
+  if (!aScale && !bScale) {
+    return 0;
+  }
+
+  auto aScaleShape = aScale.getType().getShape();
+  auto bScaleShape = bScale.getType().getShape();
+
   // 16 cols per row. Since repeat mapping of the second half lanes,
   // valid rows *= 2.
   int64_t totalRows = 0;
@@ -52,15 +62,17 @@ struct AllocateScaleBufferPass
       numRows += getScaleBufferNumRows(op);
     });
 
-    int64_t numSlots =
-        llvm::divideCeil(numRows, kScaleBufferSlotRows);
+    if (numRows) {
+      int64_t numSlots =
+          llvm::divideCeil(numRows, kScaleBufferSlotRows);
 
-    assert(numSlots <= 32 && "Problem size of tt.dot_scaled exceeds the maximum scale buffer limit (32 slots).");
+      assert(numSlots <= 32 && "Problem size of tt.dot_scaled exceeds the maximum scale buffer limit (32 slots).");
 
-    moduleOp->setAttr(
-        kScaleBufferAttrName,
-        IntegerAttr::get(IntegerType::get(ctx, 32),
-                         static_cast<int32_t>(numSlots)));
+      moduleOp->setAttr(
+          kScaleBufferAttrName,
+          IntegerAttr::get(IntegerType::get(ctx, 32),
+                          static_cast<int32_t>(numSlots)));
+    }
   }
 };
 

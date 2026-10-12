@@ -731,10 +731,13 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   Type bElemType = scaleDotElemTypeToMLIRType(ctx, dot.getBElemType());
   auto arch = getAMDArch(dot->getParentOfType<ModuleOp>());
   assert(arch.has_value() && "expected arch");
+  auto features = dot.getAScale() && dot.getBScale()
+                    ? deduceHCUISAFeature(*arch) | HCUISAFeature::MMAC_WITH_SCALE
+                    : deduceHCUISAFeature(*arch);
   return chooseMfmaInstruction(dot.getLoc(), mfmaVersion, dot.getC().getType(),
                                aElemType, bElemType, inputKDim, nonKDim,
                                /*withScale=*/true, /*allowXF32=*/false,
-                               /*features=*/deduceHCUISAFeature(*arch), *arch);
+                               /*features=*/features, *arch);
 }
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
                                                int mfmaVersion, int nonKDim,

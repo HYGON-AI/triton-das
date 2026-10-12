@@ -758,24 +758,15 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       llvm::report_fatal_error("NYI: mxfp6\n");
     }
 
-    auto aMlsScaledExt = aEncoding.getMlsScaledExt();
-    auto bMlsScaledExt = bEncoding.getMlsScaledExt();
-    // Own the expanded shapes: an ArrayRef to the helper's temporary vector
-    // dangles at the end of the conditional expression.
-    auto aShapeE = llvm::to_vector(aTensorTy.getShape());
-    auto bShapeE = llvm::to_vector(bTensorTy.getShape());
-    if (aMlsScaledExt)
-      aShapeE = getScaledDotOpElemsShape(op, 0);
-    if (bMlsScaledExt)
-      bShapeE = getScaledDotOpElemsShape(op, 1);
-    auto aMlsElemBitTyKind = getMlsElemBitTyKind(aMlsScaledExt);
-    auto bMlsElemBitTyKind = getMlsElemBitTyKind(bMlsScaledExt);
+    auto isMlsAB = aEncoding.getMlsScaledExt() || bEncoding.getMlsScaledExt();
+    auto aShapeE = getScaledDotOpElemsShape(op, 0);
+    auto bShapeE = getScaledDotOpElemsShape(op, 1);
+    auto aMlsElemBitTyKind = getMlsElemBitTyKind(aEncoding.getMlsScaledExt());
+    auto bMlsElemBitTyKind = getMlsElemBitTyKind(bEncoding.getMlsScaledExt());
     auto aFlow = getMlsDataFlowInfo(aMlsElemBitTyKind);
     auto bFlow = getMlsDataFlowInfo(bMlsElemBitTyKind);
-    auto isAElemB4Packed = aMlsScaledExt ? aFlow.usesPackedShape(MlsDataFlowView::DotOperand)
-                                         : aElemType == ScaleDotElemType::E2M1;
-    auto isBElemB4Packed = bMlsScaledExt ? bFlow.usesPackedShape(MlsDataFlowView::DotOperand)
-                                         : bElemType == ScaleDotElemType::E2M1;
+    auto isAElemB4Packed = isMlsAB ? aFlow.usesPackedShape(MlsDataFlowView::DotOperand) : aElemType == ScaleDotElemType::E2M1;
+    auto isBElemB4Packed = isMlsAB ? bFlow.usesPackedShape(MlsDataFlowView::DotOperand) : bElemType == ScaleDotElemType::E2M1;
 
     int aKWidth = aEncoding.getKWidth();
     int bKWidth = bEncoding.getKWidth();
@@ -801,9 +792,12 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto ctx = op.getContext();
     constexpr bool allowXF32 = false;
+
     auto arch = getAMDArch(op->getParentOfType<ModuleOp>());
     assert(arch.has_value() && "expected arch");
-    auto features = mlir::triton::HCU::deduceHCUISAFeature(*arch);
+    auto features = aScale && bScale
+        ? mlir::triton::HCU::deduceHCUISAFeature(*arch) | HCUISAFeature::MMAC_WITH_SCALE
+        : mlir::triton::HCU::deduceHCUISAFeature(*arch);
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         op.getLoc(), mfmaVersion, mDim, nDim,
         isAElemB4Packed ? kDimOperandSize * 2 : kDimOperandSize,
@@ -823,14 +817,14 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     const auto kDimInstrSize =
         mfmaLayout.getInstrShapeForScaledOperand(aKWidth,
                                                  aMlsElemBitTyKind, 0)[1];
-    auto repA = aMlsScaledExt
+    auto repA = isMlsAB
         ? mfmaLayout.getRepForScaledOperand(aShapeE, aKWidth,
                                             aMlsElemBitTyKind, 0)
-        : mfmaLayout.getRepForOperand(aShapeE, aKWidth, 0);
-    auto repB = bMlsScaledExt
+        : mfmaLayout.getRepForOperand(aTensorTy.getShape(), aKWidth, 0);
+    auto repB = isMlsAB
         ? mfmaLayout.getRepForScaledOperand(bShapeE, bKWidth,
                                             bMlsElemBitTyKind, 1)
-        : mfmaLayout.getRepForOperand(bShapeE, bKWidth, 1);
+        : mfmaLayout.getRepForOperand(bTensorTy.getShape(), bKWidth, 1);
     assert(repA[2] == repB[1]);
 
     // For fp4 scaled mfma, each thread takes 1 element from scale. Will have

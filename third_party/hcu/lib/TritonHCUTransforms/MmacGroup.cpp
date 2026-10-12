@@ -56,6 +56,10 @@ MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
     // For MXFP types, we have the same intrinsic, which uses FP4 as the key
     // in the MFMA map. So adjust to that.
     aET = bET = b.getType<Float4E2M1FNType>();
+    // Distinguish between v_mmac_f32_* and v_mmac_scale_f32_*,
+    // as v_mmac_scale_f32_* requires additional scale operands.
+    if (features & HCUISAFeature::MMAC_WITH_SCALE)
+      version = 5;
   } else if (useTF32 && aET.isF32() && bET.isF32()) {
     // In Triton we use fp32 with TF32 input precision to mean TF32 types.
     // In the MFMA map we use the proper TF32 type. So "fix" it here.
@@ -192,15 +196,25 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   TRITON_MMAC_v(3, m, n, aET, bET, cET, symbol, k, kBase),                     \
       TRITON_MMAC_v(4, m, n, aET, bET, cET, symbol, k, kBase)
 
-#define TRITON_MMAC_v4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,         \
+#define TRITON_MMAC_v_2case(v, m, n, aET, bET, cET, symbol1, k1, kBase1,       \
                              symbol2, k2, kBase2)                              \
   {                                                                            \
-    /*key=*/{4, m, n, aET.getTypeID(), bET.getTypeID(), cET.getTypeID()},      \
+    /*key=*/{v, m, n, aET.getTypeID(), bET.getTypeID(), cET.getTypeID()},      \
     /*value=*/{                                                                \
       {ROCDL::symbol1::getOperationName(), k1, kBase1},                        \
       {ROCDL::symbol2::getOperationName(), k2, kBase2},                        \
     }                                                                          \
   }
+
+#define TRITON_MMAC_v4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,         \
+                             symbol2, k2, kBase2)                              \
+  TRITON_MMAC_v_2case(4, m, n, aET, bET, cET, symbol1, k1, kBase1, symbol2,    \
+                       k2, kBase2)
+
+#define TRITON_MMAC_v5_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,         \
+                             symbol2, k2, kBase2)                              \
+  TRITON_MMAC_v_2case(5, m, n, aET, bET, cET, symbol1, k1, kBase1, symbol2,    \
+                       k2, kBase2)
 
 // f32 x8/x4 share one key; reuse v4_2case for version 4.
 #define TRITON_MMAC_v3to4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,      \
@@ -273,16 +287,16 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       TRITON_MMAC_v3to4(16, 16, ocpBf8T, ocpBf8T, f32T, mmac_f32_16x16x32_bf8_bf8, 32, 8),
 
       // fp4
-      // TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_f32_16x16x64_fp4, 64, 16,
-      //                     mmac_f32_16x16x32_f8f6f4, 32, 8),
+      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_f32_16x16x64_fp4, 64, 16,
+                          mmac_f32_16x16x32_f8f6f4, 32, 8),
       TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f16T, mmac_f16_16x16x64_fp4, 64, 16,
                           mmac_f16_16x16x32_f8f6f4, 32, 8),
       TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, bf16T, mmac_bf16_16x16x64_fp4, 64, 16,
                           mmac_bf16_16x16x32_f8f6f4, 32, 8),
 
       // scaled fp4
-      TRITON_MMAC_v4_2case(16, 16, fp4T, fp4T, f32T, mmac_scale_f32_16x16x64_fp4, 64, 16,
-                          mmac_scale_f32_16x16x32_f8f6f4, 32, 8),
+      TRITON_MMAC_v5_2case(16, 16, fp4T, fp4T, f32T, mmac_scale_f32_16x16x64_fp4, 64, 16,
+                           mmac_scale_f32_16x16x32_f8f6f4, 32, 8),
   };
 #if 0
   mfmaMap = {
