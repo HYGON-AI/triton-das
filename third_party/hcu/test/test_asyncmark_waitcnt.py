@@ -64,33 +64,88 @@ def test_mls_sync_overlap_waitcnt(tmp_path, monkeypatch, use_async_copy):
     assert "llvm.hcu.matrix.load" in llir
     assert "@llvm.amdgcn.asyncmark(" in llir
     assert "@llvm.amdgcn.wait.asyncmark(i16 0)" in llir
-    # The row scale emits one load and each column scale emits four on this
-    # layout. All nine ordinary loads must remain in flight at the MLS wait.
+    # The row scale emits one dword and each column scale emits four on this
+    # layout. All nine ordinary dwords must remain in flight at the MLS wait.
     _assert_partial_wait(asm, 9)
 
 
-def _assert_partial_wait(asm, pending_loads):
+def _assert_partial_wait(asm, pending_dwords):
+    # AICC may merge adjacent dword loads into wider transactions. Match the
+    # data volume, but derive vmcnt from the number of emitted transactions.
     checked = 0
     for wait in re.finditer(r"; wait_asyncmark\(0\)", asm):
         mark = asm.rfind("; asyncmark", 0, wait.start())
         if mark < 0:
             continue
         before = asm[mark:wait.start()]
-        loads = re.findall(r"^\s*buffer_load_dword(?:x\d+)?\s", before, re.MULTILINE)
-        if len(loads) != pending_loads:
+        loads = re.findall(r"^\s*buffer_load_dword(x\d+)?\s", before, re.MULTILINE)
+        if sum(int(width[1:]) if width else 1 for width in loads) != pending_dwords:
             continue
+        # A wait leaving at most the ordinary loads issued so far has already
+        # covered the preceding MLS transactions (and may drain ordinary loads
+        # too). Such a window cannot demonstrate overlap at this MLS wait.
+        # Larger partial counts may still consume older, unrelated loads.
+        issued = 0
+        already_waited = False
+        for event in re.finditer(
+                r"^\s*buffer_load_dword(?:x\d+)?\s|\bvmcnt\((\d+)\)",
+                before, re.MULTILINE):
+            count = event.group(1)
+            if count is None:
+                issued += 1
+            elif int(count) <= issued:
+                already_waited = True
+                break
+        if already_waited:
+            continue
+        pending_transactions = len(loads)
         read = re.search(r"^\s*ds_read\w*\s", asm[wait.end():], re.MULTILINE)
         assert read, "Missing LDS read after the MLS wait"
         after = asm[wait.end():wait.end() + read.start()]
         assert re.search(r"^\s*s_barrier\s*$", after, re.MULTILINE), after
         counts = [int(n) for n in re.findall(r"\bvmcnt\((\d+)\)", after)]
-        assert counts and all(n == pending_loads for n in counts), after
-        # An earlier full wait would make a later vmcnt(N) assertion vacuous.
-        # Partial waits may consume older, unrelated buffer loads while the
-        # loads protected by this async wait remain in flight.
-        assert not re.search(r"\bvmcnt\(0\)", before), before
+        assert counts and all(n == pending_transactions for n in counts), after
         checked += 1
-    assert checked, f"No MLS wait retained {pending_loads} ordinary buffer loads"
+    assert checked, f"No MLS wait retained {pending_dwords} ordinary load dwords"
+
+
+def _partial_wait_asm(widths):
+    loads = "\n".join(
+        f"buffer_load_dword{'x' + str(width) if width > 1 else ''} v0, v1, s[0:3], 0 offen"
+        for width in widths)
+    return (f"; asyncmark\n{loads}\n; wait_asyncmark(0)\n"
+            f"s_waitcnt vmcnt({len(widths)})\ns_barrier\nds_read_b32 v0, v1\n")
+
+
+@pytest.mark.parametrize("widths", [(1,) * 9, (1, 4, 4)], ids=["scalar", "vectorized"])
+def test_partial_wait_assertion_accepts_transaction_count(widths):
+    _assert_partial_wait(_partial_wait_asm(widths), 9)
+
+
+@pytest.mark.parametrize("widths", [(1,) * 9, (1, 4, 4)], ids=["scalar", "vectorized"])
+@pytest.mark.parametrize("invalid", [
+    "wrong_count", "drain_at_wait", "drain_before_wait", "covered_before_wait",
+    "missing_wait", "missing_barrier", "missing_lds_read",
+])
+def test_partial_wait_assertion_rejects_invalid_overlap(widths, invalid):
+    asm = _partial_wait_asm(widths)
+    partial_wait = f"s_waitcnt vmcnt({len(widths)})"
+    if invalid == "wrong_count":
+        asm = asm.replace(partial_wait, f"s_waitcnt vmcnt({len(widths) + 1})")
+    elif invalid == "drain_at_wait":
+        asm = asm.replace(partial_wait, "s_waitcnt vmcnt(0)")
+    elif invalid == "drain_before_wait":
+        asm = asm.replace("; wait_asyncmark(0)", "s_waitcnt vmcnt(0)\n; wait_asyncmark(0)")
+    elif invalid == "covered_before_wait":
+        asm = asm.replace("; wait_asyncmark(0)", f"{partial_wait}\n; wait_asyncmark(0)")
+    elif invalid == "missing_wait":
+        asm = asm.replace(partial_wait, "")
+    elif invalid == "missing_barrier":
+        asm = asm.replace("s_barrier", "")
+    elif invalid == "missing_lds_read":
+        asm = asm.replace("ds_read_b32 v0, v1", "")
+    with pytest.raises(AssertionError):
+        _assert_partial_wait(asm, 9)
 
 
 # The original MLS + three sync-load probe, with non-adjacent offsets to keep
