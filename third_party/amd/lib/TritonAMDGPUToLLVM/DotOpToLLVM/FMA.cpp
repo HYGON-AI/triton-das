@@ -14,6 +14,7 @@ struct DotIntrinsic {
   Type outElemTy;
   StringRef intrinsicName;
   SmallVector<Value> additionalArgs;
+  bool bitcastBF16OperandsToI16 = false;
 };
 
 class AMDFMAVectorMultiplier : public FMAVectorMultiplier {
@@ -40,9 +41,19 @@ class AMDFMAVectorMultiplier : public FMAVectorMultiplier {
       if ((aElemTy.isF16() || aElemTy.isBF16()) && dElemTy.isF32()) {
         chosenOp.vectorSize = 2;
         chosenOp.outElemTy = f32_ty;
-        chosenOp.intrinsicName = aElemTy.isF16() ? "llvm.amdgcn.fdot2"
-                                                 : "llvm.amdgcn.fdot2.f32.bf16";
-        chosenOp.additionalArgs = {b.false_val()};
+        if (aElemTy.isBF16() && *arch == "gfx946") {
+          // gfx946 lowers packed BF16 dot through the HCU intrinsic. Its
+          // operands carry the BF16 bit patterns as v2i16, followed by the
+          // default op_sel=0 and op_sel_hi=3 immediates.
+          chosenOp.intrinsicName = "llvm.hcu.dot2.f32.bf16";
+          chosenOp.additionalArgs = {b.i32_val(0), b.i32_val(3)};
+          chosenOp.bitcastBF16OperandsToI16 = true;
+        } else {
+          chosenOp.intrinsicName = aElemTy.isF16()
+                                       ? "llvm.amdgcn.fdot2"
+                                       : "llvm.amdgcn.fdot2.f32.bf16";
+          chosenOp.additionalArgs = {b.false_val()};
+        }
         return chosenOp;
       }
       if (aElemTy.isInteger(8) && dElemTy.isInteger(32)) {
@@ -91,6 +102,12 @@ class AMDFMAVectorMultiplier : public FMAVectorMultiplier {
   }
 
   Value generateDotInstr(Value a, Value b, Value c) {
+    if (intrinsic.bitcastBF16OperandsToI16) {
+      auto tb = TritonLLVMOpBuilder(loc, rewriter);
+      auto packedI16Ty = vec_ty(i16_ty, intrinsic.vectorSize);
+      a = tb.bitcast(a, packedI16Ty);
+      b = tb.bitcast(b, packedI16Ty);
+    }
     SmallVector<Value> args{a, b, c};
     args.append(intrinsic.additionalArgs.begin(),
                 intrinsic.additionalArgs.end());
