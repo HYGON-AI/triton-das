@@ -124,6 +124,7 @@ MLS_STORE_TEST_SHAPES = (
     (512, 256, 128),
     (256, 512, 512),
     (256, 256, 4096),
+    (480, 224, 96),
 )
 
 
@@ -375,6 +376,7 @@ def gemm_mls_store_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     WARP_SPECIALIZE: tl.constexpr,
+    BOUNDARY_CHECK: tl.constexpr,
 ):
     """MLS load A/B + MLS store C (mmac_layout_force=3 expected at launch)."""
     tl.assume(stride_am > 0)
@@ -401,31 +403,60 @@ def gemm_mls_store_kernel(
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), warp_specialize=WARP_SPECIALIZE):
         mls_offs_k = k * BLOCK_SIZE_K
-        a = tl.matrix_load(
-            a_ptr,
-            shape=[M, K],
-            strides=[stride_am, stride_ak],
-            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
-            offsets=[mls_offs_am, mls_offs_k],
-        )
-        b = tl.matrix_load(
-            b_ptr,
-            shape=[K, N],
-            strides=[stride_bk, stride_bn],
-            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
-            offsets=[mls_offs_k, mls_offs_bn],
-        )
+        if BOUNDARY_CHECK:
+            a = tl.matrix_load(
+                a_ptr,
+                shape=[M, K],
+                strides=[stride_am, stride_ak],
+                block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+                offsets=[mls_offs_am, mls_offs_k],
+                boundary_check=(0, 1),
+            )
+            b = tl.matrix_load(
+                b_ptr,
+                shape=[K, N],
+                strides=[stride_bk, stride_bn],
+                block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+                offsets=[mls_offs_k, mls_offs_bn],
+                boundary_check=(0, 1),
+            )
+        else:
+            a = tl.matrix_load(
+                a_ptr,
+                shape=[M, K],
+                strides=[stride_am, stride_ak],
+                block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+                offsets=[mls_offs_am, mls_offs_k],
+            )
+            b = tl.matrix_load(
+                b_ptr,
+                shape=[K, N],
+                strides=[stride_bk, stride_bn],
+                block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+                offsets=[mls_offs_k, mls_offs_bn],
+            )
         accumulator = tl.dot(a, b, accumulator)
     c = accumulator.to(tl.float16)
 
-    tl.matrix_store(
-        c_ptr,
-        c,
-        shape=[M, N],
-        strides=[stride_cm, stride_cn],
-        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
-        offsets=[mls_offs_am, mls_offs_bn],
-    )
+    if BOUNDARY_CHECK:
+        tl.matrix_store(
+            c_ptr,
+            c,
+            shape=[M, N],
+            strides=[stride_cm, stride_cn],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+            offsets=[mls_offs_am, mls_offs_bn],
+            boundary_check=(0, 1),
+        )
+    else:
+        tl.matrix_store(
+            c_ptr,
+            c,
+            shape=[M, N],
+            strides=[stride_cm, stride_cn],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+            offsets=[mls_offs_am, mls_offs_bn],
+        )
 
 
 def check_wasp_artifacts(compiled, config):
@@ -492,7 +523,10 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
         block_m=block_m, block_n=block_n, block_k=block_k,
     )
     if use_matrix_store:
+        boundary_check = (M % block_m != 0 or N % block_n != 0 or
+                          K % block_k != 0)
         config.update({
+            "BOUNDARY_CHECK": boundary_check,
             "wasp_partition_regs": (16, 244, 244),
             "empty_arrive_after_mmac": False,
             "enable_v_mmac_cluster": 0,
@@ -714,8 +748,8 @@ def all_cases(*, include_nowrap: bool = False) -> List[Case]:
                 ))
 
     # GEMM MLS-store epilogue: matrix_load A/B + matrix_store C, layout=3.
-    # Cover one/multiple K tiles and one/multiple M/N CTAs.  The long-K shape
-    # also carries the PMD performance guard in run_gemm.
+    # Cover one/multiple K tiles, one/multiple M/N CTAs, and an M/N/K tail.
+    # The long-K shape also carries the PMD performance guard in run_gemm.
     mls_store_modes = [
         (True, True, 4, 8, 2),
         # no-WASP MLS store is not supported yet: B operand Interleave2 is not

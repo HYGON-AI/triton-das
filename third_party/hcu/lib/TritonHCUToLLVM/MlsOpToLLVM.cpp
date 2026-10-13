@@ -841,6 +841,8 @@ struct MLSMatrixStoreFromRegOpConversion
 
     auto inVals = unpackLLElements(loc, llValue, rewriter);
     auto elemByteWidth = blockLayout.getElemBitWidth() / 8;
+    // This is reassigned after adding the warp base and read later by the
+    // boundary paths, so it must own the replacement values.
     SmallVector<Value> llBlockPos(llOffsets.begin(), llOffsets.end());
     auto ldBlkOff = loadHelper.dot64(loc, rewriter, llOffsets, llStrides);
 
