@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
@@ -837,7 +841,7 @@ struct MLSMatrixStoreFromRegOpConversion
 
     auto inVals = unpackLLElements(loc, llValue, rewriter);
     auto elemByteWidth = blockLayout.getElemBitWidth() / 8;
-    auto llBlockPos = llOffsets;
+    SmallVector<Value> llBlockPos(llOffsets.begin(), llOffsets.end());
     auto ldBlkOff = loadHelper.dot64(loc, rewriter, llOffsets, llStrides);
 
     // MFMA-C: each warp only owns shape[d]/warpsPerCTA[d] of the CTA tile.
