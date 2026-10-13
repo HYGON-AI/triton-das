@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "TritonHCU/MlsGroup.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -177,6 +181,17 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
       {{64, 16, ROCDL::hcu_matrix_load_64X16_b16::getOperationName(), {0, 1024, 2048, 3072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
         {32, 16, ROCDL::hcu_ds_read_matrix_format::getOperationName(),
                 MLS_DS_FLAGS_PACK(2, 2, 1, 0), {0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 0, 0, 0, 0, 0, 0, 0, 0}}
+      }
+    },
+
+    // AT/BN: MT16x32 interleaves the non-K dimension (N for B).
+    // Traverse [nonK32][K16]: K offsets are 0, 32, 4096, 4128 bytes;
+    // the next non-K32 group starts 2048 bytes later. Reusing the
+    // non-interleaved MT32x16 offsets would read different K/N subtiles.
+    {{64, 64, true, 16, MlsElemBitTyKind::None, MlsInterleaveKind::Interleave2, 2},
+      {{16, 64, ROCDL::hcu_matrix_load_64X16_b16::getOperationName(), {0, 1024, 2048, 3072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+        {32, 16, ROCDL::hcu_ds_read_matrix_trans_format::getOperationName(),
+                MLS_DS_FLAGS_PACK(2, 1, 2, 1), {0, 32, 4096, 4128, 2048, 2080, 6144, 6176, 0, 0, 0, 0, 0, 0, 0, 0}}
       }
     },
 

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: MIT
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -120,9 +124,9 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   }
 
   auto altKind = MlsInterleaveKind::InterleaveNone;
-  // FP16 VGPR matrix_store requires the TT B operand: its N-major MLS view
-  // can use Interleave2 so adjacent output values are packable as f32 VGPRs.
-  if (opIdx == 1 && !kMajor && feedsInterleavedFp16MatrixStore(dot))
+  // Interleave B along N for fp16 VGPR matrix-store packing. N-major B uses
+  // the non-transposed M32x16 DS read; K-major B uses MT16x32 instead.
+  if (opIdx == 1 && feedsInterleavedFp16MatrixStore(dot))
     altKind = MlsInterleaveKind::Interleave2;
 
   // Try candidate MLS elems tiles first (same strategy as
@@ -241,14 +245,21 @@ bool hasInterleavableBOperand(triton::MatrixStoreOp storeOp) {
       return;
     if (auto attr = loadOp->getAttrOfType<triton::amdgpu::MlsEncodingAttr>(
             triton::amdgpu::MlsEncodingAttr::getMnemonic())) {
-      if (attr.getOpIdx() == 1 && attr.getOrder()[0] == 1)
+      if (attr.getOpIdx() == 1 &&
+          (attr.getOrder()[0] == 1 ||
+           (attr.getVersion() >= 2 && attr.getElemBitWidth() == 16 &&
+            loadOp.getType().getElementType().isF16() &&
+            attr.getMlsTile()[0] == 64 && attr.getMlsTile()[1] == 64)))
         found = true;
       return;
     }
     auto dotAndIdx = getDotOpIdxFromMatrixLoad(loadOp);
     if (succeeded(dotAndIdx) && dotAndIdx->second == 1) {
       auto order = getMatrixLoadTensorOrder(loadOp, /*opIdx=*/1);
-      if (order[0] == 1)
+      auto type = loadOp.getType();
+      if (order[0] == 1 ||
+          (type.getElementType().isF16() && type.getShape()[0] % 64 == 0 &&
+           type.getShape()[1] % 64 == 0))
         found = true;
     }
   });
@@ -672,9 +683,9 @@ public:
           hasInterleavableBOperand(storeOp))
         return;
       storeOp.emitError()
-          << "FP16 matrix_store from MMAC layout 3 requires TT operand "
-             "layout so the B operand can use N-direction Interleave2; use "
-             "tt.store for non-TT layouts";
+          << "FP16 matrix_store from MMAC layout 3 requires a B operand "
+             "supporting N-direction Interleave2 (N-major, or FP16 K-major "
+             "with 64x64 MLS tiles); use tt.store for unsupported layouts";
       invalidFp16MatrixStore = true;
     });
     if (invalidFp16MatrixStore)
