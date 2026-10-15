@@ -481,6 +481,15 @@ def check_wasp_artifacts(compiled, config):
         assert "@llvm.hcu.s.set.vgpr.size" not in llir
 
 
+def check_mls_filter_clamps(compiled):
+    """Each MLS descriptor must clamp padding to its instruction extent."""
+    llir = compiled.asm["llir"]
+    for extent in (16, 64):
+        assert re.search(
+            rf"@llvm\.smin\.i32\(i32 [^,]+, i32 {extent}\)", llir
+        )
+
+
 def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
              load_warps: Optional[int] = None, mma_warps: Optional[int] = None,
              num_stages: int = 2, compile_only: bool = False,
@@ -551,6 +560,8 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
     if compile_only:
         compiled = kernel.warmup(*args, grid=grid, **config)
         check_wasp_artifacts(compiled, config)
+        if use_matrix_store and boundary_check:
+            check_mls_filter_clamps(compiled)
         return
     check_matrix_store_perf = (use_matrix_store and wdra and
                                load_warps == 4 and mma_warps == 8 and
@@ -559,6 +570,8 @@ def run_gemm(*, use_mls: bool, wasp: bool = True, wdra: bool = False,
     stats_before = _pmd_stats_snapshot() if check_matrix_store_perf else {}
     compiled = kernel[grid](*args, **config)
     check_wasp_artifacts(compiled, config)
+    if use_matrix_store and boundary_check:
+        check_mls_filter_clamps(compiled)
     torch.testing.assert_close(c.cpu(), torch.matmul(a, b), atol=1e-2, rtol=1e-2)
     if check_matrix_store_perf:
         cycles, frequency = _latest_pmd_measurement(stats_before)

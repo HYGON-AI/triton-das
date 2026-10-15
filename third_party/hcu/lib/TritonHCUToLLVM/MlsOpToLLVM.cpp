@@ -233,6 +233,12 @@ struct MLSMatrixLoadToLocalOpConversion
                                b.i32_val(mlInsnAttr.instrShape[0] / dim0DivFactor));
           Value posGt = b.icmp_sgt(posEnd, llShape[0]);
           paddingLenX = b.select(posGt, b.sub(posEnd, llShape[0]), b.i32_val(0));
+          // A fully out-of-bounds instruction pads its entire tile, not the
+          // distance from the tensor boundary to the end of the tile.
+          Value maxPaddingX =
+              b.i32_val(mlInsnAttr.instrShape[0] / dim0DivFactor);
+          paddingLenX = b.select(b.icmp_sgt(paddingLenX, maxPaddingX),
+                                 maxPaddingX, paddingLenX);
         }
         if (boundaryCheckInfo[1]) {
           Value ldInBlockOffCoordY = ldInBlkOffCoordMappings[iterIdx].second;
@@ -240,6 +246,10 @@ struct MLSMatrixLoadToLocalOpConversion
                               b.i32_val(mlInsnAttr.instrShape[1] / dim1DivFactor));
           Value posGt = b.icmp_sgt(posEnd, llShape[1]);
           paddingLenY = b.select(posGt, b.sub(posEnd, llShape[1]), b.i32_val(0));
+          Value maxPaddingY =
+              b.i32_val(mlInsnAttr.instrShape[1] / dim1DivFactor);
+          paddingLenY = b.select(b.icmp_sgt(paddingLenY, maxPaddingY),
+                                 maxPaddingY, paddingLenY);
         }
 
         if (isBit4) {
