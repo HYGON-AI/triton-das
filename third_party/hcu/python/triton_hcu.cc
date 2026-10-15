@@ -104,6 +104,8 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
         py::arg("lds_prefetch_distance") = 1);
   ADD_PASS_WRAPPER_0("add_pack_block_pingpong_bit8",
                      mlir::createTritonHCUPackBlockPingpongBit8);
+  ADD_PASS_OPTION_WRAPPER_1("add_scale_pipeline",
+                            mlir::createTritonHCUScalePipeline, bool);
   ADD_PASS_WRAPPER_0("add_mls_encoding_insertion",
                      mlir::createTritonHCUMlsEncodingInsertion);
   ADD_PASS_WRAPPER_0("add_mls_lowering_pass",

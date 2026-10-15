@@ -42,6 +42,13 @@
 #include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUAttrDefs.h.inc"
 
 #include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUOpInterfaces.h.inc"
+namespace mlir::triton::amdgpu {
+// Dedicated hardware scale storage used by HCU scale writes and scaled MMAC.
+struct ScaledMemory : public SideEffects::Resource::Base<ScaledMemory> {
+  StringRef getName() final { return "<ScaledMemory>"; }
+};
+} // namespace mlir::triton::amdgpu
+
 #define GET_OP_CLASSES
 #include "amd/include/Dialect/TritonAMDGPU/IR/Ops.h.inc"
 

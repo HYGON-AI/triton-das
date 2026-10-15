@@ -15,6 +15,14 @@ bool filterAsyncLocalLoadsDependencies(Operation *op1, Operation *op2) {
                      triton::amdgpu::BufferLoadToLocalOp>(op);
   };
   auto isLocalLoadWithAsyncWaitToken = [](Operation *op) {
+    // scale_write replaces a local_load and keeps its waited LDS token.
+    // This filters only LDS dependencies; Scale Buffer hazards are separate.
+    if (auto write = dyn_cast<triton::amdgpu::ScaleWriteOp>(op)) {
+      Value token = write.getToken();
+      return token &&
+             isa_and_nonnull<triton::gpu::AsyncWaitOp,
+                             triton::amdgpu::AsyncWaitOp>(token.getDefiningOp());
+    }
     auto localLoad = llvm::dyn_cast<triton::gpu::LocalLoadOp>(op);
     return localLoad && isSyncedViaAsyncWait(localLoad);
   };

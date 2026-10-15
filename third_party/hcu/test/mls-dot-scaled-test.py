@@ -99,7 +99,7 @@ def get_hip_autotune_config():
 
 
 def get_autotune_config():
-        return get_hip_autotune_config()
+    return get_hip_autotune_config()
 
 
 @triton.jit
@@ -1059,7 +1059,7 @@ SCALED_CONFIGS = [
 @pytest.mark.parametrize("lhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
 @pytest.mark.parametrize("rhs_data_type", [F8F6F4DataType.FP4, F8F6F4DataType.FP8])
 @pytest.mark.parametrize("layout_case", ["atbn", "atbt", "anbt"])
-@pytest.mark.parametrize(("with_a_scale", "with_b_scale"), [(False, False), (True, True)])
+@pytest.mark.parametrize(("with_a_scale", "with_b_scale"), [(False, False), (True, True), (True, False), (False, True)])
 @pytest.mark.parametrize("config", SCALED_CONFIGS)
 def test_mls_f8f6f4_scaled_values(layout_case, with_a_scale, with_b_scale, config, lhs_data_type, rhs_data_type):
     a_layout, b_layout = LAYOUT_CASES[layout_case]
@@ -1340,16 +1340,44 @@ def test_mls_with_scales_lowering(a_fp4, b_fp4, layout):
         scaled=True, a_fp4=a_fp4, b_fp4=b_fp4, layout=layout,
         with_scale=True, lower_to_llvm=True)
     assert "tt.dot_scaled" in ttir
-    assert "amdg.mxscale_copy_ds2buf" in ttgir
+    assert "amdg.scale_write" in ttgir
+    assert "amdg.dot_scaled" in ttgir
     assert "llvm.hcu.ds.scale.copy.ds2buf" in llir
-    if a_fp4 and b_fp4 and layout == "atbn":
-        instruction = "v_mmac_scale_f32_16x16x64_fp4"
+    assert "llvm.write_register.i32" in llir
+    intrinsic = ("llvm.hcu.mmac.scale.f32.16x16x64.fp4"
+                 if a_fp4 and b_fp4 and layout == "atbn" else "llvm.hcu.mmac.scale.f32.16x16x32.f8f6f4")
+    assert intrinsic in llir
+    assert not any("asm" in line and "mmac" in line for line in llir.splitlines())
+
+
+@pytest.mark.parametrize("num_stages", [1, 2])
+@pytest.mark.parametrize("projected_k", [0, 128, 256, 384])
+@pytest.mark.parametrize("fp4_operand", ["a", "b"])
+def test_mls_fp8_fp4_k256_mapping(num_stages, projected_k, fp4_operand):
+    """Check both 128-K halves of each 256x16 B4 write, across K iterations."""
+    if not is_hcu_support_dot_scaled():
+        pytest.skip("FP4 MLS requires gfx946")
+    generator_state = torch.random.get_rng_state()
+    try:
+        torch.manual_seed(946)
+        fp8, fp4 = F8F6F4DataType.FP8, F8F6F4DataType.FP4
+        lhs, rhs = (fp4, fp8) if fp4_operand == "a" else (fp8, fp4)
+        inputs = create_test_matrices_f8f6f4(64, 512, 64, 'row', 'col', lhs, rhs, device='cpu')
+    finally:
+        torch.random.set_rng_state(generator_state)
+    # Project individual K coordinates instead of mixing them in a sum.
+    # A and B MLS have different T flags and must both retain their mapping.
+    projection = torch.zeros((64, 512), dtype=torch.float32)
+    projection[torch.arange(64), projected_k + torch.arange(64)] = 1
+    projection = projection.to(torch.float8_e4m3fn)
+    if fp4_operand == "a":
+        a, b = inputs.a, projection  # B storage is [N,K].
+        expected = _decode_operand(inputs.unpack_a)[:, projected_k:projected_k + 64]
     else:
-        # This small ATBT FP4 tile uses F4 padding in LDS/registers,
-        # which consumes the K32 fp4_fp4 instruction rather than packed K64.
-        if a_fp4 and b_fp4:
-            assert "elemBitTyKind = f4" in ttgir
-        instruction = "v_mmac_scale_f32_16x16x32_" + (
-            "fp4" if a_fp4 else "fp8") + "_" + ("fp4" if b_fp4 else "fp8")
-    assert instruction in llir
-    assert "scale_a_offset:0 scale_b_offset:0" in llir
+        a, b = projection, inputs.b
+        expected = _decode_operand(inputs.unpack_b).t()[projected_k:projected_k + 64]
+    result = matmul_with_layout(
+        a.cuda(), b.cuda(), a_layout='row', b_layout='col', mix_load=0, lhs_data_type=lhs, rhs_data_type=rhs,
+        config=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=256, num_warps=4, num_stages=num_stages,
+                    GROUP_SIZE_M=1), output_dtype=torch.float32)
+    torch.testing.assert_close(result.cpu(), expected, atol=0, rtol=0)

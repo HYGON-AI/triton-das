@@ -54,6 +54,7 @@ class TT_AMDGPU_Op<string mnemonic, list<Trait> traits = []> :
 //
 def GlobalMemory : Resource<"::mlir::triton::GlobalMemory">;
 def SharedMemory : Resource<"::mlir::triton::gpu::SharedMemory">;
+def ScaledMemory : Resource<"::mlir::triton::amdgpu::ScaledMemory">; // HCU Extend
 
 //===----------------------------------------------------------------------===//
 // ExtractSliceOp
@@ -825,43 +826,104 @@ def UTCWarmupConsumeOp : TT_AMDGPU_Op<"utc_warmup_consume"> {
   let assemblyFormat = "$value attr-dict `:` type($value)";
 }
 
-def MXScaleCopyDs2BufOp : TT_AMDGPU_Op<"mxscale_copy_ds2buf", []> {
-  let summary = "Copy scales from LDS to scale buffer.";
+def DotScaledOp : TT_AMDGPU_Op<"dot_scaled", [
+    // Effects are attached to the scale operands below.
+    MemoryEffects<[]>,
+    DeclareOpInterfaceMethods<DotOpInterface,
+                              ["verifyDims", "verifyOutputDims"]>,
+    TypesMatchWith<"result's type matches accumulator's type",
+                   "d", "c", "$_self">
+  ]> {
+  let summary = "Scaled dot consuming E8M0 scales from scale memory";
 
   let description = [{
-    `amdgpu.mxscale_copy_ds2buf` takes an [M, N] tile, where M is a multiple of
-    16 and N is a multiple of 2 (matching the 16x16x64 scaled-MFMA instruction),
-    and copies it into the scale buffer.
+    A backend scaled dot consuming Scale Buffer descriptors produced by
+    amdg.scale_write. Each descriptor carries the complete [M,K/32] or
+    [N,K/32] shape and its storage layout. Late allocation assigns the
+    producer's base row; LLVM conversion forwards that reference through SSA.
+    Lowering derives per-wave addresses and per-instruction offsets from the
+    descriptor and MFMA layout. The op retains whole-matrix semantics:
 
-    The op's result is passed as a_scale/b_scale to `tt.dot_scaled`, which reads
-    them back from the scale buffer to compute:
+      D = scale(A, A_scale) @ scale(B, B_scale) + C
 
-      D = (A * a_scale) @ (B * b_scale) + C
+    Each E8M0 scale applies to 32 logical K elements. FP4 pairs occupy one
+    i8 element; lhs_k_pack/rhs_k_pack identify the packed dimension, as for
+    tt.dot_scaled. Descriptor shapes use logical, unpacked M/N/K dimensions.
+    Both scale descriptors are required. An absent scale in tt.dot_scaled
+    is materialized as unit E8M0 values before creating this op.
 
-    Each group of 16 elements along the M dimension is copied into a single
-    scale buffer row. The op's return value, rows, holds these row indices as
-    int32 (the scale buffer supports up to 512 rows). The output shape matches
-    the input shape.
-
-    `rowBase` is provided by the caller (AccelerateHCUMatmul) to guarantee that
-    the B-scale rows never overlap the A-scale rows in the buffer.
+    Reading Scale Buffer is a memory effect attached to each scale operand.
+    The descriptor dependency identifies storage; completion and cross-wave
+    publication of preceding scale writes require separate synchronization.
   }];
 
   let arguments = (ins
-    TTG_MemDescType:$smem,
-    TT_Tensor:$scale,
-    I32Attr:$opIdx,
-    I32Attr:$rowBase, // scale buffer row base
-    DefaultValuedAttr<I32Attr, "0">:$opCtrl0
+    // Inputs are floats if a type is available; otherwise FP4 values are
+    // packed in pairs in an I8Tensor.
+    RankedTensorOf<[TT_Float, I8]>:$a,
+    RankedTensorOf<[TT_Float, I8]>:$b,
+    TT_FloatTensor:$c,
+    Arg<TTG_MemDescType, "A scale storage", [MemRead<ScaledMemory>]>:$a_scale,
+    Arg<TTG_MemDescType, "B scale storage", [MemRead<ScaledMemory>]>:$b_scale,
+    TT_ScaleDotElemTypeAttr:$a_elem_type,
+    TT_ScaleDotElemTypeAttr:$b_elem_type,
+    BoolAttr:$fastMath,
+    DefaultValuedAttr<BoolAttr, "true">:$lhs_k_pack,
+    DefaultValuedAttr<BoolAttr, "true">:$rhs_k_pack
   );
 
-  let results = (outs TT_Tensor:$rows);
+  let results = (outs TT_FloatTensor:$d);
 
   let assemblyFormat = [{
-    $smem `,` $scale `opIdx` `=` $opIdx `rowBase` `=` $rowBase (`opCtrl0` `=` $opCtrl0^)?
-    attr-dict `:` type($scale) `,` qualified(type($smem)) `->` type($rows)
+    $a `scale` $a_scale `,` $b `scale` $b_scale `,` $c
+    `lhs` `=` $a_elem_type `rhs` `=` $b_elem_type attr-dict
+    `:` type($a) `,` qualified(type($a_scale)) `*` type($b) `,` qualified(type($b_scale)) `->` type($d)
   }];
+  let hasVerifier = 1;
+}
 
+// Define a Scale Buffer descriptor and write its LDS source into that storage.
+// Layout belongs to the result type; late allocation assigns row_base here.
+def ScaleWriteOp : TT_AMDGPU_Op<"scale_write", [
+    AttrSizedOperandSegments,
+    // Effects are attached to the source and result below.
+    MemoryEffects<[]>
+  ]> {
+  let summary = "Write an LDS E8M0 tile into scale memory";
+  let description = [{
+    Writes a rank-two i8 E8M0 tile from Shared/LDS into Scale Buffer storage.
+    The source and result have the same logical [R,S] shape. The result's
+    ScaleEncoding defines the destination mapping; source LDS layout and
+    copy-width compatibility are checked before emitting ds2buf instructions.
+
+    pred optionally guards the copy and must be wave-uniform. When false,
+    no copy is issued and this op does not establish valid scale values for
+    consumption on that path. token preserves the source's existing async
+    wait dependency, as for ttg.local_load; it does not insert a wait itself.
+
+    mode = 0/1/2 selects 1/2/4 bytes per lane and must match the instTile in
+    the result encoding. Optional row_base is assigned by AllocateScaleBuffer,
+    in Scale Buffer rows with 8-row alignment, and is required by LLVM lowering.
+
+    The result is a storage descriptor, not a tensor of scale bytes or a
+    completion token. It may be unused during rewriting; otherwise it has
+    one direct amdg.dot_scaled scale-operand use. ds2buf completion and
+    cross-wave publication are handled by subsequent synchronization analysis.
+  }];
+  let arguments = (ins
+    Arg<TTG_MemDescType, "LDS source", [MemRead<SharedMemory>]>:$src,
+    Optional<I1>:$pred,
+    Optional<TTG_AsyncToken>:$token,
+    I32Attr:$mode,
+    OptionalAttr<I32Attr>:$row_base
+  );
+  let results = (outs
+    Arg<TTG_MemDescType, "Scale Buffer storage", [MemWrite<ScaledMemory>]>:$result
+  );
+  let assemblyFormat = [{
+    $src (`pred` $pred^)? (`token` $token^)? attr-dict `:`
+    qualified(type($src)) `->` qualified(type($result))
+  }];
   let hasVerifier = 1;
 }
 

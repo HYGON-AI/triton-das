@@ -732,6 +732,9 @@ class HIPBackend(BaseBackend):
         if options.schedule_hint.lower() != "none":
             for hint in options.schedule_hint.split(","):
                 amd.passes.ttgpuir.insert_instruction_sched_hints(pm, hint)
+        if not metadata.get("wasp_enabled", False):
+            hcu.passes.ttgpuir.add_scale_pipeline(pm, use_async_copy)
+            passes.common.add_canonicalizer(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)
 
         hcu.passes.ttgpuir.add_mls_lowering_pass(pm)
@@ -761,6 +764,11 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
             # Offset both consumers; the pass is a no-op for single-consumer topologies.
             hcu.passes.ttgpuir.add_consumer_pingpong(pm)
+            # Keep numeric scale operands through partitioning. Create physical
+            # Scale Buffer writes only in their final consumer partitions.
+            hcu.passes.ttgpuir.add_scale_pipeline(pm, use_async_copy)
+            passes.common.add_canonicalizer(pm)
+            passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)
 
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
@@ -815,9 +823,15 @@ class HIPBackend(BaseBackend):
             # Gluon already supplies the partitions. HCU counts only their
             # waves (no separate default group), and assigns start IDs/quotas.
             pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
             hcu.passes.ttgpuir.add_optimize_partition_warps(
                 pm, metadata["wasp_wdra"])
             pm.run(mod, 'gluon_wasp_partitions')
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        hcu.passes.ttgpuir.add_scale_pipeline(pm, options.use_async_copy)
+        passes.common.add_canonicalizer(pm)
+        pm.run(mod, 'gluon_scale_pipeline')
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
@@ -973,6 +987,8 @@ class HIPBackend(BaseBackend):
             )
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
+        # Forward the Scale Buffer reservation required by the LLVM backend/driver,
+        # in slots (16 rows / 256 B each), to the LLVM kernel attribute.
         scale_buffer_size = src.get_int_attr("hcu.scale_buffer")
         if scale_buffer_size is not None:
             fns[0].add_fn_attr("hcu-scale-buffer-size", str(scale_buffer_size))

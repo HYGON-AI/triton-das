@@ -750,6 +750,11 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   }
   Type aElemType = scaleDotElemTypeToMLIRType(ctx, dot.getAElemType());
   Type bElemType = scaleDotElemTypeToMLIRType(ctx, dot.getBElemType());
+  // Only FP4 x FP4 can use K64. The shared F8F6F4 database key also
+  // contains that entry, so bound the search for all other format pairs.
+  if (dot.getAElemType() != ScaleDotElemType::E2M1 ||
+      dot.getBElemType() != ScaleDotElemType::E2M1)
+    inputKDim = std::min<int64_t>(inputKDim, 32);
   auto arch = getAMDArch(dot->getParentOfType<ModuleOp>());
   assert(arch.has_value() && "expected arch");
   auto features = dot.getAScale() && dot.getBScale()
@@ -1547,20 +1552,24 @@ SmallVector<unsigned, 2> getTilesPerWarp(Value aScale, Value bScale) {
   }
   return {1, 1};
 }
+
 class ScaledBlockedToScaledMFMAF8F6F4 final
     : public OpRewritePattern<triton::DotScaledOp> {
   int mfmaVersion;
   int nonKDim;
   MmacLayout mmacLayout;
   HCUISAFeature hcuFeatures;
+  bool &unsupportedPacking;
+
 public:
   ScaledBlockedToScaledMFMAF8F6F4(MLIRContext *context, int mfmaVersion,
                                   int nonKDim, MmacLayout mmacLayout,
                                   HCUISAFeature hcuFeatures,
+                                  bool &unsupportedPacking,
                                   PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
-        nonKDim(nonKDim), mmacLayout(mmacLayout),
-        hcuFeatures(hcuFeatures) {}
+        nonKDim(nonKDim), mmacLayout(mmacLayout), hcuFeatures(hcuFeatures),
+        unsupportedPacking(unsupportedPacking) {}
   LogicalResult matchAndRewrite(triton::DotScaledOp dotOp,
                                 PatternRewriter &rewriter) const override {
     using TensorValue = TypedValue<RankedTensorType>;
@@ -1613,6 +1622,17 @@ public:
     //   return rewriter.notifyMatchFailure(dotOp,
     //                                      "num_warps==1 is not supported");
     auto [aMatInfo, bMatInfo] = getDotOperandMatrixLoadInfo(dotOp, hcuFeatures);
+    // Plain-load M/N-packed FP4 needs a packed-transpose LDS lowering, which
+    // this target does not provide. Do not construct an unlowerable operation.
+    if ((hcuFeatures & HCUISAFeature::MMAC_FP6FP4) &&
+        ((!aMatInfo && !dotOp.getLhsKPack()) ||
+         (!bMatInfo && !dotOp.getRhsKPack()))) {
+      unsupportedPacking = true;
+      return dotOp.emitOpError(
+          "M/N-packed FP4 requires a supported MLS operand; "
+          "plain-load packed-transpose lowering is unavailable");
+    }
+
     bool useMatrixLoad = aMatInfo.has_value() || bMatInfo.has_value();
     auto waspPlan = HCU::getWaspSplitPlan(dotOp);
     unsigned aScaledExt = aMatInfo.has_value() ? MLS_GEN_SCALED_EXT(aMatInfo.value().mlsElemBitTyKind, aMatInfo.value().isNonKPack) : 0;
@@ -1635,7 +1655,6 @@ public:
     auto mDim = mfmaInstr->mDim;
     auto nDim = mfmaInstr->nDim;
     auto kDim = mfmaInstr->kDim;
-    auto kBase = mfmaInstr->kBase;
     assert(mDim == nDim);
     auto warpsPerTile =
         warpsPerTileMFMA(dotOp, oldShape, numWarps, {mDim, nDim});
@@ -1686,174 +1705,58 @@ public:
         RankedTensorType::get(oldShape, mfmaAccType, mfmaEnc);
     auto newAcc =
         convertAndCastTensor(rewriter, dotOp.getC(), mfmaEnc, mfmaAccType);
-    auto order = ttg::getMatrixOrder(rank, /*rowMajor=*/true);
-    auto standardOutDims = standardOutDimNames(ctx, rank);
-    // B4: For the mfma_scale_f32_*_f8f6f4 instructions, each thread consumes 16
-    // elements. But since two fp4 elements are packed into one int8, the kWidth is 8 for fp4.
-    // F8F6F4: For the mfma_scale_f32_*_f8f6f4 instructions, each thread consumes 8
-    // elements which is padding from fp4, so the kWidth is 8 for fp4 also.
-    const unsigned kWidth = kBase;
-    assert(kWidth == 8 || kWidth == 16);
-    using basisT = std::vector<std::vector<int32_t>>;
-    auto aShape = a.getType().getShape();
-    auto bShape = b.getType().getShape();
-    auto aEncLL = LinearLayout::empty();
-    auto bEncLL = LinearLayout::empty();
     auto convertInputLayout = [&](TensorValue v,
                                   unsigned opIdx) -> TensorValue {
       auto vType = v.getType();
-      // auto newEnc =
-      //     DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, kWidth/2);
-      // A plain K-packed E2M1 tensor stores two logical values per byte.
-      // Derive its storage width from the instruction's logical operand
-      // width, rather than tying the conversion to a K32/kWidth4 case.
-      bool packedFp4 =
-          (opIdx == 0 ? aElemType : bElemType) == ScaleDotElemType::E2M1;
-      bool kPacked = opIdx == 0 ? dotOp.getLhsKPack() : dotOp.getRhsKPack();
-      bool plainNativeFp4 = bothScalesAbsent && !useMatrixLoad &&
-                            packedFp4 && kPacked;
-      constexpr unsigned fp4ValuesPerByte = 2;
-      unsigned storageKWidth = plainNativeFp4 ? kBase / fp4ValuesPerByte : 8;
+      bool matrixLoad =
+          opIdx == 0 ? aMatInfo.has_value() : bMatInfo.has_value();
+      unsigned scaledExt =
+          matrixLoad ? (opIdx == 0 ? aScaledExt : bScaledExt) : 0;
+      // Plain loads keep FP4 packed until MMAC lowering; MLS already supplies
+      // the register representation selected by its data-flow kind.
+      auto elemType = opIdx == 0 ? aElemType : bElemType;
+      unsigned kWidth = matrixLoad ? 8 : mfmaInstr->kBase;
+      if (!matrixLoad && elemType == ScaleDotElemType::E2M1)
+        kWidth /= 2;
       auto newEnc =
-          DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, storageKWidth);
-      auto newEncA = DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, 8, aScaledExt);
-      auto newEncB = DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, 8, bScaledExt);
-      if (aMatInfo.has_value() && opIdx == 0) {
-        aEncLL *= newEncA.toLinearLayout(aShape);
+          DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, kWidth, scaledExt);
+      bool kPacked = opIdx == 0 ? dotOp.getLhsKPack() : dotOp.getRhsKPack();
+      if (matrixLoad || kPacked) {
         auto newVType = RankedTensorType::get(vType.getShape(),
-        vType.getElementType(), newEncA);
+                                              vType.getElementType(), newEnc);
         return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
-      } else if (bMatInfo.has_value() && opIdx == 1) {
-        bEncLL *= newEncB.toLinearLayout(bShape);
-        auto newVType = RankedTensorType::get(vType.getShape(),
-        vType.getElementType(), newEncB);
-        return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
-      } else {
-        bool kPacked = opIdx == 0 ? dotOp.getLhsKPack() : dotOp.getRhsKPack();
-        if (kPacked == false) {
-          // This is FP4 with M/N packing. Create local alloc + local load here
-          // so we have control of the shared layout
-          // A, M packed: tensor<16x64xi8> --> 32x32
-          // B, N packed: tensor<64x16xi8> --> 32x32
-          SmallVector<int64_t> newShape(vType.getShape());
-          newShape[opIdx == 0 ? 0 : 1] = newShape[opIdx == 0 ? 0 : 1] * 2;
-          newShape[opIdx == 0 ? 1 : 0] = newShape[opIdx == 0 ? 1 : 0] / 2;
-          auto newVType =
-              RankedTensorType::get(newShape, vType.getElementType(), newEnc);
-          OpBuilder builder(dotOp);
-          auto srcEncoding = vType.getEncoding();
-          auto originalOrder = triton::gpu::getOrderForMemory(vType);
-          SmallVector<unsigned> newOrder = originalOrder;
-          if (opIdx == 1) {
-            newOrder = {1, 0};
-          } else {
-            newOrder = {0, 1};
-          }
-          auto sharedMemorySpace =
-              triton::gpu::SharedMemorySpaceAttr::get(vType.getContext());
-          auto tmpType = triton::gpu::MemDescType::get(
-              vType.getShape(), vType.getElementType(),
-              triton::gpu::SwizzledSharedEncodingAttr::get(
-                  v.getContext(), newEnc, vType.getShape(), newOrder,
-                  triton::gpu::getCTALayout(srcEncoding), vType.getElementType()),
-              sharedMemorySpace);
-          auto tmp = builder.create<triton::gpu::LocalAllocOp>(dotOp.getLoc(),
-                                                               tmpType, v);
-          auto newConvert =
-              builder.create<triton::amdgpu::LocalLoadPackedTransposedOp>(
-                  dotOp.getLoc(), newVType, tmp);
-          if (opIdx == 0) {
-            aShape = newConvert.getType().getShape();
-            aEncLL *= newEnc.toLinearLayout(aShape);
-          } else {
-            bShape = newConvert.getType().getShape();
-            bEncLL *= newEnc.toLinearLayout(bShape);
-          }
-          return newConvert;
-        } else {
-          if (opIdx == 0)
-            aEncLL *= newEnc.toLinearLayout(aShape);
-          else
-            bEncLL *= newEnc.toLinearLayout(bShape);
-          auto newVType = RankedTensorType::get(vType.getShape(),
-          vType.getElementType(), newEnc);
-          return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
-        }
       }
+
+      // Convert M/N-packed FP4 through LDS into K-packed dot operands.
+      SmallVector<int64_t> newShape(vType.getShape());
+      newShape[opIdx == 0 ? 0 : 1] *= 2;
+      newShape[opIdx == 0 ? 1 : 0] /= 2;
+      auto newVType =
+          RankedTensorType::get(newShape, vType.getElementType(), newEnc);
+      SmallVector<unsigned> sharedOrder = opIdx == 0
+                                              ? SmallVector<unsigned>{0, 1}
+                                              : SmallVector<unsigned>{1, 0};
+      auto shared = ttg::SwizzledSharedEncodingAttr::get(
+          ctx, newEnc, vType.getShape(), sharedOrder,
+          ttg::getCTALayout(vType.getEncoding()), vType.getElementType());
+      auto tmpType =
+          ttg::MemDescType::get(vType.getShape(), vType.getElementType(),
+                                shared, ttg::SharedMemorySpaceAttr::get(ctx));
+      auto tmp = rewriter.create<ttg::LocalAllocOp>(dotOp.getLoc(), tmpType, v);
+      return rewriter.create<amdgpu::LocalLoadPackedTransposedOp>(
+          dotOp.getLoc(), newVType, tmp);
     };
     a = convertInputLayout(a, 0);
     b = convertInputLayout(b, 1);
-    StringAttr kWarp = StringAttr::get(ctx, "warp");
-    auto convertScaleLayout = [&](TensorValue scale,
-                                  llvm::ArrayRef<int64_t> valShape,
-                                  LinearLayout dotLL, int idx,
-                                  int32_t rowBase) -> Value {
-      if (bothScalesAbsent)
-        return Value();
-      SmallVector<int64_t> shape;
-      if (!scale) {
-        int64_t nonKDim = idx == 0 ? valShape[0] : valShape[1];
-        int64_t k = idx == 0 ? valShape[1] : valShape[0];
-        ScaleDotElemType &elemType = idx == 0 ? aElemType : bElemType;
-        int packSize = elemType == ScaleDotElemType::E2M1 ? 2 : 1;
-        shape = {nonKDim, k * packSize / 32};
-      } else {
-        shape = llvm::to_vector(scale.getType().getShape());
-      }
-      LinearLayout newLL = chooseScaledMfmaScaleLayout(
-          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile, kDim);
-      Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
-      // Scale's data type is always i8
-      auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
-      if (!scale) {
-        // 0x7F is 1.0 in E8M0
-        return rewriter.create<arith::ConstantOp>(
-            dotOp->getLoc(), newScaleType,
-            DenseElementsAttr::get(newScaleType, llvm::APInt(8, 0x7F)));
-      }
-
-      auto newScale = rewriter.create<ttg::ConvertLayoutOp>(scale.getLoc(),
-                                                          newScaleType, scale);
-      Attribute sharedEnc = ttg::SwizzledSharedEncodingAttr::get(
-          ctx, /*vec=*/1, /*perPhase=*/1, /*maxPhase=*/1,
-          /*order=*/{1, 0}, ctaLayout);
-      auto memDescType = ttg::MemDescType::get(
-          shape, i8_ty, sharedEnc, ttg::SharedMemorySpaceAttr::get(ctx),
-          /*mutableMemory=*/true);
-
-      auto localAlloc = rewriter.create<ttg::LocalAllocOp>(
-          scale.getLoc(), memDescType, /*src=*/newScale.getResult());
-
-      auto resType = RankedTensorType::get(shape, i32_ty, newScaleEncoding);
-      return rewriter.create<amdgpu::MXScaleCopyDs2BufOp>(
-          scale.getLoc(), resType, /*smem=*/localAlloc.getResult(),
-          /*scale=*/newScale, /*opIdx=*/idx, /*rowBase=*/rowBase,
-          /*opCtrl0=*/0);
-    };
-
-    int rowBase = 0;
-    auto newAScale =
-        convertScaleLayout(aScale, aShape, aEncLL, /*dotOperandIdx=*/0,
-                           /*rowBase=*/rowBase);
-
-    if (aScale) {
-      auto aScaleShape = aScale.getType().getShape();
-      // Each ds_scale_copy writes four rows: two K32 groups for K64,
-      // or one repeated K32 group for K32 instructions.
-      rowBase += (aScaleShape[0] / 16) * aScaleShape[1] * (128 / kDim);
-    }
-
-    auto newBScale =
-        convertScaleLayout(bScale, bShape, bEncLL, /*dotOperandIdx=*/1,
-                           /*rowBase=*/rowBase);
     auto newDot = rewriter.create<triton::DotScaledOp>(
-        dotOp.getLoc(), newRetType, a, b, newAcc, newAScale, newBScale,
-        aElemType, bElemType, dotOp.getFastMath(), dotOp.getLhsKPack(), dotOp.getRhsKPack());
+        dotOp.getLoc(), newRetType, a, b, newAcc, aScale, bScale, aElemType,
+        bElemType, dotOp.getFastMath(), dotOp.getLhsKPack(),
+        dotOp.getRhsKPack());
     if (waspPlan)
       HCU::setWaspSplitPlan(newDot, *waspPlan);
-    Value dotOutput =
-        convertAndCastTensor(rewriter, newDot, oldRetType.getEncoding(),
-                             oldRetType.getElementType());
+    Value dotOutput = convertAndCastTensor(rewriter, newDot->getResult(0),
+                                           oldRetType.getEncoding(),
+                                           oldRetType.getElementType());
     rewriter.replaceOp(dotOp, dotOutput);
     return success();
   }
@@ -2187,6 +2090,7 @@ struct TritonHCUAccelerateMatmulPass
     ModuleOp m = getOperation();
     RewritePatternSet mfmaPatterns(context);
     bool invalidLayout = false;
+    bool unsupportedPacking = false;
     auto features = mlir::triton::HCU::deduceHCUISAFeature(archGenerationName);
     bool supportsMmacLayout = (features & HCUISAFeature::MMAC_LAYOUT) != 0;
     auto mmacLayout = mmacLayoutForce != -1 ? *ttg::symbolizeMmacLayout(mmacLayoutForce) : MmacLayout::MFMA;
@@ -2203,7 +2107,7 @@ struct TritonHCUAccelerateMatmulPass
           (features & HCUISAFeature::MMAC_FP6FP4)) {
         mfmaPatterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
             context, /*mfmaVersion=*/4, matrixInstructionSize, mmacLayout,
-            features,
+            features, unsupportedPacking,
             /*benefit=*/10);
       }
       mfmaPatterns.add<::BlockedToMFMA>(
@@ -2224,7 +2128,7 @@ struct TritonHCUAccelerateMatmulPass
       break;
     }
     if (applyPatternsGreedily(m, std::move(mfmaPatterns)).failed() ||
-        invalidLayout) {
+        invalidLayout || unsupportedPacking) {
       signalPassFailure();
       return;
     }

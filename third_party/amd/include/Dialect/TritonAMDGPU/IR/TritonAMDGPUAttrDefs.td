@@ -126,4 +126,118 @@ def TritonAMDGPU_MlsStoreEncoding : TritonAMDGPU_Attr<"MlsStoreEncoding"> {
                        "`warpsPerCTA` `=` `[` $warpsPerCTA `]`";
 }
 
+// -------------------------------- HCU Extend --------------------------------
+// Scale Buffer storage is distinct from Shared/LDS and register layouts.
+def ScaleMemorySpace : TritonAMDGPU_Attr<"ScaleMemorySpace"> {
+  let cppNamespace = "::mlir::triton::amdgpu";
+  let mnemonic = "scale_memory";
+  let summary = "Dedicated Scale Buffer memory space";
+  let description = [{
+    Identifies Scale Buffer storage in a memdesc. ScaleEncoding describes its
+    logical-to-storage mapping; scale_write produces the descriptor and
+    dot_scaled reads it. Shared/LDS source storage uses a separate memdesc.
+  }];
+  let assemblyFormat = "";
+}
+
+def ScaleEncoding : TritonAMDGPU_Attr<"ScaleEncoding"> {
+  let cppNamespace = "::mlir::triton::amdgpu";
+  let mnemonic = "scale";
+  let summary = "Logical scale coordinates to Scale Buffer rows and columns";
+  let description = [{
+    Maps a logical E8M0 scale tensor [R,S] to Scale Buffer rows and columns.
+    R is M or N; S is K/32. Each Scale Buffer row contains 16 one-byte columns.
+    The tensor shape belongs to memdesc; this encoding describes its storage.
+
+    Parameters:
+      blockShape = [BR,BS]: logical instTile written by one Wave64 ds2buf
+                           instruction execution, not the complete CTA tile.
+      rowStride:           distance between consecutive instTile starts,
+                           measured in Scale Buffer rows, not bytes.
+      bankXor:             0/1 SRAM-bank polarity, default 0. A and B use
+                           opposite values in plans selected for scaled MMAC.
+
+    One Wave64 instruction writes b bytes per lane, where b is 1, 2 or 4.
+    Its four 16-lane phases cover g R16 groups, where g is 1, 2 or 4:
+
+      BR = 16*g, BS = b*(4/g), BR*BS = 64*b
+      rowStride = alignTo((BR/16)*BS, 8) = alignTo(4*b, 8)
+
+    Every R16 group fills the 16 columns. Before the bank permutation below,
+    consecutive S coordinates occupy consecutive rows. An instTile writes
+    (BR/16)*BS rows, each containing 16 bytes; its reservation uses rowStride
+    rows. The following diagrams and coordinate examples use bankXor=0:
+
+      Logical instTile [32,8]              Scale Buffer columns
+        S ->                                0       ...       15
+      R 0..15,  S=0  ----------------> row 0:  S[0,0]  ... S[15,0]
+      R 0..15,  S=1  ----------------> row 1:  S[0,1]  ... S[15,1]
+                  ...                      ...
+      R 0..15,  S=7  ----------------> row 7:  S[0,7]  ... S[15,7]
+      R 16..31, S=0  ----------------> row 8:  S[16,0] ... S[31,0]
+                  ...                      ...
+      R 16..31, S=7  ----------------> row 15: S[16,7] ... S[31,7]
+
+    For the complete tensor, number instTiles along S first, then R. Example:
+
+      !ttg.memdesc<64x16xi8,
+        #amdg.scale<{blockShape = [32,8], rowStride = 16}>, #amdg.scale_memory>
+
+      Logical tensor [64,16]              Scale Buffer relative row ranges
+                    S=0..7    S=8..15
+                  +---------+---------+   instTile 0 -> rows  0..15
+        R=0..31   | tile 0  | tile 1  |   instTile 1 -> rows 16..31
+                  +---------+---------+   instTile 2 -> rows 32..47
+        R=32..63  | tile 2  | tile 3  |   instTile 3 -> rows 48..63
+                  +---------+---------+
+
+    For a logical coordinate (r,s), using integer division and remainder:
+
+      tilesAlongS = ceilDiv(S, BS)
+      tileId      = (r / BR) * tilesAlongS + s / BS
+      rawRow      = ((r % BR) / 16) * BS + s % BS
+      b           = (BR / 16) * BS / 4
+      innerRow    = b == 1 ? rawRow + 4 * (((s / 4) % 2) XOR bankXor)
+                          : rawRow XOR (4 * bankXor)
+      row         = tileId * rowStride + innerRow
+      col         = r % 16
+
+    In the example above, (17,4) maps to (row=12,col=1), (1,8) to
+    (row=16,col=1), and (32,0) to (row=32,col=0). Rows are relative to the
+    allocation start. Late allocation assigns an 8-row-aligned
+    scale_write.row_base; physical row = row_base + row. This alignment
+    preserves the SRAM-bank bit. The base is not part of the encoding.
+
+    rowStride includes required Scale Buffer alignment: blockShape=[16,4]
+    uses four rows within an eight-row reservation. Its four unused rows are
+    before or after the written half, depending on the selected SRAM bank.
+    These gaps are in Scale Buffer, not padding in source LDS.
+    Edge instTiles reserve the same stride; only valid logical coordinates
+    are consumed by MMAC.
+
+    Scale Buffer has two SRAM banks, selected by (row/4)%2. bankXor is 0/1
+    and reverses their roles; A and B use opposite bankXor values. For b=1,
+    the four written rows use the lower/upper half of their eight-row reserved
+    block according to ((s/4)%2)^bankXor. For b=2/4, XOR the relative row with
+    4*bankXor and permute copy phases accordingly. Only plans whose valid rows
+    satisfy bank(row)=((s/4)%2)^bankXor are selected. Thus every MMAC reads A/B
+    from opposite SRAM banks, including all M/N groups and K steps.
+
+    The attribute verifier checks the supported block geometry, exact
+    rowStride and bankXor range. Compatibility with the complete tensor, LDS
+    source and MMAC consumer is checked when choosing and validating plans.
+
+    This encoding does not specify Global/LDS order, LDS swizzle, or which
+    wave writes each instTile. Those are separate source layouts and copy
+    scheduling rules; the destination phase/column mapping is fixed by ds2buf.
+  }];
+  let parameters = (ins ArrayRefParameter<"int64_t">:$blockShape,
+                        "int64_t":$rowStride,
+                        DefaultValuedParameter<"int64_t", "0">:$bankXor);
+  let assemblyFormat = "`<` `{` `blockShape` `=` `[` $blockShape `]` `,` "
+                       "`rowStride` `=` $rowStride "
+                       "(`,` `bankXor` `=` $bankXor^)? `}` `>`";
+  let genVerifyDecl = 1;
+}
+
 #endif

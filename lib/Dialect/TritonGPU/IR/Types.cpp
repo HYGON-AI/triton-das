@@ -6,6 +6,7 @@
 #include "mlir/IR/DialectImplementation.h" // required by `Types.cpp.inc`
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "llvm/ADT/TypeSwitch.h" // required by `Types.cpp.inc`
 
@@ -179,6 +180,12 @@ LogicalResult MemDescType::verify(function_ref<InFlightDiagnostic()> emitError,
     if (bitwidth != 8) {
       return emitError() << "bitwidth must be 8";
     }
+  } else if (isa<triton::amdgpu::ScaleEncodingAttr>(encoding)) {
+    if (!isa<triton::amdgpu::ScaleMemorySpaceAttr>(memorySpace) ||
+        shape.size() != 2 || shape != allocShape || !elementType.isInteger(8) ||
+        !llvm::all_of(shape, [](int64_t size) { return size > 0; }))
+      return emitError() << "requires a positive rank-two E8M0 Scale Buffer "
+                            "descriptor without slicing or multibuffering";
   } else {
     return emitError() << encoding << " is not a valid encoding";
   }

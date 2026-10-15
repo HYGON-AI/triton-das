@@ -25,6 +25,8 @@ target_link_libraries(TritonHCUWaspSupport PRIVATE TritonAMDGPUIR)
 
 add_triton_library(TritonHCUTransforms
   AccelerateHCUMatmul.cpp
+  ScaleMemoryPlan.cpp
+  ScalePipeline.cpp
   BufferLdsEncoding.cpp
   SelectBufferLdsConfig.cpp
   ConvertBufferLdsCopies.cpp

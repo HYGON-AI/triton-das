@@ -1,3 +1,4 @@
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
@@ -596,7 +597,7 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
 
   // Set up the consumer wait. We know the live before ops are the same for all
   // loads since that's how they were grouped.
-  DenseMap<Partition *, ROCDL::HCUAbarrierArriveOp> arriveOps;
+  DenseMap<Partition *, SmallVector<Operation *>> arriveOps;
   for (auto [i, liveBeforeOp] : llvm::enumerate(firstLoad->liveBeforeOps)) {
     // 每一个 userPartition 贡献一个 liveBeforeOp，所以遍历 liveBeforeOp 也就是遍历 userPartition
     Partition &userPartition = *schedule.getPartition(liveBeforeOp);
@@ -629,8 +630,8 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
         auto arriveOp = b.createInto<ROCDL::HCUAbarrierArriveOp>(
             userPartition, userStageCluster, curEmptyBarId, 1);
         maybeSetAsyncTaskId(arriveOp, pair, numBarrierPairs);
-        // Keep the last arrive for reg-use placement (same as before for 1 pair).
-        arriveOps[schedule.getPartition(liveUntilOp)] = arriveOp;
+        // All consumers must read before either pair releases the shared slot.
+        arriveOps[schedule.getPartition(liveUntilOp)].push_back(arriveOp);
       }
     }
   }
@@ -703,8 +704,7 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
     for (auto &[partition, uses] : regUses) {
       auto users = llvm::to_vector(llvm::map_range(
           uses, [](OpOperand *use) { return use->getOwner(); }));
-      if (Operation *arriveOp = arriveOps.lookup(partition))
-        users.push_back(arriveOp);
+      llvm::append_range(users, arriveOps.lookup(partition));
       Operation *loadBeforeOp = findNearestCommonDominator(users, domInfo);
       b.setInsertionPoint(loadBeforeOp);
       StageCluster userStageCluster = getStageCluster(loadBeforeOp);
@@ -739,6 +739,60 @@ LogicalResult PipelinedLoadGroup::lowerLoads(WarpSchedule &schedule,
 // lowerLoops
 //===----------------------------------------------------------------------===//
 
+// Each scale shares its matrix operand's ready/empty protocol and stage index.
+// Buffers remain separate. Publication covers both writes; release follows
+// their last LDS reader through the existing PipelinedLoadGroup logic.
+static void groupScaleLoadsWithOperands(triton::DotScaledOp dot,
+                                        MutableArrayRef<PipelinedLoad> loads,
+                                        WarpSchedule &schedule,
+                                        DominanceInfo &domInfo) {
+  BackwardSliceOptions options;
+  options.omitBlockArguments = true;
+  options.inclusive = true;
+  options.filter = [&](Operation *op) {
+    return op->getBlock() == dot->getBlock();
+  };
+  for (auto [matrix, scale] : {std::make_pair(dot.getA(), dot.getAScale()),
+                               std::make_pair(dot.getB(), dot.getBScale())}) {
+    if (!scale)
+      continue;
+    SetVector<Operation *> slice;
+    (void)getBackwardSlice(matrix, &slice, options);
+    (void)getBackwardSlice(scale, &slice, options);
+    SmallVector<PipelinedLoad *> group;
+    for (auto &load : loads) {
+      // MLS reaches local_load through its destination allocation, rather
+      // than a tensor SSA result. REG producers appear directly in the slice.
+      if (slice.contains(load.loadOp) ||
+          llvm::any_of(load.allocOps,
+                       [&](Operation *alloc) { return slice.contains(alloc); }))
+        group.push_back(&load);
+    }
+    if (group.size() < 2 || group.front()->liveBeforeOps.empty())
+      continue;
+    auto &first = group.front()->liveBeforeOps;
+    if (llvm::any_of(group, [&](PipelinedLoad *load) {
+          if (load->liveBeforeOps.size() != first.size())
+            return true;
+          for (auto [index, before] : llvm::enumerate(load->liveBeforeOps))
+            if (schedule.getPartition(before) !=
+                schedule.getPartition(first[index]))
+              return true;
+          return false;
+        }))
+      continue;
+    SmallVector<Operation *, 1> common;
+    for (unsigned index = 0; index < first.size(); ++index) {
+      SmallVector<Operation *> starts;
+      for (auto *load : group)
+        starts.push_back(load->liveBeforeOps[index]);
+      common.push_back(findNearestCommonDominator(starts, domInfo));
+    }
+    for (auto *load : group)
+      load->liveBeforeOps = common;
+  }
+}
+
 LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
                          MutableArrayRef<PipelinedMMA> mmas,
                          WarpSchedule &schedule, int numLoadStages) {
@@ -751,15 +805,18 @@ LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
     return loop.emitError("missing or invalid hcu.wasp_partition_warps attribute");
   const hcu::WaspTopology &topo = *topology;
 
-  // Group loads by common first user operations. This ensures, for example,
-  // that multiple loads feeding into the same MMA op are placed together.
-  llvm::MapVector<ArrayRef<Operation *>, SmallVector<PipelinedLoad>>
-      liveBeforeGroups;
-  for (PipelinedLoad &load : loads) {
+  for (PipelinedLoad &load : loads)
     if (failed(load.determineLiveRange(body, domInfo, postDomInfo, schedule)))
       return failure();
+  if (mmas.size() == 1)
+    if (auto dot = dyn_cast<triton::DotScaledOp>(mmas.front().mmaOp.getOperation()))
+      groupScaleLoadsWithOperands(dot, loads, schedule, domInfo);
+
+  // Loads with the same first reads share one ready/empty protocol.
+  llvm::MapVector<ArrayRef<Operation *>, SmallVector<PipelinedLoad>>
+      liveBeforeGroups;
+  for (PipelinedLoad &load : loads)
     liveBeforeGroups[load.liveBeforeOps].push_back(std::move(load));
-  }
 
   SmallVector<PipelinedLoadGroup, 0> loadGroups;
   for (auto &loads : llvm::make_second_range(liveBeforeGroups))

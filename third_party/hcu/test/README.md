@@ -37,3 +37,13 @@ source gen_triton_wheel.sh --version 2.1.0 --llvm_build_dir path_to_llvm_build
 # Regression
 
 If you want to update llvm package, please modify the llvm-hash.txt to a new git commit hash.
+
+```bash
+bash third_party/hcu/test/regression.sh --suite=scale -q
+```
+
+Compile checks stop at LLVM IR; assembly and execution checks require gfx946.
+
+```bash
+python -m pytest third_party/hcu/test/test_scaled_compile.py -k upstream_scaled_compile -q
+```

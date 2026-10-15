@@ -15,6 +15,7 @@
 #include "TritonHCU/BufferLdsEncoding.h"
 #include "TritonHCU/MlsGroup.h"
 #include "TritonHCU/WaspSplitPlan.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
@@ -462,25 +463,34 @@ static bool opIdxKMajor(unsigned opIdx, ArrayRef<unsigned> order) {
 
 static SmallVector<unsigned>
 reselectMlsTileForShape(unsigned opIdx, bool kMajor, unsigned bitwidth,
-                        unsigned version, ArrayRef<int64_t> shape,
-                        unsigned numWarps, ArrayRef<unsigned> fallbackTile) {
+                        MlsElemBitTyKind elemBitTyKind, unsigned version,
+                        ArrayRef<int64_t> shape, unsigned numWarps,
+                        ArrayRef<unsigned> fallbackTile) {
   auto cands = hcuMls::MlsInsn::getMlsElemsTileCandidates(
-      opIdx, kMajor, bitwidth, MlsElemBitTyKind::None, version,
+      opIdx, kMajor, bitwidth, elemBitTyKind, version,
       hcuMls::MlsInterleaveKind::InterleaveNone);
   SmallVector<unsigned> best;
   // Largest → smallest (same order as chooseMlsInstruction).
   for (int i = static_cast<int>(cands.size()) - 1; i >= 0; --i) {
     unsigned nonK = cands[i].first;
     unsigned kTile = cands[i].second;
-    SmallVector<unsigned> tile =
-        opIdx == 0 ? SmallVector<unsigned>{nonK, kTile}
-                   : SmallVector<unsigned>{kTile, nonK};
-    if (!mlsTileFitsShape(tile, shape, numWarps))
+    SmallVector<unsigned> tile = opIdx == 0
+                                     ? SmallVector<unsigned>{nonK, kTile}
+                                     : SmallVector<unsigned>{kTile, nonK};
+    auto storageTile = tile;
+    if (elemBitTyKind != MlsElemBitTyKind::None) {
+      auto insn = hcuMls::MlsInsn::selectOrGetMlsInsn(
+          nonK, kTile, bitwidth, elemBitTyKind, opIdx, kMajor, version,
+          hcuMls::MlsInterleaveKind::InterleaveNone);
+      if (failed(insn))
+        continue;
+      storageTile = insn->getMlsTile(hcuMls::MlsTileKind::Shared);
+    }
+    // Encoding tiles remain logical; only the capacity check uses packed bytes.
+    if (!mlsTileFitsShape(storageTile, shape, numWarps))
       continue;
     best = tile;
-    int64_t vol = shape[0] * shape[1];
-    if (static_cast<int64_t>(nonK) * kTile * numWarps <= vol)
-      break;
+    break;
   }
   if (!best.empty())
     return best;
@@ -637,8 +647,40 @@ static void syncMfmaFamilyEncodings(triton::FuncOp funcOp) {
     if (!resTy || !isa<AMDMfmaEncodingAttr>(resTy.getEncoding()))
       return;
     auto oldMfma = cast<AMDMfmaEncodingAttr>(resTy.getEncoding());
-    Attribute repaired =
-        repairMfmaEncodingForShape(oldMfma, resTy.getShape());
+    Attribute repaired = repairMfmaEncodingForShape(oldMfma, resTy.getShape());
+    if (isa<triton::DotScaledOp>(op)) {
+      auto mfma = cast<AMDMfmaEncodingAttr>(repaired);
+      SmallVector<unsigned> tiles(mfma.getTilesPerWarp());
+      for (unsigned side : {0u, 1u}) {
+        auto load = op->getOperand(side).getDefiningOp<LocalLoadOp>();
+        if (!load)
+          continue;
+        auto shared = dyn_cast<HCUMlsSharedEncodingAttr>(
+            load.getSrc().getType().getEncoding());
+        if (!shared)
+          continue;
+        unsigned nonK = side, k = 1 - side;
+        auto tile = shared.getMlsTile();
+        auto insn = hcuMls::MlsInsn::selectOrGetMlsInsn(
+            tile[nonK], tile[k], shared.getElemBitWidth(),
+            shared.getElemBitTyKind(), side, shared.getOrder()[0] == k,
+            shared.getVersion(),
+            static_cast<hcuMls::MlsInterleaveKind>(shared.getAlt2Kind()));
+        if (failed(insn))
+          continue;
+        // Keep MMAC coverage within the reselected MLS tile, while covering
+        // at least one complete DS read instruction.
+        unsigned instrSize = mfma.getInstrShape()[side];
+        unsigned readSize = insn->getDsReadMatrixInsnAttr().instrShape[nonK];
+        unsigned minTiles = llvm::divideCeil(readSize, instrSize);
+        unsigned maxTiles = tile[nonK] / instrSize;
+        tiles[side] = std::clamp(tiles[side], minTiles, maxTiles);
+      }
+      repaired = AMDMfmaEncodingAttr::get(
+          mfma.getContext(), mfma.getVersion(), mfma.getWarpsPerCTA(),
+          mfma.getInstrShape(), mfma.getIsTransposed(), mfma.getCTALayout(),
+          tiles, mfma.getElementBitWidth(), mfma.getMmacLayout());
+    }
     if (!findTarget(cast<AMDMfmaEncodingAttr>(repaired)))
       targetMfmas.push_back(repaired);
 
@@ -749,6 +791,7 @@ static MemDescType retypeMlsMemDesc(MemDescType memTy, ArrayRef<int64_t> shape,
       bool kMajor = opIdxKMajor(shared.getOpIdx(), order);
       mlsTile = reselectMlsTileForShape(
           shared.getOpIdx(), kMajor, shared.getElemBitWidth(),
+          static_cast<MlsElemBitTyKind>(shared.getElemBitTyKind()),
           shared.getVersion(), matrixShape, numWarpsForTile, mlsTile);
     }
     enc = HCUMlsSharedEncodingAttr::get(
@@ -837,6 +880,12 @@ static bool needToSlice(Value v, unsigned dim, int size) {
   return shape.size() > dim && shape[dim] > size;
 }
 
+static bool isPureTensorOp(Operation *op) {
+  return op->getNumRegions() == 0 && op->getNumResults() == 1 &&
+         isa<RankedTensorType>(op->getResult(0).getType()) &&
+         isMemoryEffectFree(op);
+}
+
 // Duplicate the op for different partition dims.
 static bool rematerializeOp(Operation *op, DataPartitionScheme &partitionScheme,
                             unsigned currentDim) {
@@ -846,19 +895,22 @@ static bool rematerializeOp(Operation *op, DataPartitionScheme &partitionScheme,
     return true;
   }
 
-  if (isa<LocalAllocOp, arith::ConstantOp>(op)) {
+  if (isa<LocalAllocOp, arith::ConstantOp>(op) || isPureTensorOp(op)) {
     // assert op has a conflicting partition dim.
     auto existingDim = partitionScheme.opPartitionDims[op];
     assert(existingDim != currentDim && "op has no conflicting partition dim");
     partitionScheme.rematerializedOps[op].insert(existingDim);
     partitionScheme.rematerializedOps[op].insert(currentDim);
-    // Undo the partition of the dependency ops in the backward slice.
-    SetVector<Operation *> slice;
-    BackwardSliceOptions opt;
-    opt.omitBlockArguments = true;
-    (void)getBackwardSlice(op, &slice);
-    for (auto depOp : slice)
-      partitionScheme.undoPartition(depOp);
+    // Pure computations rematerialize their operands along the same path.
+    // Storage dependencies retain the existing shared-allocation behavior.
+    if (!isPureTensorOp(op)) {
+      SetVector<Operation *> slice;
+      BackwardSliceOptions opt;
+      opt.omitBlockArguments = true;
+      (void)getBackwardSlice(op, &slice);
+      for (auto depOp : slice)
+        partitionScheme.undoPartition(depOp);
+    }
     return true;
   }
   return false;
@@ -871,23 +923,26 @@ static bool getBackwardSliceToPartition(Value v,
   if (!needToSlice(v, currentDim, partitionScheme.numPartitions))
     return true;
   if (auto op = v.getDefiningOp()) {
-    // Check dim compatibility
+    // Keep the first partition's dimension on the original definition.
     if (!partitionScheme.ops.insert(op)) {
-      if (!isControlFlowOp(op) &&
-          partitionScheme.opPartitionDims[op] != currentDim) {
-        // Duplicate the op if possible.
-        if (!rematerializeOp(op, partitionScheme, currentDim)) {
-          LLVM_DEBUG({
-            LDBG("incompatible partitioning during backwards:");
-            LDBG("dim " << currentDim);
-            op->dump();
-          });
-          return false;
-        }
+      if (isControlFlowOp(op) ||
+          partitionScheme.opPartitionDims[op] == currentDim ||
+          (partitionScheme.rematerializedOps.contains(op) &&
+           partitionScheme.rematerializedOps[op].contains(currentDim)))
+        return true;
+      if (!rematerializeOp(op, partitionScheme, currentDim)) {
+        LLVM_DEBUG({
+          LDBG("incompatible partitioning during backwards:");
+          LDBG("dim " << currentDim);
+          op->dump();
+        });
+        return false;
       }
-      return true;
+      if (!isPureTensorOp(op))
+        return true;
+    } else {
+      partitionScheme.opPartitionDims[op] = currentDim;
     }
-    partitionScheme.opPartitionDims[op] = currentDim;
 
     // Flip dim when op is trans
     if (isa<TransOp, MemDescTransOp>(op))
@@ -974,6 +1029,18 @@ static bool getBackwardSliceToPartition(Value v,
       if (!getBackwardSliceToPartition(dotOp->getOperand(2), partitionScheme,
                                        currentDim))
         return false;
+      if (auto scaled = dyn_cast<triton::DotScaledOp>(op)) {
+        // Both scale tensors use [M or N, K/32], irrespective of the
+        // corresponding matrix operand's K packing or orientation.
+        for (auto [side, scale] : llvm::enumerate(
+                 SmallVector<Value>{scaled.getAScale(), scaled.getBScale()}))
+          if (scale && (side == currentDim || partitionScheme.producerSliced) &&
+              !getBackwardSliceToPartition(
+                  scale, partitionScheme,
+                  side == currentDim ? 0
+                                     : DataPartitionScheme::noOpPartitionDim))
+            return false;
+      }
     } else if (isa<ttng::ReinterpretTensorDescOp, MakeTensorDescOp>(op)) {
       return true;
     } else if (auto allocOp = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
@@ -1386,15 +1453,19 @@ static void rewriteRematerializedOps(triton::FuncOp &funcOp,
 
   hcu::OpBuilderWithAsyncTaskIds builder(funcOp.getContext());
 
-  // For each rematerialized op, create a new op and replace its user with it.
-  for (auto opDim : partitionScheme.rematerializedOps) {
-    auto oldOp = opDim.first;
+  // Clone users before definitions so operand rewrites also reach new users.
+  SetVector<Operation *> rematOps;
+  for (const auto &entry : partitionScheme.rematerializedOps)
+    rematOps.insert(entry.first);
+  rematOps = topologicalSort(rematOps);
+  for (Operation *oldOp : llvm::reverse(rematOps)) {
+    const auto &dims = partitionScheme.rematerializedOps[oldOp];
     builder.setInsertionPoint(oldOp);
     builder.setAsyncTaskIdsFromOp(oldOp);
 
     // Skip the first dim which will be using the original op.
-    for (unsigned i = 1; i < opDim.second.size(); i++) {
-      unsigned dim = opDim.second[i];
+    for (unsigned i = 1; i < dims.size(); i++) {
+      unsigned dim = dims[i];
       LLVM_DEBUG({
         LDBG("rewriting op along dim " << dim << ":");
         oldOp->dump();
@@ -1431,7 +1502,7 @@ static void rewriteRematerializedOps(triton::FuncOp &funcOp,
               allocOp.getLoc(), slicedMemdescType, allocOp.getResult(), offsets);
           newOp = viewOp;
         }
-      } else if (isa<arith::ConstantOp>(oldOp)) {
+      } else if (isa<arith::ConstantOp>(oldOp) || isPureTensorOp(oldOp)) {
         newOp = builder.clone(*oldOp);
       } else {
         llvm_unreachable("Unexpected op");
@@ -1449,12 +1520,17 @@ static void rewriteRematerializedOps(triton::FuncOp &funcOp,
       // replace the users that have same partition dim with the op.
       auto dimMatches = [&](OpOperand &operand) {
         auto user = operand.getOwner();
-        assert(partitionScheme.opPartitionDims.contains(user) &&
-               "user not partitioned");
-        unsigned userDim = partitionScheme.opPartitionDims[user];
+        auto it = partitionScheme.opPartitionDims.find(user);
+        if (it == partitionScheme.opPartitionDims.end())
+          return false;
+        unsigned userDim = it->second;
         if (isa<TransOp, MemDescTransOp>(user)) {
           // flip userDim for trans
           userDim = partitionScheme.flipPartitionDim(userDim);
+        } else if (auto expand = dyn_cast<ExpandDimsOp>(user)) {
+          if (userDim != DataPartitionScheme::noOpPartitionDim &&
+              expand.getAxis() < userDim)
+            --userDim;
         } else if (auto dotOp = dyn_cast<nvidia_gpu::WarpGroupDotOp>(user)) {
           // infer userDim for dot
           assert(partitionScheme.dotPartitionOperand.contains(user) &&
@@ -1462,6 +1538,16 @@ static void rewriteRematerializedOps(triton::FuncOp &funcOp,
           unsigned opndIndx = partitionScheme.dotPartitionOperand[user];
           if (userDim == 0 && opndIndx == 1 || userDim == 1 && opndIndx == 0)
             userDim = DataPartitionScheme::noOpPartitionDim;
+        } else if (isa<DotOpInterface>(user)) {
+          unsigned index = operand.getOperandNumber();
+          if (index < 2 && index != partitionScheme.dotPartitionOperand[user])
+            userDim = DataPartitionScheme::noOpPartitionDim;
+          else if (auto scaled = dyn_cast<triton::DotScaledOp>(user);
+                   scaled && index >= 3) {
+            unsigned side = index == 3 && scaled.getAScale() ? 0 : 1;
+            userDim =
+                side == userDim ? 0 : DataPartitionScheme::noOpPartitionDim;
+          }
         }
 
         if (userDim != dim)
@@ -2189,6 +2275,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
           bool kMajor = opIdxKMajor(oldEnc.getOpIdx(), order);
           mlsTile = reselectMlsTileForShape(
               oldEnc.getOpIdx(), kMajor, oldEnc.getElemBitWidth(),
+              static_cast<MlsElemBitTyKind>(oldEnc.getElemBitTyKind()),
               oldEnc.getVersion(), tileShape, warpsPerPart, mlsTile);
         }
         newWarpsPerCTA =
@@ -2367,6 +2454,11 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
       sliceOp(op->getOperand(otherOpndIndx), offset, mappings, reverseMappings,
               partitionScheme);
     }
+    if (auto scaled = dyn_cast<triton::DotScaledOp>(op))
+      for (auto [side, scale] : llvm::enumerate(
+               SmallVector<Value>{scaled.getAScale(), scaled.getBScale()}))
+        if (scale && (side == opndIndx || partitionScheme.producerSliced))
+          sliceOp(scale, offset, mappings, reverseMappings, partitionScheme);
     // Hanlde accumulator
     Value accumulator = cast<DotOpInterface>(op)->getOperand(2);
     sliceOp(accumulator, offset, mappings, reverseMappings, partitionScheme);

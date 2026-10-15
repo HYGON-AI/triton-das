@@ -18,6 +18,7 @@ add_triton_library(TritonHCUToLLVM
   WaitCntHCUUtility.cpp
   ConvertWarpSpecializeToLLVM.cpp
   AllocateScaleBuffer.cpp
+  ScaleMembar.cpp
 
   DEPENDS
   TritonHCUPassesIncGen

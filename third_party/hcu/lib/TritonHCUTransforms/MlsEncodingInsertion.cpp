@@ -14,6 +14,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "TritonHCU/MlsGroup.h"
@@ -105,21 +106,24 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   }
 
   MlsElemBitTyKind mlsElemBitTyKind = MlsElemBitTyKind::None;
-  if (auto dotScaled = dyn_cast<tt::DotScaledOp>(dot.getOperation())) {
-    auto dotScaledOp = cast<tt::DotScaledOp>(dot);
-    auto scaledElemType = opIdx == 0 ? dotScaled.getAElemType() : dotScaled.getBElemType();
-    if (scaledElemType == ScaleDotElemType::E2M1 && kMajor)
+  auto scaledElemType =
+      llvm::TypeSwitch<Operation *, std::optional<ScaleDotElemType>>(dot)
+          .Case<tt::DotScaledOp, tt::amdgpu::DotScaledOp>([&](auto scaled) {
+            return opIdx == 0 ? scaled.getAElemType() : scaled.getBElemType();
+          })
+          .Default([](Operation *) { return std::nullopt; });
+  if (scaledElemType) {
+    if (*scaledElemType == ScaleDotElemType::E2M1 && kMajor)
       logicalK *= 2;
 
-    auto dotEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(
-        (opIdx == 0 ? dotScaledOp.getA().getType() : dotScaledOp.getB().getType())
-            .getEncoding());
-    auto mlsScaledExt = dotEncoding.getMlsScaledExt();
-    mlsElemBitTyKind = getMlsElemBitTyKind(mlsScaledExt);
-    if (scaledElemType != ScaleDotElemType::E2M1) {
+    auto operand = opIdx == 0 ? dot.getA() : dot.getB();
+    auto dotEncoding = cast<ttg::DotOperandEncodingAttr>(
+        cast<RankedTensorType>(operand.getType()).getEncoding());
+    mlsElemBitTyKind = getMlsElemBitTyKind(dotEncoding.getMlsScaledExt());
+    if (*scaledElemType != ScaleDotElemType::E2M1) {
       bool isF4Padding = isMlsPaddedBit4ElemTyKind(mlsElemBitTyKind);
       mlsElemBitTyKind =
-          scaleDotElemTypeToMlsElemBitTyKind(scaledElemType, isF4Padding);
+          scaleDotElemTypeToMlsElemBitTyKind(*scaledElemType, isF4Padding);
     }
   }
 

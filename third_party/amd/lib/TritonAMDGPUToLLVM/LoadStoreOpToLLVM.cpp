@@ -1226,6 +1226,21 @@ struct AsyncCopyGlobalToLocalOpConversion
         mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
             cacheMod, /*isLoad=*/true, targetInfo);
 
+    if (targetInfo.getArch() == "gfx946") {
+      assert((vecBits == 32 || vecBits == 64 || vecBits == 128) &&
+             "unsupported HCU global-to-LDS load width");
+      std::string intrinsic = "llvm.hcu.global.load.dword";
+      if (vecBits != 32)
+        intrinsic += "x" + std::to_string(vecBits / 32);
+      intrinsic += ".lds";
+      LLVM::createLLVMIntrinsicCallOp(
+          rewriter, loc, intrinsic, {},
+          {srcPtr, shmemAddr,
+           b.i32_val(0), // No additional immediate byte offset.
+           b.i32_val(cacheModifiers), b.i32_val(0)}); // Disable BPS mode.
+      return;
+    }
+
     if (targetInfo.useAsyncMarks()) {
       // Use the async intrinsic so LLVM tracks these via asyncmark
       auto asyncLoadOp = ROCDL::GlobalLoadAsyncLDSOp::create(

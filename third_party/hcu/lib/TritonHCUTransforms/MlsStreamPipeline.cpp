@@ -284,8 +284,14 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
     if (auto memDesc = dyn_cast<ttg::MemDescType>(userResType)) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
-      tempAttr = cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
-      if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
+      tempAttr =
+          dyn_cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
+      if (!tempAttr)
+        return std::nullopt;
+      // An explicit allocation already specifies the LDS storage layout, even
+      // when its local_load result uses a normal blocked (scale) layout.
+      if (!isa<ttg::LocalAllocOp>(user) &&
+          !getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
         return std::nullopt;
     } else {
       if (!(isa<ttg::ConvertLayoutOp>(user) ||
@@ -483,8 +489,14 @@ loadOpsToIndirectionLevel(scf::ForOp forOp, bool pipelineWithoutDot,
         if (!seen.insert(op).second || excluded.count(op))
           return;
         if (isa<tt::LoadOp, tt::MatrixLoadOp>(op)) {
-          if (filterSmall && isa<tt::LoadOp>(op) &&
-              !canBeConvertedToAsyncLoad(cast<tt::LoadOp>(op), axisInfoAnalysis)) {
+          // Initialized LDS storage also supports narrow REG loads; the
+          // dword restriction applies only when selecting a native copy.
+          bool hasExplicitLdsAlloc =
+              op->hasOneUse() &&
+              isa<ttg::LocalAllocOp>(*op->getUsers().begin());
+          if (filterSmall && isa<tt::LoadOp>(op) && !hasExplicitLdsAlloc &&
+              !canBeConvertedToAsyncLoad(cast<tt::LoadOp>(op),
+                                         axisInfoAnalysis)) {
             return;
           }
           if (loadOpToIndLevel.count(op)) {
@@ -932,7 +944,8 @@ void scheduleAsyncCopy(const AsyncCopyChainOps &asyncOps, tt::MatrixLoadOp loadO
     schedule.insert(waitOp, stages[SCHED_ASYNC_WAIT],
                     clusters[SCHED_ASYNC_WAIT]);
 
-  if (maybeLocalLoadOp && stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE] || forceSchedLocalLoad) {
+  if (maybeLocalLoadOp && (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE] ||
+                           forceSchedLocalLoad)) {
     scheduleLocalLoad(maybeLocalLoadOp, schedule, stages[SCHED_LOCAL_LOAD],
                       clusters[SCHED_LOCAL_LOAD]);
   }
@@ -950,9 +963,14 @@ void scheduleStreamCopy(const StreamCopyChainOps &streamOps,
                   clusters[SCHED_LOCAL_STORE]);
   schedule.insert(localStoreOp, stages[SCHED_LOCAL_STORE],
                   clusters[SCHED_LOCAL_STORE]);
-  if (maybeLocalLoadOp && stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE] || forceSchedLocalLoad) {
-    scheduleLocalLoad(maybeLocalLoadOp, schedule, stages[SCHED_LOCAL_LOAD],
-                      clusters[SCHED_LOCAL_LOAD]);
+  if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE] ||
+      forceSchedLocalLoad) {
+    // replaceUsesWithLocalLoad can fold an initialized local_alloc into the
+    // new view and retain its original readers instead of creating a load.
+    for (Operation *user : subviewOp.getResult().getUsers())
+      if (auto reader = dyn_cast<ttg::LocalLoadOp>(user))
+        scheduleLocalLoad(reader, schedule, stages[SCHED_LOCAL_LOAD],
+                          clusters[SCHED_LOCAL_LOAD]);
   }
 }
 
@@ -1194,8 +1212,16 @@ struct MlsPipelinePass : impl::TritonHCUMlsStreamPipelineBase<MlsPipelinePass> {
         globalPrefetchThis = 0;
       }
       bool waitAtTail = false;
+      // A scale tile stays in LDS until its late ScaleWrite, rather than
+      // being captured in registers by local_load. A single A/B buffer forces
+      // the next MLS behind that collective read/publication point. Keep the
+      // existing multi-buffer schedule so its native producer can run ahead.
+      bool hasLdsScale = llvm::any_of(
+          forOp.getOps<tt::DotScaledOp>(), [](tt::DotScaledOp dot) {
+            return dot.getAScale() || dot.getBScale();
+          });
       bool useSingleBuffer = !useAsyncCopy && numStagesThis == 2 &&
-                             globalPrefetchThis == 0;
+                             globalPrefetchThis == 0 && !hasLdsScale;
       (void)pipelineLoop(forOp, numStagesThis, globalPrefetchThis, localPrefetch,
                          mlsUsesDirectToLds, waitAtTail, useSingleBuffer);
     }

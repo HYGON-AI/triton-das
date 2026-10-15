@@ -790,33 +790,138 @@ LogicalResult AsyncCopyMbarrierArriveOp::verify() {
   return success();
 }
 
-LogicalResult MXScaleCopyDs2BufOp::verify() {
-  auto scaleTy = dyn_cast<RankedTensorType>(getScale().getType());
-  if (!scaleTy)
-    return emitOpError("scale operand must be a ranked tensor");
-  if (scaleTy.getRank() != 2)
-    return emitOpError("scale operand must be rank 2 [nonK, "
-                        "K], got shape ") << scaleTy.getShape();
+// -------------------------- HCU Extend ----------------------------
 
-  auto rowsTy = dyn_cast<RankedTensorType>(getRows().getType());
-  if (!rowsTy)
-    return emitOpError("rows must be a ranked tensor");
+//===----------------------------------------------------------------------===//
+// Scale Buffer encoding
+//===----------------------------------------------------------------------===//
 
-  if (!rowsTy.getElementType().isSignlessInteger(32))
-    return emitOpError("rows element type must be signless i32, got ")
-           << rowsTy.getElementType();
+LogicalResult
+ScaleEncodingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                          ArrayRef<int64_t> blockShape, int64_t rowStride,
+                          int64_t bankXor) {
+  if (bankXor != 0 && bankXor != 1)
+    return emitError() << "requires bankXor = 0 or 1";
+  if (blockShape.size() != 2)
+    return emitError() << "requires a rank-two scale blockShape";
+  // Wave64 has four 16-lane phases. An instTile covers g = 1/2/4
+  // R16 groups, giving BR = 16*g and 4/g phases per group.
+  if ((blockShape[0] != 16 && blockShape[0] != 32 && blockShape[0] != 64) ||
+      blockShape[1] <= 0 || blockShape[1] > 16 ||
+      !llvm::isPowerOf2_64(blockShape[1]))
+    return emitError() << "requires a supported Scale Buffer blockShape";
+  // Each of the 64 lanes writes b = 1/2/4 bytes: BR*BS = 64*b.
+  // The destination uses 4*b rows; instTile starts must be 8-row aligned.
+  int64_t bytes = blockShape[0] * blockShape[1] / 64;
+  if ((bytes != 1 && bytes != 2 && bytes != 4) ||
+      rowStride != llvm::alignTo(4 * bytes, 8))
+    return emitError()
+           << "requires a supported Scale Buffer block and aligned rowStride";
+  return success();
+}
 
-  int64_t opIdx = getOpIdx();
-  if (opIdx != 0 && opIdx != 1)
-    return emitOpError("opIdx must be 0 (A) or 1 (B), got ") << opIdx;
+// Expand packed FP4 dimensions once for the hardware-selected operation.
+static SmallVector<int64_t> getScaledDotShape(RankedTensorType type,
+                                              triton::ScaleDotElemType elem,
+                                              unsigned packedDim) {
+  SmallVector<int64_t> shape(type.getShape());
+  if (elem == triton::ScaleDotElemType::E2M1)
+    shape[packedDim] *= 2;
+  return shape;
+}
 
-  if (getRowBase() < 0)
-    return emitOpError("rowBase must be non-negative");
+bool DotScaledOp::verifyDims() {
+  auto aTy = getA().getType();
+  auto bTy = getB().getType();
+  if (aTy.getRank() != 2 || bTy.getRank() != 2)
+    return false;
+  auto a = getScaledDotShape(aTy, getAElemType(), getLhsKPack() ? 1 : 0);
+  auto b = getScaledDotShape(bTy, getBElemType(), getRhsKPack() ? 0 : 1);
+  return a[1] == b[0];
+}
 
-  int64_t opCtrl0 = getOpCtrl0();
-  if (opCtrl0 < 0 || opCtrl0 > 2)
-    return emitOpError("opCtrl0 must be 0, 1, or 2, got ") << opCtrl0;
+bool DotScaledOp::verifyOutputDims() {
+  auto a = getScaledDotShape(getA().getType(), getAElemType(),
+                             getLhsKPack() ? 1 : 0);
+  auto b = getScaledDotShape(getB().getType(), getBElemType(),
+                             getRhsKPack() ? 0 : 1);
+  auto cTy = getC().getType();
+  if (cTy.getRank() != 2)
+    return false;
+  auto c = cTy.getShape();
+  return c[0] == a[0] && c[1] == b[1];
+}
 
+LogicalResult DotScaledOp::verify() {
+  auto aTy = getA().getType();
+  auto bTy = getB().getType();
+  auto aEnc =
+      dyn_cast_or_null<triton::gpu::DotOperandEncodingAttr>(aTy.getEncoding());
+  auto bEnc =
+      dyn_cast_or_null<triton::gpu::DotOperandEncodingAttr>(bTy.getEncoding());
+  auto mfma = dyn_cast_or_null<triton::gpu::AMDMfmaEncodingAttr>(
+      getType().getEncoding());
+  if (!aEnc || !bEnc || !mfma || aEnc.getOpIdx() != 0 || bEnc.getOpIdx() != 1 ||
+      aEnc.getParent() != mfma || bEnc.getParent() != mfma)
+    return emitOpError(
+        "requires A/B DotOperand layouts matching the MFMA result layout");
+  auto a = getScaledDotShape(aTy, getAElemType(), getLhsKPack() ? 1 : 0);
+  auto b = getScaledDotShape(bTy, getBElemType(), getRhsKPack() ? 0 : 1);
+  for (auto [scale, rows] :
+       {std::pair(getAScale(), a[0]), std::pair(getBScale(), b[1])}) {
+    if (!scale.getDefiningOp<ScaleWriteOp>())
+      return emitOpError(
+          "requires scales produced directly by amdg.scale_write");
+    auto type = scale.getType();
+    if (!isa<ScaleMemorySpaceAttr>(type.getMemorySpace()) ||
+        !isa<ScaleEncodingAttr>(type.getEncoding()))
+      return emitOpError("requires Scale Buffer descriptors");
+    if (type.getRank() != 2 || type.getShape()[0] != rows || a[1] % 32 != 0 ||
+        type.getShape()[1] != a[1] / 32)
+      return emitOpError("requires scale shapes [M, K/32] and [N, K/32]");
+  }
+  auto aLayout = cast<ScaleEncodingAttr>(getAScale().getType().getEncoding());
+  auto bLayout = cast<ScaleEncodingAttr>(getBScale().getType().getEncoding());
+  if (aLayout.getBankXor() == bLayout.getBankXor())
+    return emitOpError("requires opposite A/B Scale Buffer bank polarities");
+  return success();
+}
+
+LogicalResult ScaleWriteOp::verify() {
+  auto resultTy = getResult().getType();
+  auto sourceTy = getSrc().getType();
+  if (resultTy.getRank() != 2 || !resultTy.getElementType().isInteger(8) ||
+      !isa<ScaleMemorySpaceAttr>(resultTy.getMemorySpace()) ||
+      !isa<ScaleEncodingAttr>(resultTy.getEncoding()) ||
+      !isa<triton::gpu::SharedMemorySpaceAttr>(sourceTy.getMemorySpace()) ||
+      sourceTy.getShape() != resultTy.getShape() ||
+      sourceTy.getElementType() != resultTy.getElementType())
+    return emitOpError("requires a rank-2 E8M0 Scale Buffer descriptor "
+                       "matching its LDS source");
+  auto layout = cast<ScaleEncodingAttr>(resultTy.getEncoding());
+  if (getModeAttr().getInt() < 0 || getModeAttr().getInt() > 2 ||
+      layout.getBlockShape()[0] * layout.getBlockShape()[1] !=
+          64 * (int64_t(1) << getMode()))
+    return emitOpError("copy mode must match the Scale Buffer block size");
+  if (auto base = getRowBaseAttr()) {
+    int64_t blocks =
+        llvm::divideCeil(resultTy.getShape()[0], layout.getBlockShape()[0]) *
+        llvm::divideCeil(resultTy.getShape()[1], layout.getBlockShape()[1]);
+    if (base.getInt() < 0 || base.getInt() % 8 != 0 ||
+        base.getInt() + blocks * layout.getRowStride() > 512)
+      return emitOpError("requires an aligned, in-range Scale Buffer row_base");
+  }
+  // Scale Buffer values must never enter ordinary numeric tensor ops.
+  // An unused scale-write result is legal while transformations update users.
+  if (!getResult().use_empty()) {
+    if (!getResult().hasOneUse())
+      return emitOpError("requires one direct HCU scaled dot consumer");
+    auto &use = *getResult().getUses().begin();
+    auto dot = dyn_cast<DotScaledOp>(use.getOwner());
+    if (!dot || (&use != &dot.getAScaleMutable() &&
+                 &use != &dot.getBScaleMutable()))
+      return emitOpError("requires one direct HCU scaled dot consumer");
+  }
   return success();
 }
 

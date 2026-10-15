@@ -42,6 +42,9 @@ using namespace mlir;
 // Forward declarations for HCU-specific lowering patterns defined in
 // ElementwiseOpToLLVM.cpp and DotOpToLLVMHCU.cpp.
 namespace mlir::triton::HCU {
+// Adapt the named-register metadata required by llvm.write_register.
+void registerHCUM0Translation(DialectRegistry &registry);
+void addLocalBarrierForScaleMemory(ModuleAllocation *allocation);
 void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns, bool ftz,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, ModuleAllocation &allocation,
@@ -151,6 +154,11 @@ public:
                                   const TargetInfoBase &targetInfo,
                                   const DataLayoutAnalysis *analysis = nullptr)
       : TritonGPUToLLVMTypeConverter(ctx, options, targetInfo, analysis) {
+    addConversion([ctx](triton::gpu::MemDescType type) -> std::optional<Type> {
+      if (isa<triton::amdgpu::ScaleMemorySpaceAttr>(type.getMemorySpace()))
+        return IntegerType::get(ctx, 32);
+      return std::nullopt; // Fall back to previously registered conversions.
+    });
     addConversion([&](TensorDescType type) -> std::optional<Type> {
       return convertTensorDescType(type);
     });
@@ -197,6 +205,7 @@ struct ConvertTritonHCUToLLVM
     registry
         .insert<LLVM::LLVMDialect, NVVM::NVVMDialect, mlir::ROCDL::ROCDLDialect,
                 mlir::triton::amdgpu::TritonAMDGPUDialect>();
+    triton::HCU::registerHCUM0Translation(registry);
   }
 
   void runOnOperation() override {
@@ -233,11 +242,15 @@ struct ConvertTritonHCUToLLVM
 
     AMD::addLocalBarrierAfterAmdGpuAsyncWait(mod);
 
+    HCU::addLocalBarrierForScaleMemory(&allocation);
+
     // HCU abarrier.try_wait already orders producer/consumer LDS access for the
     // guarded ping-pong buffers. Stock membar only clears pending shared R/W on
     // ttg.local_barrier / gpu.barrier, so briefly plant markers after each
     // try_wait to suppress loop-carried local_store WAW barriers, then erase
     // them so they are not lowered to s_ebarrier_sync among load warps.
+    // These LDS-only markers are added after Scale analysis; they must not
+    // clear Scale dependencies.
     SmallVector<triton::gpu::LocalBarrierOp> abarrierMembarMarkers;
     SmallVector<ROCDL::HCUAbarrierTryWaitOp> tryWaits;
     mod->walk([&](ROCDL::HCUAbarrierTryWaitOp op) { tryWaits.push_back(op); });

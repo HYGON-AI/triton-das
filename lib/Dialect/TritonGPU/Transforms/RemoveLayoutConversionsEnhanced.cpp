@@ -472,8 +472,8 @@ bool isLayoutAnchor(Operation *op) {
     return true;
   if (isa<LoadOp, StoreOp>(op))
     return isExpensiveLoadOrStore(op);
-  if (isa<DotOp, DotScaledOp, nvidia_gpu::WarpGroupDotOp, AtomicRMWOp,
-          AtomicCASOp, triton::nvidia_gpu::TMEMLoadOp, MatrixLoadOp>(op))
+  if (isa<DotOpInterface, nvidia_gpu::WarpGroupDotOp, AtomicRMWOp, AtomicCASOp,
+          triton::nvidia_gpu::TMEMLoadOp, MatrixLoadOp>(op))
     return true;
   if (auto gatherOp = dyn_cast<GatherOp>(op))
     return gatherOp.getEfficientLayout();
@@ -1220,7 +1220,7 @@ static bool isCoalescedLoadCopyValue(Value value, int depth) {
 static bool functionHasComputeAnchors(FuncOp funcOp) {
   bool hasCompute = false;
   funcOp.walk([&](Operation *op) {
-    if (isa<ReduceOp, ScanOp, AtomicRMWOp, AtomicCASOp, DotOp, DotScaledOp,
+    if (isa<ReduceOp, ScanOp, AtomicRMWOp, AtomicCASOp, DotOpInterface,
             nvidia_gpu::WarpGroupDotOp>(op))
       hasCompute = true;
   });
@@ -1559,7 +1559,7 @@ bool LayoutPropagation::commitProposal(const Proposal &proposal) {
 
 static bool isBackwardPropagationBoundaryOp(Operation *op) {
   return isLayoutAnchor(op) ||
-         isa<LoadOp, LocalLoadOp, DotOp, DotScaledOp, AtomicRMWOp, AtomicCASOp,
+         isa<LoadOp, LocalLoadOp, DotOpInterface, AtomicRMWOp, AtomicCASOp,
              nvidia_gpu::WarpGroupDotOp, nvidia_gpu::WarpGroupDotWaitOp,
              nvidia_gpu::TMEMLoadOp, DescriptorLoadOp, DescriptorGatherOp,
              ReduceOp, scf::ForOp, scf::WhileOp, scf::IfOp, ReshapeOp, TransOp,
@@ -1861,7 +1861,7 @@ bool LayoutPropagation::propagateLayoutBackward() {
 }
 
 static bool isSmallComponentForbiddenOp(Operation *op) {
-  return isa<DotOp, DotScaledOp, AtomicRMWOp, AtomicCASOp,
+  return isa<DotOpInterface, AtomicRMWOp, AtomicCASOp,
              nvidia_gpu::WarpGroupDotOp, nvidia_gpu::WarpGroupDotWaitOp,
              nvidia_gpu::TMEMLoadOp, DescriptorLoadOp, DescriptorGatherOp,
              DescriptorOpInterface, ReduceOp, ScanOp>(op);

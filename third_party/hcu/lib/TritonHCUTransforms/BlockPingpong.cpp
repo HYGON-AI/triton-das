@@ -703,7 +703,7 @@ FailureOr<OriginalCandidate> matchOriginalCandidate(scf::ForOp loop,
     return failure();
 
   SmallVector<tt::DotOp> dots;
-  SmallVector<tt::DotScaledOp> scaledDots;
+  bool hasScaledDot = false;
   SmallVector<tt::LoadOp> loads;
   bool hasUnsupportedCopy = false;
   bool hasNestedControl = false;
@@ -714,8 +714,8 @@ FailureOr<OriginalCandidate> matchOriginalCandidate(scf::ForOp loop,
       hasUnsupportedCopy = true;
     if (auto dot = dyn_cast<tt::DotOp>(op))
       dots.push_back(dot);
-    if (auto dot = dyn_cast<tt::DotScaledOp>(op))
-      scaledDots.push_back(dot);
+    if (isa<tt::DotScaledOp, tta::DotScaledOp>(op))
+      hasScaledDot = true;
     if (auto load = dyn_cast<tt::LoadOp>(op))
       loads.push_back(load);
     if (op != loop && op->getNumRegions() != 0)
@@ -723,7 +723,7 @@ FailureOr<OriginalCandidate> matchOriginalCandidate(scf::ForOp loop,
   });
 
   if (hasUnsupportedCopy || hasNestedControl || dots.size() != 1 ||
-      !scaledDots.empty() || hasUnsupportedSourceSideEffects(loop))
+      hasScaledDot || hasUnsupportedSourceSideEffects(loop))
     return failure();
 
   tt::DotOp dot = dots.front();
@@ -1768,7 +1768,7 @@ FailureOr<ExpandedCandidate> matchExpandedCandidate(scf::ForOp loop) {
     return failure();
 
   SmallVector<tt::DotOp> dots;
-  SmallVector<tt::DotScaledOp> scaledDots;
+  bool hasScaledDot = false;
   SmallVector<tt::LoadOp> globalLoads;
   SmallVector<ttg::LocalLoadOp> localLoads;
   SmallVector<ttg::LocalStoreOp> localStores;
@@ -1781,8 +1781,8 @@ FailureOr<ExpandedCandidate> matchExpandedCandidate(scf::ForOp loop) {
       hasUnsupportedCopy = true;
     if (auto dot = dyn_cast<tt::DotOp>(op))
       dots.push_back(dot);
-    if (auto dot = dyn_cast<tt::DotScaledOp>(op))
-      scaledDots.push_back(dot);
+    if (isa<tt::DotScaledOp, tta::DotScaledOp>(op))
+      hasScaledDot = true;
     if (auto load = dyn_cast<tt::LoadOp>(op))
       globalLoads.push_back(load);
     if (auto load = dyn_cast<ttg::LocalLoadOp>(op)) {
@@ -1797,7 +1797,7 @@ FailureOr<ExpandedCandidate> matchExpandedCandidate(scf::ForOp loop) {
   });
 
   if (hasUnsupportedCopy || hasNestedControl || dots.size() != 1 ||
-      !scaledDots.empty() || globalLoads.size() < kNumOperands ||
+      hasScaledDot || globalLoads.size() < kNumOperands ||
       localLoads.size() != kNumOperands || localStores.size() != kNumOperands)
     return failure();
 

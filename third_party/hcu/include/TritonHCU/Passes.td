@@ -235,7 +235,9 @@ def TritonHCUPackBlockPingpongBit8
 
 def TritonHCUMlsEncodingInsertion: Pass<"tritonhcu-mls-encoding-insertion", "mlir::ModuleOp"> {
   let summary = "Insert MlsEncoding to the matrix_load instruction";
-  let dependentDialects = [];
+  let dependentDialects = [
+    "mlir::triton::amdgpu::TritonAMDGPUDialect",
+  ];
 }
 
 def TritonHCUMlsLowering: Pass<"tritonhcu-mls-lowering", "mlir::ModuleOp"> {
@@ -281,5 +283,43 @@ def ConvertTritonHCUToLLVM : Pass<"convert-triton-hcu-to-llvm", "mlir::ModuleOp"
            "gfx target device architecture, e.g., gfx942">,
     Option<"ftz", "ftz", "bool", /*default*/"true",
            "flush denorms for math functions">,
+  ];
+}
+
+def TritonHCUScalePipeline : Pass<"tritonhcu-scale-pipeline", "mlir::ModuleOp"> {
+  let summary = "Select scale load/copy strategies, " #
+                "build amdg.scale_write chains, and convert tt.dot_scaled " #
+                "to amdg.dot_scaled after software pipelining";
+  let description = [{
+    Select scale load and copy strategies and construct the data-transfer chain
+    from Global memory through LDS to Scale Buffer after software pipelining.
+
+    Handle MFMA v4 tt.dot_scaled operations with at least one scale operand.
+    Materialize a missing scale operand as unit E8M0 values.
+
+    For scale data produced by tt.load, prefer native Global-to-LDS copies
+    when use_async_copy is true or both matrix operands use MLS. Otherwise,
+    use Global-to-REG-to-LDS. Native copies require legal vectorization,
+    alignment and masks, with BK/32 >= 4; fall back to the REG path when these
+    conditions fail. Under WASP, reuse the existing producer LDS buffers and
+    ready/empty protocol.
+
+    Generate amdg.scale_write for LDS-to-Scale-Buffer transfers, preserving
+    the existing producer schedule and carrying the required LDS views and
+    async tokens. Convert the consuming tt.dot_scaled to amdg.dot_scaled.
+    Run once after ordinary software pipelining or WASP partitioning. Physical
+    Scale Buffer row allocation and hardware instruction lowering occur later.
+  }];
+  let options = [
+    Option<"useAsyncCopy", "use_async_copy", "bool", /*default*/"false",
+           "Prefer legal native Global-to-LDS scale transfers; " #
+           "full MLS also prefers them when false">,
+  ];
+  let dependentDialects = [
+    "mlir::triton::amdgpu::TritonAMDGPUDialect",
+    "mlir::triton::TritonDialect",
+    "mlir::triton::gpu::TritonGPUDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
   ];
 }
