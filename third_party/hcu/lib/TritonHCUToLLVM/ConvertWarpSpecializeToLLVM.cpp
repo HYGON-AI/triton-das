@@ -471,6 +471,31 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   }
   Value wid = b.create<ROCDL::HCUGetWaveIdOp>();
 
+  // Init resets pending arrivals and phase. Elect one producer wave and
+  // rendezvous the preamble partition before any wave can use the barrier.
+  // Preserve each init's program point, including reinitialization lifetimes.
+  SmallVector<ROCDL::HCUAbarrierInitOp> preambleInits;
+  func.walk([&](ROCDL::HCUAbarrierInitOp op) {
+    if (!op->getParentOfType<WarpSpecializeOp>())
+      preambleInits.push_back(op);
+  });
+  for (auto init : preambleInits) {
+    Block *before = init->getBlock();
+    Block *after = before->splitBlock(init->getIterator());
+    Block *initialize = b.createBlock(after);
+    b.setInsertionPointToEnd(before);
+    Value elected = b.icmp_eq(
+        wid, b.i32_val((*firstWsOp.getWarpGroupStartIds())[0]));
+    b.create<LLVM::CondBrOp>(elected, initialize, after);
+    init->moveBefore(initialize, initialize->end());
+    b.setInsertionPointToEnd(initialize);
+    b.create<LLVM::BrOp>(after);
+    b.setInsertionPointToStart(after);
+    createBarrier(b, kDefaultWarpGroupBarrierIdx, defaultNumWarps);
+  }
+
+  b.setInsertionPointToEnd(header);
+
   // First partition (Load) warps land on the entry block.
   unsigned firstPartWarps = firstWsOp.getPartitionNumWarps()[0];
   unsigned firstPartStart = (*firstWsOp.getWarpGroupStartIds())[0];
