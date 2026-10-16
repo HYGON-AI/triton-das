@@ -904,7 +904,7 @@ class HIPBackend(BaseBackend):
                 "hcu-enable-v-mmac-cluster-cross-region-analysis", "true")
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{total_num_warps*options.warp_size}")
+        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"{total_num_warps*options.warp_size},{total_num_warps*options.warp_size}")
         if "memory-bound-attention" in options.schedule_hint.split(','):
             fns[0].add_fn_attr("amdgpu-sched-strategy", "iterative-ilp")
         fns[0].add_fn_attr("uniform-work-group-size", "true")
