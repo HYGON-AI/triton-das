@@ -1,4 +1,5 @@
 #include "TritonHCU/Passes.h"
+#include "TritonHCU/BufferLdsPipeline.h"
 #include "TritonHCU/WaitCntHCUUtility.h"
 #include "TritonHCU/WaspSplitPlan.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
@@ -171,6 +172,19 @@ public:
   }
 };
 
+
+struct DeferredPublicationConversion
+    : ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult matchAndRewrite(triton::gpu::LocalBarrierOp op, OpAdaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (!op->hasAttr(triton::HCU::kDropPublicationLgkmcnt))
+      return failure();
+    rewriter.replaceOpWithNewOp<ROCDL::SBarrierOp>(op);
+    return success();
+  }
+};
+
 struct ConvertTritonHCUToLLVM
     : public triton::impl::ConvertTritonHCUToLLVMBase<
           ConvertTritonHCUToLLVM> {
@@ -284,6 +298,7 @@ struct ConvertTritonHCUToLLVM
     // support) is used for MFMA dot ops. AMD's patterns (lower benefit)
     // handle WMMA and FMA fallback.
     int HCUBenefit = AMDBenefit + 1;
+    patterns.add<DeferredPublicationConversion>(typeConverter, HCUBenefit + 1);
     auto populatePatterns1 = [&](auto populateFunc, int benefit) {
       populateFunc(typeConverter, patterns, axisInfoAnalysis, allocation,
                    benefit);

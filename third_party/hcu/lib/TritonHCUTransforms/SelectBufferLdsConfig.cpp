@@ -15,6 +15,7 @@ namespace ttg = mlir::triton::gpu;
 
 namespace mlir {
 #define GEN_PASS_DEF_TRITONHCUSELECTBUFFERLDSCONFIG
+#define GEN_PASS_DEF_TRITONHCUPREPAREBLOCKPINGPONGLAYOUT
 #include "TritonHCU/Passes.h.inc"
 
 namespace {
@@ -72,6 +73,87 @@ static bool canRetimeBufferLdsSource(Value source, Operation *destination) {
   return load->isBeforeInBlock(destination);
 }
 
+// Software accumulator transpose exchanges MMAC operands at lowering; the
+// logical A/B LDS read coordinates stay in the canonical operand layout.
+static ttg::DotOperandEncodingAttr
+bufferLdsReadConsumer(ttg::DotOperandEncodingAttr consumer) {
+  auto mma = cast<ttg::AMDMfmaEncodingAttr>(consumer.getParent());
+  if (!mma.getIsTransposed())
+    return consumer;
+  auto canonical = ttg::AMDMfmaEncodingAttr::get(
+      mma.getContext(), mma.getVersion(), mma.getWarpsPerCTA(),
+      mma.getInstrShape(), false, mma.getCTALayout(), mma.getTilesPerWarp(),
+      mma.getElementBitWidth(), mma.getMmacLayout());
+  return ttg::DotOperandEncodingAttr::get(mma.getContext(), consumer.getOpIdx(),
+                                          canonical, consumer.getKWidth());
+}
+
+// Balance scalar A reads against matrix B reads for the R1 wave-group
+// pipeline. This is tile geometry, not a specialization of the runtime K.
+struct BalanceBufferLdsFragments : OpRewritePattern<tt::DotOp> {
+  BalanceBufferLdsFragments(MLIRContext *context, StringRef arch)
+      : OpRewritePattern(context, 2), arch(arch.str()) {}
+
+  LogicalResult matchAndRewrite(tt::DotOp dot,
+                                PatternRewriter &rewriter) const override {
+    if (tt::HCU::getWaspTopologyFromModule(dot))
+      return failure();
+    auto type = cast<RankedTensorType>(dot.getType());
+    auto mma = dyn_cast<ttg::AMDMfmaEncodingAttr>(type.getEncoding());
+    if (!mma || type.getRank() != 2 ||
+        type.getShape()[0] != type.getShape()[1] ||
+        mma.getWarpsPerCTA() != ArrayRef<unsigned>({2, 4}) ||
+        mma.getTilesPerWarp() != ArrayRef<unsigned>({1, 2}) ||
+        mma.getInstrShape() != ArrayRef<unsigned>({16, 16, 16}) ||
+        (mma.getMmacLayout() != ttg::MmacLayout::LEGACY &&
+         mma.getMmacLayout() != ttg::MmacLayout::TRANSPOSE))
+      return failure();
+    auto balanced = ttg::AMDMfmaEncodingAttr::get(
+        rewriter.getContext(), mma.getVersion(), ArrayRef<unsigned>({4, 2}),
+        mma.getInstrShape(), mma.getMmacLayout() == ttg::MmacLayout::LEGACY,
+        mma.getCTALayout(), mma.getTilesPerWarp(), mma.getElementBitWidth(),
+        mma.getMmacLayout());
+    SmallVector<Value> sources;
+    SmallVector<ttg::DotOperandEncodingAttr> consumers;
+    for (unsigned i = 0; i < 2; ++i) {
+      auto operand = cast<RankedTensorType>(dot->getOperand(i).getType());
+      auto old = dyn_cast<ttg::DotOperandEncodingAttr>(operand.getEncoding());
+      Value source = getBufferLdsSource(dot->getOperand(i));
+      if (!old || old.getKWidth() != 4 || !source ||
+          (!operand.getElementType().isF16() &&
+           !operand.getElementType().isBF16()) ||
+          !canRetimeBufferLdsSource(source, dot))
+        return failure();
+      auto consumer = ttg::DotOperandEncodingAttr::get(
+          rewriter.getContext(), i, balanced, old.getKWidth());
+      auto placement = tt::HCU::selectBufferLdsOperandEncoding(
+          source, cast<RankedTensorType>(source.getType()),
+          bufferLdsReadConsumer(consumer), std::nullopt,
+          operand.getElementType(), 8, arch);
+      if (!placement || placement.getContiguousDim() != 1)
+        return failure();
+      sources.push_back(source);
+      consumers.push_back(consumer);
+    }
+    auto loc = dot.getLoc();
+    SmallVector<Value> operands;
+    for (unsigned i = 0; i < 2; ++i)
+      operands.push_back(ttg::ConvertLayoutOp::create(
+          rewriter, loc,
+          cast<RankedTensorType>(sources[i].getType())
+              .cloneWithEncoding(consumers[i]),
+          sources[i]));
+    auto acc = ttg::ConvertLayoutOp::create(
+        rewriter, loc, type.cloneWithEncoding(balanced), dot.getC());
+    auto result = tt::DotOp::create(
+        rewriter, loc, type.cloneWithEncoding(balanced), operands[0],
+        operands[1], acc, dot.getInputPrecision(), dot.getMaxNumImpreciseAcc());
+    rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dot, type, result);
+    return success();
+  }
+  std::string arch;
+};
+
 struct AssignBufferLdsOperandEncoding : OpRewritePattern<tt::DotOp> {
   AssignBufferLdsOperandEncoding(MLIRContext *context, StringRef arch)
       : OpRewritePattern(context), arch(arch.str()) {}
@@ -113,7 +195,7 @@ struct AssignBufferLdsOperandEncoding : OpRewritePattern<tt::DotOp> {
         waves *= count;
       unsigned maxCopyBytes = 0;
       auto sharedEncoding = tt::HCU::selectBufferLdsOperandEncoding(
-          source, sourceType, consumer, std::nullopt,
+          source, sourceType, bufferLdsReadConsumer(consumer), std::nullopt,
           operandType.getElementType(), waves, arch, &maxCopyBytes);
       if (!sharedEncoding)
         continue;
@@ -172,6 +254,33 @@ private:
 };
 
 } // namespace
+
+// Layout preparation must precede shared encoding selection. Keep the rewrite
+// next to the selector's source/consumer checks, but expose it as a separate
+// pipeline preparation pass: ordinary BufferLds selection has no PP policy.
+struct TritonHCUPrepareBlockPingpongLayoutPass
+    : impl::TritonHCUPrepareBlockPingpongLayoutBase<
+          TritonHCUPrepareBlockPingpongLayoutPass> {
+  using Base::Base;
+
+  void runOnOperation() override {
+    if (globalPrefetchDistance != 4 || ldsPrefetchDistance != 1)
+      return;
+    auto module = getOperation();
+    auto target = module->getAttrOfType<StringAttr>("ttg.target");
+    if (!target || !target.getValue().starts_with("hip:"))
+      return;
+    StringRef arch = target.getValue().drop_front(4);
+    if (!tt::HCU::getBufferLdsTargetProfile(
+            std::string_view(arch.data(), arch.size())))
+      return;
+
+    RewritePatternSet patterns(&getContext());
+    patterns.add<BalanceBufferLdsFragments>(&getContext(), arch);
+    if (failed(applyPatternsGreedily(module, std::move(patterns))))
+      signalPassFailure();
+  }
+};
 
 struct TritonHCUSelectBufferLdsConfigPass
     : impl::TritonHCUSelectBufferLdsConfigBase<

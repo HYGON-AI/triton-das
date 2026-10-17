@@ -7,7 +7,7 @@ from triton import knobs
 from triton.runtime.errors import HSACOError
 from dataclasses import dataclass
 from . import wasp
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 from types import ModuleType
 import hashlib
 import shutil
@@ -33,6 +33,18 @@ def is_in_thread_transpose_enabled(arch):
 
 def supports_buffer_lds(arch):
     return arch in ("gfx92a", "gfx936", "gfx938", "gfx946")
+
+
+def _validate_prefetch_distances(global_distance, lds_distance):
+    if type(lds_distance) is not int or not 1 <= lds_distance <= 7:
+        raise ValueError("planned prefetch requires LDS distance in 1..7")
+    if global_distance is None:
+        return
+    if type(global_distance) is not int or not 2 <= global_distance <= 8:
+        raise ValueError("planned prefetch requires global distance in 2..8")
+    if lds_distance >= global_distance:
+        raise ValueError(
+            "planned prefetch requires LDS distance < global distance")
 
 
 @dataclass(frozen=True)
@@ -140,6 +152,10 @@ class HIPOptions:
 
     # Per-kernel/autotune choice. Explicit options override the legacy env knob.
     use_async_copy: bool = False
+    # BufferLds global depth counts resident BK tiles; local depth counts
+    # A/B register fragments. None keeps the scheduler's default global depth.
+    block_pingpong_async_global_prefetch: Optional[int] = None
+    block_pingpong_async_local_prefetch: int = 1
 
     # Logical partition wave counts, Producers (Load) first, Consumers (MMA) last.
     # Tuple length selects 1P1C (P,C), 1P2C (P,C0,C1), or 2P2C (P0,P1,C0,C1).
@@ -256,6 +272,14 @@ class HIPBackend(BaseBackend):
         # allow_flush_denorm=True         -> True
         if opts.get("allow_flush_denorm_explicitly_set") is None:
             args["allow_flush_denorm_explicitly_set"] = opts.get("allow_flush_denorm") is not None
+
+        global_distance = args.get(
+            "block_pingpong_async_global_prefetch",
+            HIPOptions.block_pingpong_async_global_prefetch)
+        lds_distance = args.get(
+            "block_pingpong_async_local_prefetch",
+            HIPOptions.block_pingpong_async_local_prefetch)
+        _validate_prefetch_distances(global_distance, lds_distance)
 
         cluster = int(args.get("enable_v_mmac_cluster", 0))
         if cluster not in (0, 1, 2):
@@ -627,6 +651,10 @@ class HIPBackend(BaseBackend):
             and options.num_ctas == 1
             and knobs.amd.use_buffer_ops)
         if try_buffer_lds:
+            if options.use_block_pingpong and not metadata.get("wasp_enabled", False):
+                hcu.passes.ttgpuir.add_prepare_block_pingpong_layout(
+                    pm, options.block_pingpong_async_global_prefetch,
+                    options.block_pingpong_async_local_prefetch)
             hcu.passes.ttgpuir.add_select_buffer_lds_config(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm, knobs.amd.rlc_enhance)
         if options.optimize_epilogue:
@@ -677,14 +705,19 @@ class HIPBackend(BaseBackend):
         if not metadata.get("wasp_enabled", False) and not use_async_copy:
             hcu.passes.ttgpuir.add_mls_stream_pipeline(pm, options.num_stages, global_prefetch, use_async_copy)
 
-        use_block_pingpong = (options.use_block_pingpong and not use_async_copy
-                              and not metadata.get("wasp_enabled", False))
+        # The pass owns producer/consumer matching and safe fallback. Async
+        # copies do not require a specialized schedule to attempt pingpong.
+        use_block_pingpong = (
+            options.use_block_pingpong
+            and not metadata.get("wasp_enabled", False))
         # BlockPingpong relies on the buffer-op cache swizzle to distribute
         # neighboring workgroups across cache slices. Keep an explicit user
         # request effective as well, but force it on whenever PP is active.
         buffer_cache_swizzle = options.buffer_cache_swizzle or use_block_pingpong
         if use_block_pingpong:
-            hcu.passes.ttgpuir.add_prepare_block_pingpong(pm)
+            hcu.passes.ttgpuir.add_prepare_block_pingpong(
+                pm, options.block_pingpong_async_global_prefetch,
+                options.block_pingpong_async_local_prefetch)
         if not metadata.get("wasp_enabled", False):
             amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
             amd.passes.ttgpuir.add_pipeline(
@@ -707,7 +740,9 @@ class HIPBackend(BaseBackend):
 
         if use_block_pingpong:
             # amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
-            hcu.passes.ttgpuir.add_block_pingpong(pm)
+            hcu.passes.ttgpuir.add_block_pingpong(
+                pm, options.block_pingpong_async_global_prefetch,
+                options.block_pingpong_async_local_prefetch)
 
         if metadata.get("wasp_enabled", False):
             # Under WASP, num_stages is the LDS buffer depth (2 or 4), not AMD
@@ -736,8 +771,15 @@ class HIPBackend(BaseBackend):
                 buffer_cache_swizzle,
             )
             if uses_buffer_lds:
-                # Publish each proven producer before any LDS consumer.
                 hcu.passes.ttgpuir.add_convert_buffer_lds_copies(pm)
+                # Copy conversion is independent of synchronization ownership.
+                # The pipeline scheduler handles publication and slot reuse;
+                # standalone copies use immediate, conservative synchronization.
+                if use_block_pingpong:
+                    hcu.passes.ttgpuir.add_schedule_buffer_to_lds(
+                        pm, options.block_pingpong_async_local_prefetch)
+                else:
+                    hcu.passes.ttgpuir.add_synchronize_buffer_lds_copies(pm)
                 passes.common.add_canonicalizer(pm)
                 passes.ttgpuir.add_remove_layout_conversions(pm)
 

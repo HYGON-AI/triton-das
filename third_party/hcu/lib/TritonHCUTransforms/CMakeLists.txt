@@ -28,6 +28,7 @@ add_triton_library(TritonHCUTransforms
   BufferLdsEncoding.cpp
   SelectBufferLdsConfig.cpp
   ConvertBufferLdsCopies.cpp
+  ScheduleBufferToLds.cpp
   ApplyFuncHintsAndClean.cpp
   ConsumerPingpong.cpp
   BlockPingpong.cpp

@@ -19,6 +19,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <optional>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -26,11 +27,17 @@ namespace py = pybind11;
 
 namespace {
 
-void addBlockPingpongPipeline(mlir::PassManager &pm) {
+void addBlockPingpongPipeline(mlir::PassManager &pm,
+                              std::optional<unsigned> globalDistance,
+                              unsigned ldsDistance) {
   // Schedule split-BK M0-D0-M1-D1 or whole-BK M-D, turn slot parity into a
   // compile-time property with late 2K unrolling, then expose the two LDS slots
   // as independent buffers.
-  pm.addPass(mlir::createTritonHCUBlockPingpong());
+  mlir::TritonHCUBlockPingpongOptions options;
+  if (globalDistance)
+    options.globalPrefetchDistance = *globalDistance;
+  options.ldsPrefetchDistance = ldsDistance;
+  pm.addPass(mlir::createTritonHCUBlockPingpong(options));
   pm.addPass(mlir::triton::createTritonLoopUnroll());
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createTritonHCUFinalizeBlockPingpong());
@@ -45,6 +52,17 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
                             const std::string, int, int, int);
   ADD_PASS_WRAPPER_0("add_select_buffer_lds_config",
                      mlir::createTritonHCUSelectBufferLdsConfig);
+  m.def("add_prepare_block_pingpong_layout",
+        [](mlir::PassManager &pm,
+           std::optional<unsigned> globalDistance, unsigned ldsDistance) {
+          mlir::TritonHCUPrepareBlockPingpongLayoutOptions options;
+          if (globalDistance)
+            options.globalPrefetchDistance = *globalDistance;
+          options.ldsPrefetchDistance = ldsDistance;
+          pm.addPass(mlir::createTritonHCUPrepareBlockPingpongLayout(options));
+        }, py::arg("pm"),
+        py::arg("global_prefetch_distance") = py::none(),
+        py::arg("lds_prefetch_distance") = 1);
   ADD_PASS_OPTION_WRAPPER_1("add_prepare_wasp_split_plan",
                             mlir::createTritonHCUPrepareWaspSplitPlan, int);
   ADD_PASS_WRAPPER_0("add_consumer_pingpong",
@@ -62,12 +80,28 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_3("add_mls_stream_pipeline",
                             mlir::createTritonHCUMlsStreamPipeline, int, int,
                             bool);
-  ADD_PASS_WRAPPER_0("add_prepare_block_pingpong",
-                     mlir::createTritonHCUPrepareBlockPingpong);
+  m.def("add_prepare_block_pingpong",
+        [](mlir::PassManager &pm, std::optional<unsigned> globalDistance,
+           unsigned ldsDistance) {
+          mlir::TritonHCUPrepareBlockPingpongOptions options;
+          if (globalDistance)
+            options.globalPrefetchDistance = *globalDistance;
+          options.ldsPrefetchDistance = ldsDistance;
+          pm.addPass(mlir::createTritonHCUPrepareBlockPingpong(options));
+        }, py::arg("pm"), py::arg("global_prefetch_distance") = py::none(),
+        py::arg("lds_prefetch_distance") = 1);
   ADD_PASS_WRAPPER_0("add_utc_warmup", mlir::createTritonHCUUTCWarmup);
   ADD_PASS_WRAPPER_0("add_convert_buffer_lds_copies",
                      mlir::createTritonHCUConvertBufferLdsCopies);
-  m.def("add_block_pingpong", addBlockPingpongPipeline);
+  ADD_PASS_WRAPPER_0("add_synchronize_buffer_lds_copies",
+                     mlir::createTritonHCUSynchronizeBufferLdsCopies);
+  m.def("add_schedule_buffer_to_lds",
+        [](mlir::PassManager &pm, unsigned ldsDistance) {
+          pm.addPass(mlir::createTritonHCUScheduleBufferToLds({ldsDistance}));
+        }, py::arg("pm"), py::arg("lds_prefetch_distance") = 1);
+  m.def("add_block_pingpong", addBlockPingpongPipeline, py::arg("pm"),
+        py::arg("global_prefetch_distance") = py::none(),
+        py::arg("lds_prefetch_distance") = 1);
   ADD_PASS_WRAPPER_0("add_pack_block_pingpong_bit8",
                      mlir::createTritonHCUPackBlockPingpongBit8);
   ADD_PASS_WRAPPER_0("add_mls_encoding_insertion",

@@ -2,13 +2,33 @@
 include "mlir/Pass/PassBase.td"
 
 def TritonHCUConvertBufferLdsCopies : Pass<"tritonhcu-convert-buffer-lds-copies", "mlir::ModuleOp"> {
-  let summary = "Convert eligible HCU buffer loads into synchronized buffer-to-LDS copies";
+  let summary = "Convert eligible HCU buffer loads into buffer-to-LDS copies";
   let description = [{
     Replace a buffer load followed by a local allocation or store with a
     target-validated buffer-to-LDS copy. The pass preserves the selected
-    bank-conflict-aware LDS placement and inserts the commit, wait, and
-    workgroup barrier required before LDS consumers execute.
+    bank-conflict-aware LDS placement. Synchronization is deliberately left
+    to a subsequent synchronization or pipeline scheduling pass.
   }];
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
+
+def TritonHCUSynchronizeBufferLdsCopies : Pass<"tritonhcu-synchronize-buffer-lds-copies", "mlir::ModuleOp"> {
+  let summary = "Synchronize standalone BufferLds copies before their consumers";
+  let description = [{
+    Commit and wait for each wrapped buffer-to-LDS copy immediately after
+    submission. Add a workgroup barrier outside warp-specialized partitions.
+    Use this conservative path when no pipeline scheduler owns publication
+    and slot reuse. Run after copy conversion, instead of BufferLds scheduling.
+  }];
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
+
+def TritonHCUScheduleBufferToLds : Pass<"tritonhcu-schedule-buffer-to-lds", "mlir::ModuleOp"> {
+  let summary = "Schedule BufferLds publication and reuse for BlockPingpong";
+  let options = [
+    Option<"ldsPrefetchDistance", "lds-prefetch-distance", "unsigned", "1",
+           "Number of prefetched A/B fragments">
+  ];
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
 }
 
@@ -101,13 +121,38 @@ def TritonHCUMlsStreamPipeline : Pass<"tritonhcu-mls-stream-pipeline", "mlir::Mo
   ];
 }
 
+def TritonHCUPrepareBlockPingpongLayout
+    : Pass<"tritonhcu-prepare-block-pingpong-layout", "mlir::ModuleOp"> {
+  let summary = "Balance BufferLds consumer fragments for BlockPingpong";
+  let options = [
+    Option<"globalPrefetchDistance", "global-prefetch-distance", "unsigned", "4",
+           "Number of resident BufferLds generations">,
+    Option<"ldsPrefetchDistance", "lds-prefetch-distance", "unsigned", "1",
+           "Number of prefetched A/B fragments">
+  ];
+  let description = [{
+    Prepare eligible MMAC consumer layouts for the G4/R1 BufferLds pipeline.
+    Run after matmul acceleration and before BufferLds configuration selection,
+    so producer placement is selected against the balanced consumer layout.
+    Unsupported consumers and other prefetch distances are left unchanged.
+  }];
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
+}
+
 def TritonHCUPrepareBlockPingpong
     : Pass<"tritonhcu-prepare-block-pingpong", "mlir::ModuleOp"> {
   let summary = "Prepare HCU buffer-load loops for BlockPingpong";
+  let options = [
+    Option<"globalPrefetchDistance", "global-prefetch-distance", "unsigned", "4",
+           "Number of resident BufferLds generations">,
+    Option<"ldsPrefetchDistance", "lds-prefetch-distance", "unsigned", "1",
+           "Number of prefetched A/B fragments">
+  ];
   let description = [{
     Match structurally supported HCU BufferLoad-only BlockPingpong GEMM tiles
-    and annotate each loop with the fixed three-stage AMD pipeline schedule and
-    two LDS buffers. This pass does not reorder instructions.
+    and annotate each loop with its AMD pipeline stages and LDS buffer count.
+    Ordinary producers retain three stages and two buffers; BufferLds uses
+    the configured prefetch distances. This pass does not reorder instructions.
   }];
   let dependentDialects = [
     "mlir::triton::amdgpu::TritonAMDGPUDialect"
@@ -140,6 +185,12 @@ def TritonHCUUTCWarmup
 def TritonHCUBlockPingpong
     : Pass<"tritonhcu-block-pingpong", "mlir::ModuleOp"> {
   let summary = "Schedule HCU BufferLoad loops as BlockPingpong phases";
+  let options = [
+    Option<"globalPrefetchDistance", "global-prefetch-distance", "unsigned", "4",
+           "Number of resident BufferLds generations">,
+    Option<"ldsPrefetchDistance", "lds-prefetch-distance", "unsigned", "1",
+           "Number of prefetched A/B fragments">
+  ];
   let description = [{
     Reorder an HCU-marked, AMD-pipelined BufferLoad GEMM loop into the
     split-BK M0-D0-M1-D1 or whole-BK M-D phase sequence, add asymmetric wave

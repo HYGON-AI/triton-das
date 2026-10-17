@@ -1,5 +1,7 @@
 #include "TritonHCU/DsReadMLayout.h"
 #include "TritonHCU/Passes.h"
+#include "TritonHCU/BufferLdsPipeline.h"
+#include "TritonHCU/BufferLdsEncoding.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -360,6 +362,7 @@ constexpr StringLiteral kCandidateAttr =
 constexpr StringLiteral kAppliedAttr = "hcu.block_pingpong.applied";
 constexpr StringLiteral kStaticBuffersAttr =
     "hcu.block_pingpong.static_buffers";
+constexpr StringLiteral kSyncedViaAsyncWaitAttr = "ttg.amdg.syncedViaAsyncWait";
 constexpr StringLiteral kPingpongBufferAttr = "hcu.block_pingpong.lds_buffer";
 constexpr StringLiteral kSingleBufferAttr = "hcu.block_pingpong.single_buffer";
 constexpr StringLiteral kMaskedTailAttr = "hcu.block_pingpong.masked_tail";
@@ -371,7 +374,26 @@ constexpr StringLiteral kLocalStoreStageAttr =
 constexpr StringLiteral kNumBuffersAttr = "ttg.pipeline.hcu_num_buffers";
 constexpr StringLiteral kLoopUnrollFactorAttr = "tt.loop_unroll_factor";
 
-constexpr int32_t kRequiredStages = 3;
+// Select scheduling policy from this loop's actual LDS operands, not the
+// module's request to try planning copies. Other loops in the same module
+// must retain the default pipeline. Re-match after pipelining and unrolling:
+// their local loads keep the placement encoding, including on slot views.
+static bool hasSelectedBufferToLdsPlan(Operation *op) {
+  auto loop = dyn_cast<scf::ForOp>(op);
+  if (!loop)
+    loop = op->getParentOfType<scf::ForOp>();
+  if (!loop)
+    return false;
+  bool selected = false;
+  loop.walk([&](ttg::LocalLoadOp load) {
+    if (load->getParentOfType<scf::ForOp>() == loop &&
+        isa<ttg::HCUBufferLdsSharedEncodingAttr>(
+            load.getSrc().getType().getEncoding()))
+      selected = true;
+  });
+  return selected;
+}
+constexpr int32_t kDefaultRequiredStages = 3;
 constexpr int32_t kRequiredWarps = 8;
 constexpr int32_t kRequiredWaveSize = 64;
 constexpr int32_t kWaveIdShift = 6;
@@ -382,11 +404,28 @@ constexpr unsigned kOperandA = 0;
 constexpr unsigned kOperandB = 1;
 constexpr unsigned kFirstKHalf = 0;
 constexpr unsigned kSecondKHalf = 1;
-constexpr int32_t kNumLDSBuffers = 2;
 constexpr int32_t kLocalStoreStage = 1;
-constexpr int32_t kLateUnrollFactor = kNumKHalves;
+static unsigned getNumLDSBuffers(Operation *op, unsigned globalDistance = 4) {
+  if (!hasSelectedBufferToLdsPlan(op))
+    return 2;
+  auto loop = dyn_cast<scf::ForOp>(op);
+  if (!loop)
+    loop = op->getParentOfType<scf::ForOp>();
+  // Preparation records the selected ring depth on the loop for expansion
+  // and finalization. Before preparation, use the explicit pass option.
+  if (loop)
+    if (auto buffers = loop->getAttrOfType<IntegerAttr>(kNumBuffersAttr))
+      return buffers.getInt();
+  return globalDistance;
+}
 constexpr int64_t kMinimumBlockMN = 128;
 constexpr int64_t kBlockMNAlignment = 128;
+
+static int32_t getRequiredStages(Operation *op, unsigned globalDistance) {
+  return hasSelectedBufferToLdsPlan(op)
+             ? globalDistance + 2
+             : kDefaultRequiredStages;
+}
 constexpr int64_t kMaximumAccumulatorBlockMN = 256;
 constexpr int64_t kMaximumAccumulatorElements =
     kMaximumAccumulatorBlockMN * kMaximumAccumulatorBlockMN;
@@ -407,8 +446,6 @@ constexpr StringLiteral kPackBlockPingpongBit8Attr =
 
 static_assert(kRequiredWarps == 2 * kWaveGroupSize);
 static_assert(kRequiredWaveSize == (1 << kWaveIdShift));
-static_assert(kNumKHalves == kNumLDSBuffers &&
-              kNumKHalves == kLateUnrollFactor);
 
 bool hasShape(Type type, ArrayRef<int64_t> expected) {
   auto tensorType = dyn_cast<RankedTensorType>(type);
@@ -438,7 +475,9 @@ bool isDirectChildOf(Operation *op, Operation *parent) {
 
 bool hasRequiredWaveConfiguration(Operation *op) {
   auto module = op->getParentOfType<ModuleOp>();
-  return module && ttg::lookupNumWarps(op) == kRequiredWarps &&
+  return module &&
+         (hasSelectedBufferToLdsPlan(op) ? ttg::lookupNumWarps(op) >= 1
+                                              : ttg::lookupNumWarps(op) == kRequiredWarps) &&
          ttg::TritonGPUDialect::getThreadsPerWarp(module) == kRequiredWaveSize;
 }
 
@@ -538,8 +577,9 @@ bool hasUnsupportedSourceSideEffects(scf::ForOp loop) {
 // Recover the logical GEMM tile [BM, BK] x [BK, BN] -> [BM, BN] from the dot
 // and return {BM, BN, BK}.  Besides basic rank/shape consistency, this helper
 // validates the measured M/N workload, MFMA-compatible BK/2 halves, operand
-// types/encodings, and the 64 KiB budget for the selected physical LDS scheme.
-FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
+// types/encodings, and the target budget for the selected physical LDS scheme.
+FailureOr<BlockTile> getSupportedTile(tt::DotOp dot,
+                                    unsigned globalDistance = 4) {
   auto resultType = dyn_cast<RankedTensorType>(dot.getType());
   auto aType = dyn_cast<RankedTensorType>(dot.getA().getType());
   auto bType = dyn_cast<RankedTensorType>(dot.getB().getType());
@@ -558,9 +598,10 @@ FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
   // Keep M/N on the measured 128-element granularity and cap the accumulator
   // footprint at the 256x256 case, which leaves headroom under HCU's 256-VGPR
   // limit for the loop-carried A/B prefetch values.
-  if (blockM < kMinimumBlockMN || blockN < kMinimumBlockMN ||
+  if (!hasSelectedBufferToLdsPlan(dot) &&
+      (blockM < kMinimumBlockMN || blockN < kMinimumBlockMN ||
       blockM % kBlockMNAlignment != 0 || blockN % kBlockMNAlignment != 0 ||
-      blockM > kMaximumAccumulatorElements / blockN)
+      blockM > kMaximumAccumulatorElements / blockN))
     return failure();
 
   if (!hasSupportedElementType(aType) || !hasSupportedElementType(bType) ||
@@ -604,10 +645,15 @@ FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
       mfmaEncoding.getInstrShapeForOperand(aEncoding.getKWidth(), kOperandA);
   auto bInstrShape =
       mfmaEncoding.getInstrShapeForOperand(bEncoding.getKWidth(), kOperandB);
+  if (aInstrShape.size() != 2 || bInstrShape.size() != 2)
+    return failure();
   int64_t halfK = blockK / kNumKHalves;
-  if (aInstrShape.size() != 2 || bInstrShape.size() != 2 ||
-      halfK < aInstrShape[1] || halfK < bInstrShape[0] ||
-      halfK % aInstrShape[1] != 0 || halfK % bInstrShape[0] != 0)
+  bool isBit16WholeInstruction =
+      hasSelectedBufferToLdsPlan(dot) &&
+      blockK % aInstrShape[1] == 0 && blockK % bInstrShape[0] == 0;
+  if (!isBit16WholeInstruction &&
+      (halfK < aInstrShape[1] || halfK < bInstrShape[0] ||
+       halfK % aInstrShape[1] != 0 || halfK % bInstrShape[0] != 0))
     return failure();
 
   // The proved asymmetric BK128 extensions make the larger operand physical
@@ -618,12 +664,28 @@ FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
   unsigned storageBitWidth = getStorageBitWidth(aType);
   int64_t aTileBits = blockM * blockK * storageBitWidth;
   int64_t bTileBits = blockK * blockN * storageBitWidth;
-  int64_t requiredLDSBits = kNumLDSBuffers * (aTileBits + bTileBits);
-  if (usesSingleABuffer(blockM, blockN, blockK, storageBitWidth))
-    requiredLDSBits = aTileBits + kNumLDSBuffers * bTileBits;
-  else if (usesSingleBBuffer(blockM, blockN, blockK, storageBitWidth))
-    requiredLDSBits = kNumLDSBuffers * aTileBits + bTileBits;
-  if (requiredLDSBits > kMaximumLDSBytes * kBitsPerByte)
+  int64_t requiredLDSBits =
+      getNumLDSBuffers(dot, globalDistance) * (aTileBits + bTileBits);
+  if (!hasSelectedBufferToLdsPlan(dot) &&
+      usesSingleABuffer(blockM, blockN, blockK, storageBitWidth))
+    requiredLDSBits = aTileBits + getNumLDSBuffers(dot) * bTileBits;
+  else if (!hasSelectedBufferToLdsPlan(dot) &&
+           usesSingleBBuffer(blockM, blockN, blockK, storageBitWidth))
+    requiredLDSBits = getNumLDSBuffers(dot) * aTileBits + bTileBits;
+  int64_t capacityBytes = kMaximumLDSBytes;
+  if (hasSelectedBufferToLdsPlan(dot)) {
+    auto target = dot->getParentOfType<ModuleOp>()->getAttrOfType<StringAttr>(
+        "ttg.target");
+    if (!target || !target.getValue().starts_with("hip:"))
+      return failure();
+    StringRef arch = target.getValue().drop_front(4);
+    auto profile = tt::HCU::getBufferLdsTargetProfile(
+        std::string_view(arch.data(), arch.size()));
+    if (!profile)
+      return failure();
+    capacityBytes = profile->lds.capacityBytes;
+  }
+  if (requiredLDSBits > capacityBytes * kBitsPerByte)
     return failure();
 
   return BlockTile{blockM, blockN, blockK};
@@ -634,7 +696,8 @@ FailureOr<BlockTile> getSupportedTile(tt::DotOp dot) {
 // source per operand. Independent auxiliary reads are allowed; all shape,
 // type, MFMA, LDS, side-effect, and control-flow checks are completed before
 // Prepare attaches the cross-pass candidate marker.
-FailureOr<OriginalCandidate> matchOriginalCandidate(scf::ForOp loop) {
+FailureOr<OriginalCandidate> matchOriginalCandidate(scf::ForOp loop,
+                                                  unsigned globalDistance) {
   if (!hasRequiredWaveConfiguration(loop))
     return failure();
 
@@ -677,7 +740,17 @@ FailureOr<OriginalCandidate> matchOriginalCandidate(scf::ForOp loop) {
       !isDirectChildOf(*loadA, loop) || !isDirectChildOf(*loadB, loop))
     return failure();
 
-  auto supportedTile = getSupportedTile(dot);
+  // The phase scheduler rematches direct local_load -> dot chains. A
+  // storage-to-MMAC conversion (e.g. FP8 emulation on gfx936) needs an
+  // additional live fragment; leave it on the ordinary software pipeline.
+  // Its planned buffer copies remain independently usable.
+  if (cast<RankedTensorType>(loadA->getType()).getElementType() !=
+          dot.getA().getType().getElementType() ||
+      cast<RankedTensorType>(loadB->getType()).getElementType() !=
+          dot.getB().getType().getElementType())
+    return failure();
+
+  auto supportedTile = getSupportedTile(dot, globalDistance);
   if (failed(supportedTile))
     return failure();
 
@@ -714,9 +787,11 @@ bool hasRequiredGlobalLoadVectorization(
       vectorElements =
           std::min(vectorElements, axisInfoAnalysis.getMaskAlignment(mask));
     unsigned vectorBits = vectorElements * loadType.getElementTypeBitWidth();
-    if (vectorBits < kRequiredGlobalLoadBits) {
+    unsigned requiredBits = hasSelectedBufferToLdsPlan(load)
+                                ? 32 : kRequiredGlobalLoadBits;
+    if (vectorBits < requiredBits) {
       LDBG("Reject HCU BufferLoad BlockPingpong: load vector width is "
-           << vectorBits << " bits, required " << kRequiredGlobalLoadBits);
+           << vectorBits << " bits, required " << requiredBits);
       return false;
     }
     return true;
@@ -1071,7 +1146,7 @@ OriginalCandidate applyKBoundaryTailPlan(const KBoundaryTailPlan &plan) {
 // Split the one-shot masked tail dot into two ordered BK/2 dots.  The tail does
 // not participate in phase pingpong, but halving its A/B local-load live ranges
 // prevents the full-BK operands from exceeding HCU's 256-VGPR limit.
-LogicalResult sliceMaskedTailDot(Operation *tail) {
+LogicalResult sliceMaskedTailDot(Operation *tail, unsigned globalDistance) {
   if (!tail->hasAttr(kMaskedTailAttr) || tail->hasAttr(kMaskedTailSlicedAttr))
     return failure();
 
@@ -1080,7 +1155,7 @@ LogicalResult sliceMaskedTailDot(Operation *tail) {
   if (dots.size() != 1)
     return failure();
   tt::DotOp dot = dots.front();
-  auto supportedTile = getSupportedTile(dot);
+  auto supportedTile = getSupportedTile(dot, globalDistance);
   if (failed(supportedTile))
     return failure();
   auto [blockM, blockN, blockK] = *supportedTile;
@@ -1163,12 +1238,14 @@ struct ExpandedCandidate {
 
 struct StaticBufferPlan {
   ttg::LocalAllocOp combinedAlloc;
-  SmallVector<ttg::MemDescIndexOp, kNumLDSBuffers> hotIndices;
+  SmallVector<ttg::MemDescIndexOp> hotIndices;
+  unsigned firstHotSlot;
 };
 
-// Match the canonical two-slot ring update `(index + 1 < 2) ? index + 1 : 0`
+// Match the canonical ring update
+// `(index + 1 < numBuffers) ? index + 1 : 0`
 // emitted by AMD Pipeline and return the current index feeding the increment.
-FailureOr<Value> matchModuloTwoIncrement(Value result) {
+FailureOr<Value> matchRingIncrement(Value result, unsigned numBuffers) {
   auto select = result.getDefiningOp<arith::SelectOp>();
   if (!select)
     return failure();
@@ -1198,12 +1275,12 @@ FailureOr<Value> matchModuloTwoIncrement(Value result) {
   if (!compare || compare.getPredicate() != arith::CmpIPredicate::slt ||
       compare.getLhs() != add.getResult() ||
       !matchPattern(compare.getRhs(), m_ConstantInt(&limit)) ||
-      limit.getSExtValue() != kNumLDSBuffers)
+      limit.getSExtValue() != numBuffers)
     return failure();
   return base;
 }
 
-bool requiresStaticDoubleBufferMaterialization(scf::ForOp loop) {
+bool requiresStaticRingMaterialization(scf::ForOp loop) {
   if (!loop->hasAttr(kAppliedAttr) || loop->hasAttr(kStaticBuffersAttr) ||
       loop->hasAttr(kLoopUnrollFactorAttr))
     return false;
@@ -1212,16 +1289,17 @@ bool requiresStaticDoubleBufferMaterialization(scf::ForOp loop) {
   return true;
 }
 
-// After late unroll=2, identify the A and B two-slot allocations and prove that
-// their two hot MemDescIndex operations are the consecutive slot1/slot0 pair.
+// After late unroll=N, identify the A and B N-slot allocations and prove that
+// their hot MemDescIndex operations are one complete consecutive ring turn.
 // The proof also verifies the loop-carried ring/index ties before Finalize
 // replaces the combined allocations.
-FailureOr<SmallVector<StaticBufferPlan, kNumLDSBuffers>>
-matchStaticDoubleBuffers(scf::ForOp loop) {
-  if (!requiresStaticDoubleBufferMaterialization(loop))
+FailureOr<SmallVector<StaticBufferPlan>>
+matchStaticRingBuffers(scf::ForOp loop) {
+  const unsigned numBuffers = getNumLDSBuffers(loop);
+  if (!requiresStaticRingMaterialization(loop))
     return failure();
 
-  DenseMap<Operation *, SmallVector<ttg::MemDescIndexOp, kNumLDSBuffers>>
+  DenseMap<Operation *, SmallVector<ttg::MemDescIndexOp>>
       groupedIndices;
   bool hasMarkedAllocation = false;
   for (Operation &op : loop.getBody()->without_terminator()) {
@@ -1249,21 +1327,26 @@ matchStaticDoubleBuffers(scf::ForOp loop) {
     return failure();
 
   auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
-  SmallVector<StaticBufferPlan, kNumLDSBuffers> plans;
+  SmallVector<StaticBufferPlan> plans;
   for (auto &[allocOp, hotIndices] : groupedIndices) {
     auto alloc = cast<ttg::LocalAllocOp>(allocOp);
     auto allocType = alloc.getType();
     if (allocType.getShape().empty() ||
-        allocType.getShape().front() != kNumLDSBuffers ||
-        hotIndices.size() != kLateUnrollFactor ||
+        allocType.getShape().front() != numBuffers ||
+        hotIndices.size() != numBuffers ||
         hotIndices[0].getType() != hotIndices[1].getType())
       return failure();
 
-    auto ringIndex = matchModuloTwoIncrement(hotIndices[0].getIndex());
-    auto secondBase = matchModuloTwoIncrement(hotIndices[1].getIndex());
-    if (failed(ringIndex) || failed(secondBase) ||
-        *secondBase != hotIndices[0].getIndex())
+    auto ringIndex = matchRingIncrement(hotIndices[0].getIndex(), numBuffers);
+    if (failed(ringIndex))
       return failure();
+    Value previousIndex = hotIndices[0].getIndex();
+    for (unsigned i = 1; i < hotIndices.size(); ++i) {
+      auto base = matchRingIncrement(hotIndices[i].getIndex(), numBuffers);
+      if (failed(base) || *base != previousIndex)
+        return failure();
+      previousIndex = hotIndices[i].getIndex();
+    }
     auto ringArgument = dyn_cast<BlockArgument>(*ringIndex);
     if (!ringArgument || ringArgument.getOwner() != loop.getBody() ||
         ringArgument.getArgNumber() == 0)
@@ -1273,59 +1356,92 @@ matchStaticDoubleBuffers(scf::ForOp loop) {
     if (ringIterIndex >= loop.getInitArgs().size() ||
         !matchPattern(loop.getInitArgs()[ringIterIndex],
                       m_ConstantInt(&initialRingIndex)) ||
-        initialRingIndex.getSExtValue() != 0 ||
-        yield.getOperand(ringIterIndex) != hotIndices[1].getIndex())
+        initialRingIndex.isNegative() ||
+        initialRingIndex.getZExtValue() >= numBuffers ||
+        yield.getOperand(ringIterIndex) != hotIndices.back().getIndex())
       return failure();
 
-    std::optional<unsigned> carriedIndex;
+    // Prove every resident view independently and tie its backedge to the hot
+    // index writing the same physical slot. The direct prologue carries all
+    // four slots, with its next generation prefetched in a tensor; ordinary
+    // double buffering carries just one view.
+    llvm::SmallDenseSet<int64_t> carriedSlots;
+    unsigned numCarriedViews = 0;
+    unsigned firstHotSlot = (initialRingIndex.getZExtValue() + 1) % numBuffers;
     for (auto [index, init] : llvm::enumerate(loop.getInitArgs())) {
       auto initView = init.getDefiningOp<ttg::MemDescIndexOp>();
       if (!initView || initView.getSrc() != alloc.getResult())
         continue;
       APInt initialSlot;
       if (!matchPattern(initView.getIndex(), m_ConstantInt(&initialSlot)) ||
-          initialSlot.getSExtValue() != 0 || carriedIndex)
+          initialSlot.isNegative() ||
+          initialSlot.getZExtValue() >= numBuffers ||
+          !carriedSlots.insert(initialSlot.getSExtValue()).second)
         return failure();
-      carriedIndex = index;
+      auto yieldedView =
+          yield.getOperand(index).getDefiningOp<ttg::MemDescIndexOp>();
+      if (!yieldedView || yieldedView.getSrc() != alloc.getResult())
+        return failure();
+      auto hotIt = llvm::find(hotIndices, yieldedView);
+      if (hotIt == hotIndices.end())
+        return failure();
+      unsigned hotPosition = std::distance(hotIndices.begin(), hotIt);
+      unsigned yieldedSlot = (firstHotSlot + hotPosition) % numBuffers;
+      if (yieldedSlot != initialSlot.getZExtValue())
+        return failure();
+      ++numCarriedViews;
     }
-    if (!carriedIndex ||
-        yield.getOperand(*carriedIndex) != hotIndices.back().getResult())
+    // The six-stage direct pipeline keeps all N LDS generations resident;
+    // its additional prefetch is a tensor, not another LDS slot. Ordinary
+    // double buffering retains the original N-1 carried-view contract.
+    unsigned expectedViews =
+        hasSelectedBufferToLdsPlan(loop) ? numBuffers : numBuffers - 1;
+    if (numCarriedViews != expectedViews)
       return failure();
 
     for (Operation *user : alloc.getResult().getUsers()) {
       if (!isa<ttg::MemDescIndexOp, ttg::LocalDeallocOp>(user))
         return failure();
     }
-    plans.push_back({alloc, std::move(hotIndices)});
+    plans.push_back({alloc, std::move(hotIndices), firstHotSlot});
   }
   return plans;
 }
 
-// Replace a view of combined [2, ...] storage with one of two independent
-// allocations.  Hot constant indices fold directly; cold epilogue indices use
-// an scf.if because their runtime parity is no longer statically known.
+// Replace a view of combined [N, ...] storage with one of N independent
+// allocations. Hot indices are replaced directly; cold epilogue indices use
+// a short scf.if chain because their runtime ring position is not static.
 Value selectStaticBuffer(OpBuilder &builder, ttg::MemDescIndexOp index,
-                         Value slot0, Value slot1) {
+                         ArrayRef<Value> slots) {
   APInt constantIndex;
   if (matchPattern(index.getIndex(), m_ConstantInt(&constantIndex))) {
     int64_t slot = constantIndex.getSExtValue();
-    assert((slot >= 0 && slot < kNumLDSBuffers) &&
-           "two-slot buffer index must be zero or one");
-    return slot == 0 ? slot0 : slot1;
+    assert((slot >= 0 && slot < static_cast<int64_t>(slots.size())) &&
+           "ring buffer index must be in range");
+    return slots[slot];
   }
 
   Location loc = index.getLoc();
   auto indexType = cast<IntegerType>(index.getIndex().getType());
-  Value zero = arith::ConstantOp::create(builder, loc,
-                                         builder.getIntegerAttr(indexType, 0));
-  Value isZero = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq,
-                                       index.getIndex(), zero);
-  auto ifOp = scf::IfOp::create(builder, loc, index.getType(), isZero, true);
-  OpBuilder thenBuilder = ifOp.getThenBodyBuilder();
-  scf::YieldOp::create(thenBuilder, loc, slot0);
-  OpBuilder elseBuilder = ifOp.getElseBodyBuilder();
-  scf::YieldOp::create(elseBuilder, loc, slot1);
-  return ifOp.getResult(0);
+  std::function<Value(OpBuilder &, unsigned)> selectFrom =
+      [&](OpBuilder &nestedBuilder, unsigned slot) -> Value {
+    if (slot + 1 == slots.size())
+      return slots[slot];
+    Value slotConstant = arith::ConstantOp::create(
+        nestedBuilder, loc, nestedBuilder.getIntegerAttr(indexType, slot));
+    Value matches =
+        arith::CmpIOp::create(nestedBuilder, loc, arith::CmpIPredicate::eq,
+                              index.getIndex(), slotConstant);
+    auto ifOp =
+        scf::IfOp::create(nestedBuilder, loc, index.getType(), matches, true);
+    OpBuilder thenBuilder = ifOp.getThenBodyBuilder();
+    scf::YieldOp::create(thenBuilder, loc, slots[slot]);
+    OpBuilder elseBuilder = ifOp.getElseBodyBuilder();
+    Value fallback = selectFrom(elseBuilder, slot + 1);
+    scf::YieldOp::create(elseBuilder, loc, fallback);
+    return ifOp.getResult(0);
+  };
+  return selectFrom(builder, 0);
 }
 
 // Return whether a memdesc is carried from one specific combined allocation.
@@ -1420,13 +1536,12 @@ LogicalResult makeSingleBufferEpilogueSafe(scf::ForOp loop, Value buffer) {
 // single-buffer operand maps both logical generations to one allocation; its
 // explicit read-retirement and write-publication barriers make that physical
 // alias safe and visible to Membar.
-LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
-  auto plans = matchStaticDoubleBuffers(loop);
+LogicalResult materializeStaticRingBuffers(scf::ForOp loop) {
+  auto plans = matchStaticRingBuffers(loop);
   if (failed(plans))
     return failure();
 
-  // A two-BK main body always starts on slot0.  The first cloned BK consumes
-  // slot0 and publishes slot1; the second consumes slot1 and publishes slot0.
+  // The main body starts on slot0 and each cloned BK advances the ring once.
   // Giving each slot its own LocalAllocOp makes this disjointness visible to
   // Allocation/Membar.  It therefore proves the three hot-path transitions
   // below safe without an inserted local_barrier:
@@ -1439,6 +1554,7 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
   // scf.if.  A single-buffer epilogue instead uses slot0 after the explicit
   // load/barrier/store/barrier protection above. Neither case changes the
   // steady-state BlockPingpong phases.
+  SmallVector<SmallVector<Value>> plannedSlots;
   for (StaticBufferPlan &plan : *plans) {
     ttg::LocalAllocOp combined = plan.combinedAlloc;
     Type slotType = plan.hotIndices.front().getType();
@@ -1447,17 +1563,23 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
     if (isSingleBuffer &&
         failed(makeSingleBufferEpilogueSafe(loop, combined.getResult())))
       return failure();
-    Value slot0 =
-        ttg::LocalAllocOp::create(builder, combined.getLoc(), slotType);
-    Value slot1 =
-        isSingleBuffer
-            ? slot0
-            : ttg::LocalAllocOp::create(builder, combined.getLoc(), slotType)
-                  .getResult();
+    SmallVector<Value> slots;
+    for (unsigned i = 0; i < plan.hotIndices.size(); ++i)
+      slots.push_back(isSingleBuffer && i != 0
+                          ? slots.front()
+                          : ttg::LocalAllocOp::create(
+                                builder, combined.getLoc(), slotType).getResult());
+    if (!isSingleBuffer && isa<ttg::HCUBufferLdsSharedEncodingAttr>(
+                               cast<ttg::MemDescType>(slotType).getEncoding()))
+      plannedSlots.push_back(slots);
 
     DenseMap<Operation *, Value> hotReplacements;
-    hotReplacements[plan.hotIndices[0]] = slot1;
-    hotReplacements[plan.hotIndices[1]] = slot0;
+    // Each unrolled body publishes the next slot.  The four-prefetch prologue
+    // starts the loop with ring index 2, hence its full turn is 3,0,1,2 rather
+    // than the old double-buffer-specific 1,2,... sequence.
+    for (unsigned i = 0; i < plan.hotIndices.size(); ++i)
+      hotReplacements[plan.hotIndices[i]] =
+          slots[(plan.firstHotSlot + i) % slots.size()];
 
     SmallVector<ttg::MemDescIndexOp> allIndices;
     SmallVector<ttg::LocalDeallocOp> deallocs;
@@ -1473,10 +1595,10 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
       Value replacement = hotReplacements.lookup(index);
       if (!replacement) {
         if (isSingleBuffer) {
-          replacement = slot0;
+          replacement = slots.front();
         } else {
           builder.setInsertionPoint(index);
-          replacement = selectStaticBuffer(builder, index, slot0, slot1);
+          replacement = selectStaticBuffer(builder, index, slots);
         }
       }
       index.replaceAllUsesWith(replacement);
@@ -1484,12 +1606,43 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
     }
     for (ttg::LocalDeallocOp dealloc : deallocs) {
       builder.setInsertionPoint(dealloc);
-      if (!isSingleBuffer)
-        ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slot1);
-      ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slot0);
+      if (isSingleBuffer) {
+        ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slots.front());
+      } else {
+        for (Value slot : llvm::reverse(slots))
+          ttg::LocalDeallocOp::create(builder, dealloc.getLoc(), slot);
+      }
       dealloc.erase();
     }
     combined.erase();
+  }
+
+  // Order independent planned allocations by generation, keeping each
+  // operand's encoding and identity. Never rewrite physical address constants.
+  if (plannedSlots.size() == 2 &&
+      plannedSlots[0].size() == plannedSlots[1].size()) {
+    Operation *anchor = plannedSlots[0].front().getDefiningOp();
+    bool sameBlock = llvm::all_of(plannedSlots, [&](const auto &slots) {
+      return llvm::all_of(slots, [&](Value slot) {
+        return slot.getDefiningOp()->getBlock() == anchor->getBlock();
+      });
+    });
+    if (sameBlock) {
+      Operation *first = anchor;
+      for (const auto &slots : plannedSlots)
+        for (Value slot : slots)
+          if (slot.getDefiningOp()->isBeforeInBlock(first))
+            first = slot.getDefiningOp();
+      if (anchor != first)
+        anchor->moveBefore(first);
+      for (unsigned i = 0; i < plannedSlots[0].size(); ++i)
+        for (const auto &slots : plannedSlots) {
+          Operation *alloc = slots[i].getDefiningOp();
+          if (alloc != anchor)
+            alloc->moveAfter(anchor);
+          anchor = alloc;
+        }
+    }
   }
 
   loop->setAttr(kStaticBuffersAttr, UnitAttr::get(loop.getContext()));
@@ -1497,9 +1650,8 @@ LogicalResult materializeStaticDoubleBuffers(scf::ForOp loop) {
 }
 
 // Follow a local-load memdesc through a loop-carried block argument and return
-// the two-generation LDS allocation that owns it.
-FailureOr<ttg::LocalAllocOp> findTwoSlotAllocation(Value value,
-                                                   scf::ForOp loop) {
+// the selected-depth LDS allocation that owns it.
+FailureOr<ttg::LocalAllocOp> findRingAllocation(Value value, scf::ForOp loop) {
   llvm::SmallDenseSet<Value> visited;
   std::function<FailureOr<ttg::LocalAllocOp>(Value)> trace =
       [&](Value current) -> FailureOr<ttg::LocalAllocOp> {
@@ -1510,7 +1662,7 @@ FailureOr<ttg::LocalAllocOp> findTwoSlotAllocation(Value value,
       auto sourceType = dyn_cast<ttg::MemDescType>(index.getSrc().getType());
       auto alloc = index.getSrc().getDefiningOp<ttg::LocalAllocOp>();
       if (sourceType && alloc && !sourceType.getShape().empty() &&
-          sourceType.getShape().front() == kNumLDSBuffers)
+          sourceType.getShape().front() == getNumLDSBuffers(loop))
         return alloc;
       return failure();
     }
@@ -1658,8 +1810,8 @@ FailureOr<ExpandedCandidate> matchExpandedCandidate(scf::ForOp loop) {
   auto localB = dot.getB().getDefiningOp<ttg::LocalLoadOp>();
   if (!localA || !localB || !localA->hasOneUse() || !localB->hasOneUse())
     return failure();
-  auto allocA = findTwoSlotAllocation(localA.getSrc(), loop);
-  auto allocB = findTwoSlotAllocation(localB.getSrc(), loop);
+  auto allocA = findRingAllocation(localA.getSrc(), loop);
+  auto allocB = findRingAllocation(localB.getSrc(), loop);
   if (failed(allocA) || failed(allocB) || *allocA == *allocB)
     return failure();
 
@@ -1693,13 +1845,14 @@ FailureOr<ExpandedCandidate> matchExpandedCandidate(scf::ForOp loop) {
 // finalization.
 class BufferLoadPingponger {
 public:
-  explicit BufferLoadPingponger(ExpandedCandidate candidate)
-      : candidate(candidate) {}
+  BufferLoadPingponger(ExpandedCandidate candidate, unsigned ldsDistance)
+      : candidate(candidate), ldsPrefetchDistance(ldsDistance) {}
 
   LogicalResult run();
-
+  scf::ForOp getLoop() const { return candidate.loop; }
 private:
   ExpandedCandidate candidate;
+  unsigned ldsPrefetchDistance;
   SmallVector<SmallVector<Operation *, kNumKHalves>, kNumOperands> subviews;
   SmallVector<SmallVector<Operation *, kNumKHalves>, kNumOperands> slicedLoads;
   SmallVector<Operation *, kNumKHalves> slicedDots;
@@ -1708,6 +1861,8 @@ private:
   Value waveHighPredicate;
   int32_t kWidth = 0;
 
+  LogicalResult runDefault();
+  LogicalResult runPlannedPipeline();
   LogicalResult validateSlicing();
   LogicalResult sliceDot(OpBuilder &builder);
   LogicalResult createOperandSlices(OpBuilder &builder, Value operand,
@@ -1729,6 +1884,9 @@ private:
   LogicalResult scheduleBit8Phases(OpBuilder &builder, Location loc,
                                    bool usePanelB);
   LogicalResult scheduleBit8WholeTilePhases(OpBuilder &builder, Location loc);
+  LogicalResult scheduleBit16WholeTilePhases(OpBuilder &builder, Location loc);
+  LogicalResult pipelineBit16Fragments(OpBuilder &builder);
+  LogicalResult deferPlannedEpilogueRefill(OpBuilder &builder, Location loc);
   FailureOr<Operation *> findAccumulatorUpdateRoot(Operation *dot);
   LogicalResult moveAccumulatorUpdateAfterDot(Operation *dot);
   LogicalResult scheduleBit16Phases(OpBuilder &builder, Location loc,
@@ -1736,6 +1894,231 @@ private:
   bool shouldIssueBit8BFirst() const;
   void addAsymmetricSync(OpBuilder &builder, Location loc);
 };
+
+// Carry a queue of R complete A+B fragments, where R is the LDS lookahead.
+// Rebuild the post-pipeline loop with this SSA contract:
+//
+//   prologue: fragment[j] = local_load(lds[j]), j in [0, R)
+//   steady : dot(fragment[i]); fragment[i+R] = local_load(lds[i+R])
+//   yield  : shift queue and append fragment[i+R]
+//
+// The scheduler can then put the next B matrix read and A scalar reads in the
+// memory phase without making the current dot wait for them.  This is kept
+// deliberately narrow: the source for both current local loads and the next
+// generation selected by the loop yield must be direct loop-carried memdescs.
+LogicalResult BufferLoadPingponger::pipelineBit16Fragments(OpBuilder &builder) {
+  scf::ForOp oldLoop = candidate.loop;
+  Block *body = oldLoop.getBody();
+  auto oldYield = dyn_cast<scf::YieldOp>(body->getTerminator());
+  if (!oldYield) {
+    oldLoop.emitError("VGPR pipeline: missing scf.yield");
+    return failure();
+  }
+
+  auto getIterIndex = [&](Value source) -> FailureOr<unsigned> {
+    auto argument = dyn_cast<BlockArgument>(source);
+    if (!argument || argument.getOwner() != body ||
+        argument.getArgNumber() == 0)
+      return failure();
+    unsigned index = argument.getArgNumber() - 1;
+    if (index >= oldLoop.getInitArgs().size() ||
+        index >= oldYield.getNumOperands())
+      return failure();
+    return index;
+  };
+
+  FailureOr<unsigned> aIndex = getIterIndex(candidate.localA.getSrc());
+  FailureOr<unsigned> bIndex = getIterIndex(candidate.localB.getSrc());
+  if (failed(aIndex) || failed(bIndex) || *aIndex == *bIndex) {
+    oldLoop.emitError(
+        "VGPR pipeline: current LDS sources are not distinct loop arguments");
+    return failure();
+  }
+
+  unsigned distance = ldsPrefetchDistance;
+  SmallVector<unsigned> aIndices{*aIndex}, bIndices{*bIndex};
+  for (unsigned i = 0; i < distance; ++i) {
+    auto nextA = getIterIndex(oldYield.getOperand(aIndices.back()));
+    auto nextB = getIterIndex(oldYield.getOperand(bIndices.back()));
+    if (failed(nextA) || failed(nextB))
+      return oldLoop.emitError("fragment prefetch exceeds the resident LDS chain");
+    aIndices.push_back(*nextA);
+    bIndices.push_back(*nextB);
+  }
+  Value nextASource = oldYield.getOperand(aIndices[distance - 1]);
+  Value nextBSource = oldYield.getOperand(bIndices[distance - 1]);
+  auto nextAArgument = dyn_cast<BlockArgument>(nextASource);
+  auto nextBArgument = dyn_cast<BlockArgument>(nextBSource);
+  if (!nextAArgument || !nextBArgument || nextAArgument.getOwner() != body ||
+      nextBArgument.getOwner() != body) {
+    oldLoop.emitError("VGPR pipeline: next LDS sources are not loop arguments");
+    return failure();
+  }
+
+  // Match rocBLAS' issue order in both the prologue and steady state: the
+  // longer B ds_read_m32x16 is issued before A's ds_read_b64 family.
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPoint(oldLoop);
+  // Leave the first wrapped preload as the publication anchor.  The late
+  // buffer-to-LDS conversion inserts one full wait/barrier immediately before
+  // that load, after producer retiming has finished.  Every later wrapped
+  // preload consumes the same already-published set of resident slots, so
+  // mark it covered rather than serializing each A/B LDS read separately.
+  bool needsInitialPublicationAnchor = true;
+  auto coverByInitialPublication = [&](ttg::LocalLoadOp load) {
+    if (!isa<ttg::HCUBufferLdsSharedEncodingAttr>(
+            load.getSrc().getType().getEncoding()))
+      return;
+    if (needsInitialPublicationAnchor) {
+      needsInitialPublicationAnchor = false;
+      return;
+    }
+    load->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  };
+  SmallVector<Value> initialFragments;
+  for (unsigned i = 0; i < distance; ++i) {
+    auto preloadA = ttg::LocalLoadOp::create(
+        builder, candidate.localA.getLoc(), candidate.localA.getType(),
+        oldLoop.getInitArgs()[aIndices[i]]);
+    auto preloadB = ttg::LocalLoadOp::create(
+        builder, candidate.localB.getLoc(), candidate.localB.getType(),
+        oldLoop.getInitArgs()[bIndices[i]]);
+    auto bConsumer = dyn_cast<ttg::DotOperandEncodingAttr>(
+        preloadB.getType().getEncoding());
+    if (tt::HCU::canUseBufferLdsMatrixRead(preloadB.getSrc().getType(),
+                                        bConsumer)) {
+      preloadB->moveBefore(preloadA);
+      coverByInitialPublication(preloadB);
+      coverByInitialPublication(preloadA);
+    } else {
+      coverByInitialPublication(preloadA);
+      coverByInitialPublication(preloadB);
+    }
+    initialFragments.append({preloadA.getResult(), preloadB.getResult()});
+  }
+
+  unsigned oldBodyArguments = body->getNumArguments();
+  scf::ForOp newLoop = addIterArgsToLoop(builder, oldLoop, initialFragments);
+  candidate.loop = newLoop;
+
+  Value currentA = newLoop.getBody()->getArgument(oldBodyArguments);
+  Value currentB = newLoop.getBody()->getArgument(oldBodyArguments + 1);
+  candidate.dot->setOperand(0, currentA);
+  candidate.dot->setOperand(1, currentB);
+
+  // The existing local loads become next-fragment producers.  The direct
+  // block-argument requirement above guarantees that moving them to the head
+  // of the memory phase cannot pull a late select/address chain across dot.
+  candidate.localA->setOperand(0, nextASource);
+  candidate.localB->setOperand(0, nextBSource);
+  // The publication wait retires the generation consumed by these reads.
+  // Preserve this fact for the existing alias annotation pass; LLVM tracks
+  // DMA completion through asyncmark, not opaque LDS-read inline assembly.
+  candidate.localA->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  candidate.localB->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  SmallVector<Value> nextFragments;
+  for (unsigned i = 1; i < distance; ++i) {
+    nextFragments.push_back(
+        newLoop.getBody()->getArgument(oldBodyArguments + i * 2));
+    nextFragments.push_back(
+        newLoop.getBody()->getArgument(oldBodyArguments + i * 2 + 1));
+  }
+  nextFragments.append(
+      {candidate.localA.getResult(), candidate.localB.getResult()});
+  appendToForOpYield(newLoop, nextFragments);
+  return success();
+}
+
+// The generic epilogue's final refill aliases the first of G resident slots.
+// Drain those G generations before refilling, immediately before the final
+// tail read pair. Full barriers retire old reads and publish the refill;
+// this lifetime proof does not depend on steady-state partial-wait counts.
+LogicalResult
+BufferLoadPingponger::deferPlannedEpilogueRefill(OpBuilder &builder,
+                                                Location loc) {
+  struct Refill {
+    ttg::LocalStoreOp producer;
+  };
+  SmallVector<Refill, kNumOperands> refills;
+  SmallVector<ttg::LocalLoadOp> tailLoads;
+  llvm::SmallDenseSet<Value> refillAllocations;
+  bool skippedOriginal = false;
+  for (Operation *op = candidate.loop->getNextNode(); op;
+       op = op->getNextNode()) {
+    // The first following prepared loop is the original being replaced
+    // transactionally (scheduling may insert controls before it). All other
+    // tail LDS accesses must be visible here;
+    // nested consumers cannot be silently omitted from the lifetime proof.
+    if (!skippedOriginal && isa<scf::ForOp>(op) &&
+        op->hasAttr(kCandidateAttr)) {
+      skippedOriginal = true;
+      continue;
+    }
+    if (op->getNumRegions()) {
+      bool nestedSharedAccess = false;
+      op->walk([&](Operation *nested) {
+        nestedSharedAccess |=
+            isa<ttg::LocalLoadOp, ttg::LocalStoreOp, ttg::LocalAllocOp,
+                ttg::MemDescSubsliceOp>(nested);
+      });
+      if (nestedSharedAccess) {
+        op->emitRemark("buffer-to-LDS tail has a nested shared-memory access");
+        return failure();
+      }
+    }
+    if (auto producer = dyn_cast<ttg::LocalStoreOp>(op)) {
+      auto view = producer.getDst().getDefiningOp<ttg::MemDescIndexOp>();
+      if (!view ||
+          (view.getSrc() != candidate.allocA.getResult() &&
+           view.getSrc() != candidate.allocB.getResult()) ||
+          !refillAllocations.insert(view.getSrc()).second) {
+        producer.emitRemark(
+            "buffer-to-LDS tail refill is not a unique A/B ring view");
+        return failure();
+      }
+      refills.push_back({producer});
+    }
+    if (auto load = dyn_cast<ttg::LocalLoadOp>(op))
+      tailLoads.push_back(load);
+  }
+  if (refills.size() != kNumOperands ||
+      tailLoads.size() != (getNumLDSBuffers(candidate.loop) + 1) * kNumOperands)
+    return failure();
+
+  // Prove the final pair consumes these exact destinations; instruction
+  // counts alone do not establish a producer/consumer relationship.
+  Operation *firstConsumer = tailLoads[tailLoads.size() - kNumOperands];
+  for (Refill &refill : refills) {
+    unsigned uses = 0;
+    for (auto [i, load] : llvm::enumerate(tailLoads)) {
+      if (load.getSrc() != refill.producer.getDst())
+        continue;
+      if (i < tailLoads.size() - kNumOperands)
+        return failure();
+      ++uses;
+    }
+    if (uses != 1 || !refill.producer->isBeforeInBlock(firstConsumer))
+      return failure();
+  }
+  // Operands already dominate their stores. Leave their definitions and all
+  // other users in place: moving an unrestricted backward slice can move a
+  // global load across a write or break an unrelated SSA use.
+  for (Refill &refill : refills)
+    refill.producer->moveBefore(firstConsumer);
+
+  // Finish the old generation's reads on every wave before reusing its LDS
+  // slot, in addition to publishing the newly filled generation below.
+  builder.setInsertionPoint(refills.front().producer);
+  ttg::LocalBarrierOp::create(builder, loc);
+
+  builder.setInsertionPoint(firstConsumer);
+  ROCDL::SchedBarrier::create(builder, loc, 0);
+  // Direct-to-LDS producers must finish on every wave before publishing the
+  // refilled slot. A control-only gpu.barrier permits vmcnt to wait after it.
+  ttg::LocalBarrierOp::create(builder, loc);
+  ROCDL::SchedBarrier::create(builder, loc, 0);
+  return success();
+}
 
 // Validate the post-pipeline tensor/memdesc contract required to split both
 // operands along K and rebuild two legal dot-operand encodings.
@@ -1910,11 +2293,13 @@ void BufferLoadPingponger::appendOperandHalf(unsigned half) {
 
 void BufferLoadPingponger::appendControlBarrier(OpBuilder &builder,
                                                 Location loc) {
-  // A control barrier advances the two wave groups by one BlockPingpong phase.
-  // It is intentionally not gpu.barrier: M0 has only produced A(k+1), while
-  // D0/D1 have produced no LDS data.  Treating these boundaries as full memory
-  // barriers makes MembarAnalysis drain outstanding VMEM/DS work unnecessarily.
+  // Retire all LDS reads before another wave can reuse the slot. DMA
+  // completion is tracked separately by the publication async wait.
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  if (hasSelectedBufferToLdsPlan(candidate.loop))
+    append(triton::amdgpu::MemoryCounterWaitOp::create(
+        builder, loc, /*load=*/nullptr, /*store=*/nullptr,
+        /*ds=*/builder.getI32IntegerAttr(0)));
   append(ROCDL::SBarrierOp::create(builder, loc));
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
 }
@@ -1935,7 +2320,16 @@ void BufferLoadPingponger::appendFullBarrier(OpBuilder &builder, Location loc) {
   // is the only steady-state boundary that publishes memory and permits the
   // peer wave group to consume the next slot.
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
-  append(gpu::BarrierOp::create(builder, loc));
+  if (hasSelectedBufferToLdsPlan(candidate.loop)) {
+    // The late copy pass sees the actual commits and finalized ring slots.
+    // Record intent here, not a guessed VMEM/DS instruction count.
+    auto barrier = ttg::LocalBarrierOp::create(builder, loc);
+    barrier->setAttr(triton::HCU::kBufferToLdsPublication,
+                     builder.getUnitAttr());
+    append(barrier);
+  } else {
+    append(gpu::BarrierOp::create(builder, loc));
+  }
   append(ROCDL::SchedBarrier::create(builder, loc, 0));
 }
 
@@ -1968,6 +2362,8 @@ void BufferLoadPingponger::appendPredicatedStore(OpBuilder &builder,
 }
 
 void BufferLoadPingponger::addAsymmetricSync(OpBuilder &builder, Location loc) {
+  if (ttg::lookupNumWarps(candidate.loop) == 1)
+    return;
   // Divide eight 64-lane waves into two groups of four.  thread_id_x is
   // lane-varying at the ISA level even though thread_id_x >> 6 is wave-uniform;
   // readfirstlane makes that uniformity explicit before CondBarrier lowering.
@@ -1996,7 +2392,7 @@ void BufferLoadPingponger::addAsymmetricSync(OpBuilder &builder, Location loc) {
   // asymmetric physical-single paths load the complete aliased operand
   // before a full-CTA local barrier permits any wave to overwrite it.
   Value groupSize =
-      arith::ConstantIntOp::create(builder, loc, kWaveGroupSize, 32);
+      arith::ConstantIntOp::create(builder, loc, ttg::lookupNumWarps(candidate.loop) / 2, 32);
   waveLowPredicate = arith::CmpIOp::create(
       builder, loc, arith::CmpIPredicate::ult, waveId, groupSize);
   waveHighPredicate = arith::CmpIOp::create(
@@ -2171,6 +2567,30 @@ BufferLoadPingponger::scheduleBit8WholeTilePhases(OpBuilder &builder,
   return success();
 }
 
+LogicalResult
+BufferLoadPingponger::scheduleBit16WholeTilePhases(OpBuilder &builder,
+                                                   Location loc) {
+  // Keep dynamic-ring and peeled-tail accesses in read-before-refill order.
+  // The late copy pass can reorder a static phase once its non-aliasing
+  // destinations are explicit; the early scheduler cannot prove that here.
+  if (failed(moveWithBackwardSlice(candidate.localA)) ||
+      failed(moveWithBackwardSlice(candidate.localB)))
+    return failure();
+  append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  if (failed(moveWithBackwardSlice(candidate.globalA)) ||
+      failed(moveWithBackwardSlice(candidate.globalB)) ||
+      failed(moveWithBackwardSlice(candidate.storeA)) ||
+      failed(moveWithBackwardSlice(candidate.storeB)))
+    return failure();
+  appendFullBarrier(builder, loc);
+
+  appendDotCluster(builder, candidate.dot, loc);
+  if (failed(moveAccumulatorUpdateAfterDot(candidate.dot)))
+    return failure();
+  appendControlBarrier(builder, loc);
+  return success();
+}
+
 // Keep the current BK's register-only accumulator update in the compute phase.
 // This covers INT32-to-FP32 accumulation and block-scale multiplication without
 // recognizing a source dtype or quantization spelling.  The unique loop yield
@@ -2277,6 +2697,62 @@ LogicalResult BufferLoadPingponger::scheduleBit16Phases(OpBuilder &builder,
 // Build the selected two- or four-phase body transactionally on a cloned
 // candidate.  On success, attach the common late-unroll/finalization state.
 LogicalResult BufferLoadPingponger::run() {
+  if (!hasSelectedBufferToLdsPlan(candidate.loop))
+    return runDefault();
+  // Mixed producers remain legal; the publication helper separately proves
+  // both operands before permitting partial waits. An unrelated LDS load
+  // must not stand in for either scheduled dot operand.
+  if (!isa<ttg::HCUBufferLdsSharedEncodingAttr>(
+          candidate.localA.getSrc().getType().getEncoding()) &&
+      !isa<ttg::HCUBufferLdsSharedEncodingAttr>(
+          candidate.localB.getSrc().getType().getEncoding()))
+    return failure();
+  return runPlannedPipeline();
+}
+
+LogicalResult BufferLoadPingponger::runPlannedPipeline() {
+  OpBuilder builder(candidate.loop);
+  Location loc = candidate.dot.getLoc();
+  if (failed(pipelineBit16Fragments(builder)))
+    return failure();
+  Operation *anchor = candidate.globalA->getPrevNode();
+  if (!anchor)
+    return failure();
+  lastInserted = anchor;
+  builder.setInsertionPointAfter(anchor);
+  if (failed(scheduleBit16WholeTilePhases(builder, loc))) {
+    candidate.loop.emitError("VGPR pipeline: failed to schedule wide phases");
+    return failure();
+  }
+  addAsymmetricSync(builder, loc);
+  if (failed(deferPlannedEpilogueRefill(builder, loc))) {
+    candidate.loop.emitError(
+        "planned pipeline: failed to defer the wrapping epilogue refill");
+    return failure();
+  }
+  // Pipelining subtracts the prologue from the main-loop upper bound. For
+  // short runtime reductions this can leave a zero-trip loop with upper <
+  // lower. Normalize it before unrolling: the unroller's unsigned trip-count
+  // arithmetic must not turn a negative distance into remainder iterations.
+  builder.setInsertionPoint(candidate.loop);
+  candidate.loop.setUpperBound(
+      arith::MaxSIOp::create(builder, loc, candidate.loop.getUpperBound(),
+                             candidate.loop.getLowerBound()));
+  candidate.loop->setAttr(
+      kLoopUnrollFactorAttr,
+      builder.getI32IntegerAttr(getNumLDSBuffers(candidate.loop)));
+  candidate.loop->removeAttr(kCandidateAttr);
+  candidate.loop->removeAttr(kLocalStoreStageAttr);
+  // Finalization still needs the resolved ring size after late unrolling.
+  candidate.loop->setAttr(kAppliedAttr, builder.getUnitAttr());
+  candidate.allocA->setAttr(kPingpongBufferAttr, builder.getUnitAttr());
+  candidate.allocB->setAttr(kPingpongBufferAttr, builder.getUnitAttr());
+  candidate.dot.emitRemark()
+      << "performed HCU BufferLoad BlockPingpong scheduling\n";
+  return success();
+}
+
+LogicalResult BufferLoadPingponger::runDefault() {
   OpBuilder builder(candidate.loop);
   Location loc = candidate.dot.getLoc();
   auto aType = cast<RankedTensorType>(candidate.dot.getA().getType());
@@ -2319,7 +2795,7 @@ LogicalResult BufferLoadPingponger::run() {
   }
 
   candidate.loop->setAttr(kLoopUnrollFactorAttr,
-                          builder.getI32IntegerAttr(kLateUnrollFactor));
+                          builder.getI32IntegerAttr(2));
   candidate.loop->removeAttr(kCandidateAttr);
   candidate.loop->removeAttr(kLocalStoreStageAttr);
   candidate.loop->removeAttr(kNumBuffersAttr);
@@ -2357,10 +2833,18 @@ struct TritonHCUPrepareBlockPingpongPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(module);
+
     SmallVector<scf::ForOp> loops;
     module.walk([&](scf::ForOp loop) { loops.push_back(loop); });
     for (scf::ForOp loop : loops) {
-      auto candidate = matchOriginalCandidate(loop);
+      if (hasSelectedBufferToLdsPlan(loop) &&
+          !tt::HCU::planned::hasValidPrefetchDistances(globalPrefetchDistance,
+                                                     ldsPrefetchDistance)) {
+        loop.emitError("BufferLds prefetch requires global distance 2..8 and "
+                       "1 <= LDS distance < global distance");
+        return signalPassFailure();
+      }
+      auto candidate = matchOriginalCandidate(loop, globalPrefetchDistance);
       if (failed(candidate))
         continue;
 
@@ -2407,31 +2891,26 @@ struct TritonHCUPrepareBlockPingpongPass
         loop = candidate->loop;
       }
 
-      // AMD LowerLoops reads these HCU-specific overrides during Pipeline.
-      // Use a three-stage pipeline: stage0 issues global loads, stage1 writes
-      // the preceding prefetched tile to LDS, and stage2 performs local_load +
-      // dot. Compared with the former stage4/store2 schedule, removing the
-      // empty VGPR-carry stage shortens global-load live ranges while retaining
-      // the same two LDS generations. The later scheduler selects either the
-      // M0-D0-M1-D1 or whole-BK M-D phase topology from reduction dataflow. AMD
-      // already places local_load at the last stage, so HCU only overrides
-      // local_store and the logical LDS generation count.  The matcher has
-      // already proved that either two complete A/B generations, or one of the
-      // exact asymmetric Bit8 BK128 / Bit16 BK64 single-operand mappings, fits
-      // in HCU's 64 KiB LDS.
+      // Preserve the upstream three-stage/two-slot schedule by default.
+      // Planned operands use G slots and G+2 generic expansion stages.
+      // The stage count and ring depth must agree through scheduling and
+      // late unroll; both are selected from the loop's actual placement plan.
       OpBuilder builder(loop);
       loop->setAttr(tt::kNumStagesAttrName,
-                    builder.getI32IntegerAttr(kRequiredStages));
+                    builder.getI32IntegerAttr(
+                        getRequiredStages(loop, globalPrefetchDistance)));
       loop->setAttr(kLocalStoreStageAttr,
                     builder.getI32IntegerAttr(kLocalStoreStage));
-      loop->setAttr(kNumBuffersAttr, builder.getI32IntegerAttr(kNumLDSBuffers));
+      loop->setAttr(kNumBuffersAttr,
+                    builder.getI32IntegerAttr(
+                        getNumLDSBuffers(loop, globalPrefetchDistance)));
       loop->setAttr(kCandidateAttr, builder.getUnitAttr());
     }
   }
 };
 
-// Post-pipeline pass: reduce masked-tail VGPR pressure and transactionally
-// apply the selected HCU two- or four-phase schedule to each expanded
+// Post-pipeline pass: reduce masked-tail VGPR pressure and apply
+// the selected HCU two- or four-phase schedule to each expanded
 // candidate.
 struct TritonHCUBlockPingpongPass
     : impl::TritonHCUBlockPingpongBase<TritonHCUBlockPingpongPass> {
@@ -2450,7 +2929,7 @@ struct TritonHCUBlockPingpongPass
     // range.  Canonicalization may represent the one-shot tail as scf.if, so
     // match the marker-bearing container rather than a loop.
     for (Operation *tail : maskedTails)
-      (void)sliceMaskedTailDot(tail);
+      (void)sliceMaskedTailDot(tail, globalPrefetchDistance);
 
     SmallVector<scf::ForOp> loops;
     module.walk([&](scf::ForOp loop) { loops.push_back(loop); });
@@ -2461,14 +2940,15 @@ struct TritonHCUBlockPingpongPass
         continue;
       auto candidate = matchExpandedCandidate(loop);
       if (failed(candidate)) {
-        loop.emitError(
-            "failed to rematch prepared HCU BlockPingpong candidate");
-        return signalPassFailure();
+        // Preparation is only a request. Unsupported producers retain
+        // the ordinary pipeline produced by expansion.
+        loop->removeAttr(kCandidateAttr);
+        continue;
       }
 
-      // Transform a clone so a failed dependency move cannot leave a loop with
-      // a sliced dot but incomplete synchronization.  Only the fully scheduled
-      // clone replaces the original loop.
+      // Keep the original results until scheduling succeeds. This is not a
+      // rollback boundary: scheduling also updates the prologue and epilogue,
+      // so an unexpected failure must fail the pass, not resume compilation.
       OpBuilder builder(loop);
       builder.setInsertionPoint(loop);
       auto clonedLoop = cast<scf::ForOp>(builder.clone(*loop));
@@ -2479,27 +2959,34 @@ struct TritonHCUBlockPingpongPass
         return signalPassFailure();
       }
 
-      BufferLoadPingponger pingponger(*clonedCandidate);
+      BufferLoadPingponger pingponger(*clonedCandidate, ldsPrefetchDistance);
       if (failed(pingponger.run())) {
-        clonedLoop.erase();
+        // Fragment pipelining may have replaced and erased clonedLoop.
+        // Leave the failed IR intact for the pass reproducer.
         loop.emitError(
             "failed to schedule prepared HCU BlockPingpong candidate");
         return signalPassFailure();
       }
+      clonedLoop = pingponger.getLoop();
 
-      loop->replaceAllUsesWith(clonedLoop.getResults());
+      // Wide VGPR fragment pipelining appends internal loop-carried A/B
+      // tensors.  They have no counterpart on the prepared source loop and
+      // are intentionally not exposed to its users.
+      SmallVector<Value> replacements(
+          clonedLoop.getResults().take_front(loop.getNumResults()));
+      loop->replaceAllUsesWith(replacements);
       loop.erase();
       transformed = true;
     }
 
-    // Recompute wait counts after reordering, as in AMD BlockPingpong. Current
-    // HCU candidates exclude async copies; keep this for future async support.
+    // Recompute commit-group distances after reordering. Wrapped copies are
+    // committed later, after their final placement.
     if (transformed)
       tt::updateWaits(module);
   }
 };
 
-// Post-unroll pass: turn dynamic two-slot A/B rings into independent static LDS
+// Post-unroll pass: turn dynamic A/B rings into independent static LDS
 // allocations so later alias and membar analysis can see slot disjointness.
 struct TritonHCUFinalizeBlockPingpongPass
     : impl::TritonHCUFinalizeBlockPingpongBase<
@@ -2510,18 +2997,22 @@ struct TritonHCUFinalizeBlockPingpongPass
     SmallVector<scf::ForOp> loops;
     getOperation().walk([&](scf::ForOp loop) { loops.push_back(loop); });
 
-    // Late unroll=2 turns the ring-buffer indices into a fixed slot1/slot0
-    // pair.  Materialize those slots independently so Membar can prove that
-    // current-slot reads and next-slot writes do not alias.
+    // Late unroll turns one complete ring traversal into fixed slot indices.
+    // Materialize those slots independently so Membar can prove that current
+    // reads and next-slot writes do not alias.
     for (scf::ForOp loop : loops) {
-      if (!requiresStaticDoubleBufferMaterialization(loop))
+      if (!requiresStaticRingMaterialization(loop))
         continue;
-      if (failed(materializeStaticDoubleBuffers(loop))) {
-        loop.emitError("failed to materialize the two static HCU "
-                       "BlockPingpong LDS buffers");
-        signalPassFailure();
-        return;
+      if (failed(materializeStaticRingBuffers(loop))) {
+        if (hasSelectedBufferToLdsPlan(loop)) {
+          loop.emitError(
+              "cannot prove the buffer-to-LDS ring; disable use_async_copy");
+          return signalPassFailure();
+        }
+        loop.emitError("failed to materialize static HCU BlockPingpong buffers");
+        return signalPassFailure();
       }
+      loop->removeAttr(kNumBuffersAttr);
     }
   }
 };

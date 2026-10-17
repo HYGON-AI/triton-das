@@ -183,8 +183,11 @@ module attributes {{"ttg.target" = "hip:{required_arch}", "ttg.num-ctas" = 1 : i
   }}
 }}
 '''
-    converted = run_pass(tmp_path, source, lambda pm:
-                         hcu.passes.ttgpuir.add_convert_buffer_lds_copies(pm))
+    def add_standalone_copies(pm):
+        hcu.passes.ttgpuir.add_convert_buffer_lds_copies(pm)
+        hcu.passes.ttgpuir.add_synchronize_buffer_lds_copies(pm)
+
+    converted = run_pass(tmp_path, source, add_standalone_copies)
     assert "amdg.buffer_load_to_local" in converted
     assert f"elementBytes = {element_bytes}" in converted
     path = tmp_path / "copy.ttgir"

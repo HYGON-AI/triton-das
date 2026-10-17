@@ -23,6 +23,7 @@
 namespace ttg = mlir::triton::gpu;
 namespace mlir {
 #define GEN_PASS_DEF_TRITONHCUCONVERTBUFFERLDSCOPIES
+
 #include "TritonHCU/Passes.h.inc"
 
 namespace {
@@ -452,17 +453,7 @@ struct TritonHCUConvertBufferLdsCopiesPass
     });
     if (result.wasInterrupted())
       return signalPassFailure();
-
-    for (auto copy : copies) {
-      OpBuilder builder(copy);
-      builder.setInsertionPointAfter(copy);
-      auto commit = ttg::AsyncCommitGroupOp::create(
-          builder, copy.getLoc(), ValueRange{copy.getResult()});
-      ttg::AsyncWaitOp::create(builder, copy.getLoc(),
-                               ValueRange{commit.getResult()}, 0);
-      if (!copy->getParentOfType<ttg::WarpSpecializeOp>())
-        ttg::LocalBarrierOp::create(builder, copy.getLoc());
-    }
   }
 };
+
 } // namespace mlir

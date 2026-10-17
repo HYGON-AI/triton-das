@@ -46,7 +46,8 @@ def direct_gemm(a, b, c, m, n, k,
                 B_COLUMN_MAJOR: tl.constexpr = False,
                 BATCHED: tl.constexpr = False,
                 AFFINE_COORDS: tl.constexpr = False,
-                K_STEP_RANGE: tl.constexpr = False):
+                K_STEP_RANGE: tl.constexpr = False,
+                REDUCTION_BOUND: tl.constexpr = 0):
     tl.assume(m > 0)
     tl.assume(n > 0)
     tl.assume(k > 0)
@@ -69,15 +70,16 @@ def direct_gemm(a, b, c, m, n, k,
     ap = a + rows[:, None] * (1 if A_COLUMN_MAJOR else k) + ks[None, :] * (m if A_COLUMN_MAJOR else 1)
     bp = b + ks[:, None] * (1 if B_COLUMN_MAJOR else n) + cols[None, :] * (k if B_COLUMN_MAJOR else 1)
     acc = tl.zeros((BM, BN), tl.int32 if a.dtype.element_ty == tl.int8 else tl.float32)
+    reduction_bound = REDUCTION_BOUND if REDUCTION_BOUND else k
     if K_STEP_RANGE:
-        for _ in range(0, k, BK):
+        for _ in range(0, reduction_bound, BK):
             av = tl.load(ap)
             bv = tl.load(bp)
             acc = tl.dot(av, bv, acc, out_dtype=acc.dtype)
             ap += BK * (m if A_COLUMN_MAJOR else 1)
             bp += BK * (1 if B_COLUMN_MAJOR else n)
     else:
-        for _ in range(k // BK):
+        for _ in range(reduction_bound // BK):
             av = tl.load(ap)
             bv = tl.load(bp)
             acc = tl.dot(av, bv, acc, out_dtype=acc.dtype)

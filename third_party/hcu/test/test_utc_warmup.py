@@ -83,7 +83,7 @@ def _utc_warmup_gemm(
     tl.store(c_ptrs, accumulator.to(tl.float16))
 
 
-def _compile_and_run(a, b, output, *, utc_warmup):
+def _compile_and_run(a, b, output, *, utc_warmup, planned=False):
     K = a.shape[1]
     options = {
         "BLOCK_M": 256,
@@ -95,6 +95,17 @@ def _compile_and_run(a, b, output, *, utc_warmup):
         "use_block_pingpong": False,
         "utc_warmup": utc_warmup,
     }
+    if planned:
+        options.update({
+            "BLOCK_K": 16,
+            "num_stages": 5,
+            "use_block_pingpong": True,
+            "use_async_copy": True,
+            "block_pingpong_async_global_prefetch": 4,
+            "block_pingpong_async_local_prefetch": 1,
+            "matrix_instr_nonkdim": 16,
+            "optimize_epilogue": True,
+        })
     compiled = _utc_warmup_gemm.warmup(
         a,
         b,
@@ -163,3 +174,20 @@ def test_utc_warmup():
     reference = torch.matmul(a.float(), b.float()).to(torch.float16)
     torch.testing.assert_close(cold, reference, atol=2e-2, rtol=2e-2)
     assert torch.equal(warm, cold)
+
+
+def test_utc_warmup_with_planned_async():
+    """UTC and planned buffer-to-LDS must survive in one kernel."""
+    torch.manual_seed(1)
+    M = N = 256
+    K = 8192
+    a = (torch.randn((M, K), device="cuda", dtype=torch.float16) * 0.1)
+    b = (torch.randn((N, K), device="cuda", dtype=torch.float16) * 0.1).transpose(0, 1)
+    output = torch.empty((M, N), device="cuda", dtype=torch.float16)
+
+    kernel = _compile_and_run(a, b, output, utc_warmup=True, planned=True)
+
+    assert kernel.metadata.uses_bank_conflict_aware_lds_placement
+    assert len(_warmup_loads(kernel.asm["amdgcn"])) == 2
+    reference = torch.matmul(a.float(), b.float()).to(torch.float16)
+    torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)

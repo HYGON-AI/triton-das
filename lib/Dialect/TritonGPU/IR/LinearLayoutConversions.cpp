@@ -398,9 +398,12 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 
   LinearLayout tileLayout = LinearLayout::empty();
   if (isHCUMmac()) {
-    tileLayout = getLinearLayoutForMmacLayout(ctx,
-                                              getMmacLayout(),
-                                              {dimN, dimM});
+    // Software A/B exchange transposes the accumulator microtile, not the
+    // warp grid. Hardware LTS uses TRANSPOSE with isTransposed=false.
+    SmallVector<StringAttr> tileDims{dimN, dimM};
+    if (isTransposed)
+      std::swap(tileDims[0], tileDims[1]);
+    tileLayout = getLinearLayoutForMmacLayout(ctx, getMmacLayout(), tileDims);
   } else {
     if (!isTransposed) {
       // Each lane holds 'height' elements along the M dimension.
