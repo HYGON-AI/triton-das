@@ -209,6 +209,10 @@ struct ConvertTritonHCUToLLVM
       return signalPassFailure();
     }
 
+    // Canonicalization has exposed equal N-split loop states. Remove their
+    // duplicate register tensors once, before allocation and LLVM lowering.
+    triton::HCU::planned::cleanupNSplitPipeline(mod);
+
     // Split A/B LDS-load clusters before they are lowered to ds_read*.
     insertSchedBarrierBetweenABLoads(mod);
 

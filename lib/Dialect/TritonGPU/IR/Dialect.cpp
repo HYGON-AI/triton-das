@@ -476,6 +476,13 @@ bool isExpensiveCat(CatOp cat, Attribute targetEncoding) {
   // do convert encoding that goes through shared memory anyway. So we
   // consider it as expensive.
   RankedTensorType tensorTy = cat.getType();
+  // The element-count heuristic does not prove that moving an MFMA cat
+  // through a layout conversion preserves lane ownership or register order.
+  // Keep its encoding until the register-only cat lowering can prove both.
+  if (tensorTy.getEncoding() != targetEncoding &&
+      (isa<AMDMfmaEncodingAttr>(tensorTy.getEncoding()) ||
+       isa<AMDMfmaEncodingAttr>(targetEncoding)))
+    return true;
   auto totalElemsPerThread = gpu::getTotalElemsPerThread(tensorTy);
   auto shape = tensorTy.getShape();
   auto newTotalElemsPerThread =

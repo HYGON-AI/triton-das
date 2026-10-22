@@ -709,7 +709,11 @@ class HIPBackend(BaseBackend):
         # copies do not require a specialized schedule to attempt pingpong.
         use_block_pingpong = (
             options.use_block_pingpong
-            and not metadata.get("wasp_enabled", False))
+            and not metadata.get("wasp_enabled", False)
+            # The generic async pipeline already owns allocations and waits.
+            # HCU preparation would mutate its K-tail/ring before discovering
+            # that its expanded producers are not HCU BufferLds candidates.
+            and not enable_generic_async_pipeline)
         # BlockPingpong relies on the buffer-op cache swizzle to distribute
         # neighboring workgroups across cache slices. Keep an explicit user
         # request effective as well, but force it on whenever PP is active.

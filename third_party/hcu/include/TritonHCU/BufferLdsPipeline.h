@@ -15,6 +15,9 @@ inline constexpr llvm::StringLiteral kBufferToLdsPublication =
     "hcu.block_pingpong.publish";
 
 namespace planned {
+// Final register-only cleanup after canonicalization of a selected N-split
+// pipeline.
+void cleanupNSplitPipeline(ModuleOp module);
 // Maximum supported global prefetch distance, not a container capacity or
 // LLVM async-mark history limit.
 inline constexpr unsigned kMaxGlobalPrefetchDistance = 8;

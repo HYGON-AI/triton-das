@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 #include "TritonHCU/BufferLdsConfigSelection.h"
+#include "TritonHCU/BufferLdsPipeline.h"
 #include "TritonHCU/BufferLdsEncoding.h"
 #include "TritonHCU/Passes.h"
 #include "TritonHCU/WaspSplitPlan.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -87,6 +90,150 @@ bufferLdsReadConsumer(ttg::DotOperandEncodingAttr consumer) {
   return ttg::DotOperandEncodingAttr::get(mma.getContext(), consumer.getOpIdx(),
                                           canonical, consumer.getKWidth());
 }
+
+// Layout preparation must not perturb unrelated fusions that will later
+// reject N-split. Prove the single FP32 accumulator -> 16-bit store contract
+// while the original loop's result graph is still intact.
+static bool hasNSplitOutput(tt::DotOp dot, scf::ForOp loop) {
+  auto peel = [](Value value) {
+    while (auto cvt = value.getDefiningOp<ttg::ConvertLayoutOp>())
+      value = cvt.getSrc();
+    return value;
+  };
+  auto acc = dyn_cast<BlockArgument>(peel(dot.getC()));
+  if (!acc || acc.getOwner() != loop.getBody() || !acc.getArgNumber())
+    return false;
+  unsigned index = acc.getArgNumber() - 1;
+  auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  if (peel(yield.getOperand(index)) != dot.getResult())
+    return false;
+  Value output = loop.getResult(index);
+  auto nextConversion = [](Value &value) {
+    if (!value.hasOneUse())
+      return false;
+    auto cvt = dyn_cast<ttg::ConvertLayoutOp>(*value.getUsers().begin());
+    if (!cvt)
+      return false;
+    value = cvt.getResult();
+    return true;
+  };
+  while (nextConversion(output)) {
+  }
+  if (!output.hasOneUse())
+    return false;
+  auto trunc = dyn_cast<arith::TruncFOp>(*output.getUsers().begin());
+  if (!trunc)
+    return false;
+  auto type = cast<RankedTensorType>(trunc.getType());
+  if (!type.getElementType().isF16() && !type.getElementType().isBF16())
+    return false;
+  output = trunc.getResult();
+  while (nextConversion(output)) {
+  }
+  if (!output.hasOneUse())
+    return false;
+  auto store = dyn_cast<tt::StoreOp>(*output.getUsers().begin());
+  return store && store.getValue() == output;
+}
+
+// Preserve N-half fragment ownership for the G2/R1 row-col pipeline.
+// K remains runtime; no K value or reduction bound is inspected.
+struct PrepareNSplitEncoding : OpRewritePattern<tt::DotOp> {
+  PrepareNSplitEncoding(MLIRContext *ctx, StringRef arch)
+      : OpRewritePattern(ctx, 3), arch(arch.str()) {}
+  LogicalResult matchAndRewrite(tt::DotOp dot,
+                                PatternRewriter &rewriter) const override {
+    if (tt::HCU::getWaspTopologyFromModule(dot))
+      return failure();
+    auto loop = dot->getParentOfType<scf::ForOp>();
+    if (!loop || !hasNSplitOutput(dot, loop))
+      return failure();
+    // Partial VM/DS waits model only the two dot operands. An auxiliary
+    // global load needs the ordinary pipeline's completion accounting.
+    unsigned loads = 0;
+    loop.walk([&](tt::LoadOp) { ++loads; });
+    if (loads != 2)
+      return failure();
+    unsigned dots = 0;
+    dot->getParentOfType<ModuleOp>().walk([&](tt::DotOp) { ++dots; });
+    if (dots != 1)
+      return failure();
+    auto type = dyn_cast<RankedTensorType>(dot.getType());
+    auto mma = type ? dyn_cast<ttg::AMDMfmaEncodingAttr>(type.getEncoding())
+                    : ttg::AMDMfmaEncodingAttr();
+    if (!mma || !type.getElementType().isF32() ||
+        type.getShape() != ArrayRef<int64_t>({256, 256}) ||
+        mma.getMmacLayout() != ttg::MmacLayout::LEGACY ||
+        mma.getTilesPerWarp() != ArrayRef<unsigned>({1, 2}) ||
+        mma.getInstrShape() != ArrayRef<unsigned>({16, 16, 16}))
+      return failure();
+    unsigned waves = 1;
+    for (unsigned w : mma.getWarpsPerCTA())
+      waves *= w;
+    if (waves != 8)
+      return failure();
+    auto desired = ttg::AMDMfmaEncodingAttr::get(
+        rewriter.getContext(), mma.getVersion(), ArrayRef<unsigned>({4, 2}),
+        mma.getInstrShape(), true, mma.getCTALayout(), mma.getTilesPerWarp(),
+        mma.getElementBitWidth(), mma.getMmacLayout());
+    SmallVector<Value> sources;
+    SmallVector<ttg::DotOperandEncodingAttr> consumers;
+    bool changed = desired != mma;
+    for (unsigned i = 0; i < 2; ++i) {
+      auto oldType = dyn_cast<RankedTensorType>(dot->getOperand(i).getType());
+      auto old =
+          oldType ? dyn_cast<ttg::DotOperandEncodingAttr>(oldType.getEncoding())
+                  : ttg::DotOperandEncodingAttr();
+      Value source = getBufferLdsSource(dot->getOperand(i));
+      if (!old || !source || !canRetimeBufferLdsSource(source, dot) ||
+          (!oldType.getElementType().isF16() &&
+           !oldType.getElementType().isBF16()))
+        return failure();
+      Value producer = source;
+      while (auto cvt = producer.getDefiningOp<ttg::ConvertLayoutOp>())
+        producer = cvt.getSrc();
+      auto load = producer.getDefiningOp<tt::LoadOp>();
+      // The specialized VM counts require complete native-width BK32 copies.
+      // Leave loop-variant K masks on the existing generic pipeline.
+      if (!load ||
+          (load.getMask() && !loop.isDefinedOutsideOfLoop(load.getMask())))
+        return failure();
+      auto st = cast<RankedTensorType>(source.getType());
+      if (st.getShape() != (i == 0 ? ArrayRef<int64_t>({256, 32})
+                                   : ArrayRef<int64_t>({32, 256})))
+        return failure();
+      auto consumer = ttg::DotOperandEncodingAttr::get(rewriter.getContext(), i,
+                                                       desired, 8);
+      auto placement = tt::HCU::selectBufferLdsOperandEncoding(
+          source, st, bufferLdsReadConsumer(consumer), std::nullopt,
+          oldType.getElementType(), 8, arch);
+      if (!placement || placement.getContiguousDim() != (i == 0 ? 1 : 0) ||
+          placement.getCopyBytesPerLane() != 16)
+        return failure();
+      changed |= old != consumer;
+      sources.push_back(source);
+      consumers.push_back(consumer);
+    }
+    if (!changed)
+      return failure();
+    auto loc = dot.getLoc();
+    SmallVector<Value> operands;
+    for (unsigned i = 0; i < 2; ++i)
+      operands.push_back(ttg::ConvertLayoutOp::create(
+          rewriter, loc,
+          cast<RankedTensorType>(sources[i].getType())
+              .cloneWithEncoding(consumers[i]),
+          sources[i]));
+    auto acc = ttg::ConvertLayoutOp::create(
+        rewriter, loc, type.cloneWithEncoding(desired), dot.getC());
+    auto result = tt::DotOp::create(
+        rewriter, loc, type.cloneWithEncoding(desired), operands[0],
+        operands[1], acc, dot.getInputPrecision(), dot.getMaxNumImpreciseAcc());
+    rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dot, type, result);
+    return success();
+  }
+  std::string arch;
+};
 
 // Balance scalar A reads against matrix B reads for the R1 wave-group
 // pipeline. This is tile geometry, not a specialization of the runtime K.
@@ -264,7 +411,8 @@ struct TritonHCUPrepareBlockPingpongLayoutPass
   using Base::Base;
 
   void runOnOperation() override {
-    if (globalPrefetchDistance != 4 || ldsPrefetchDistance != 1)
+    if ((globalPrefetchDistance != 4 && globalPrefetchDistance != 2) ||
+        ldsPrefetchDistance != 1)
       return;
     auto module = getOperation();
     auto target = module->getAttrOfType<StringAttr>("ttg.target");
@@ -276,7 +424,10 @@ struct TritonHCUPrepareBlockPingpongLayoutPass
       return;
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<BalanceBufferLdsFragments>(&getContext(), arch);
+    if (globalPrefetchDistance == 2)
+      patterns.add<PrepareNSplitEncoding>(&getContext(), arch);
+    else
+      patterns.add<BalanceBufferLdsFragments>(&getContext(), arch);
     if (failed(applyPatternsGreedily(module, std::move(patterns))))
       signalPassFailure();
   }

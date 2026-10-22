@@ -1,7 +1,7 @@
+#include "TritonHCU/BufferLdsEncoding.h"
+#include "TritonHCU/BufferLdsPipeline.h"
 #include "TritonHCU/DsReadMLayout.h"
 #include "TritonHCU/Passes.h"
-#include "TritonHCU/BufferLdsPipeline.h"
-#include "TritonHCU/BufferLdsEncoding.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -25,6 +25,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
+#include <array>
 #include <limits>
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonhcu-block-pingpong"
@@ -1839,17 +1840,34 @@ FailureOr<ExpandedCandidate> matchExpandedCandidate(scf::ForOp loop) {
                            blockK};
 }
 
+// Validate the complete accumulator-use graph before changing any tail IR.
+// Unsupported consumers retain the ordinary planned pipeline.
+struct NSplitTailPlan {
+  unsigned accumulatorIndex;
+  SmallVector<scf::IfOp> branches;
+  SmallVector<arith::SelectOp> selects;
+  arith::TruncFOp finalCast;
+};
+static std::optional<NSplitTailPlan>
+matchNSplitPeeledTail(scf::ForOp loop, unsigned accumulatorIndex);
+
 // Reorder one post-pipeline BufferLoad GEMM loop into HCU's two- or four-phase
 // schedule, including optional BK/2 dot slicing, asymmetric wave
 // synchronization, and the late 2K-unroll marker consumed before static-buffer
 // finalization.
 class BufferLoadPingponger {
 public:
-  BufferLoadPingponger(ExpandedCandidate candidate, unsigned ldsDistance)
-      : candidate(candidate), ldsPrefetchDistance(ldsDistance) {}
+  BufferLoadPingponger(ExpandedCandidate candidate, unsigned ldsDistance,
+                       bool hasNSplitTail)
+      : candidate(candidate), ldsPrefetchDistance(ldsDistance),
+        hasNSplitTail(hasNSplitTail) {}
 
   LogicalResult run();
   scf::ForOp getLoop() const { return candidate.loop; }
+  Attribute getTailAccumulatorEncoding() const {
+    return tailAccumulatorEncoding;
+  }
+
 private:
   ExpandedCandidate candidate;
   unsigned ldsPrefetchDistance;
@@ -1863,6 +1881,9 @@ private:
 
   LogicalResult runDefault();
   LogicalResult runPlannedPipeline();
+  LogicalResult runNSplit();
+  bool hasNSplitTail;
+  Attribute tailAccumulatorEncoding;
   LogicalResult validateSlicing();
   LogicalResult sliceDot(OpBuilder &builder);
   LogicalResult createOperandSlices(OpBuilder &builder, Value operand,
@@ -2707,7 +2728,271 @@ LogicalResult BufferLoadPingponger::run() {
       !isa<ttg::HCUBufferLdsSharedEncodingAttr>(
           candidate.localB.getSrc().getType().getEncoding()))
     return failure();
+  auto aType = cast<RankedTensorType>(candidate.localA.getType());
+  auto bPlacement = dyn_cast<ttg::HCUBufferLdsSharedEncodingAttr>(
+      candidate.localB.getSrc().getType().getEncoding());
+  auto accArg = dyn_cast<BlockArgument>(candidate.dot.getC());
+  unsigned accIndex =
+      accArg && accArg.getArgNumber() ? accArg.getArgNumber() - 1 : ~0u;
+  auto zero = accIndex < candidate.loop.getNumRegionIterArgs()
+                  ? candidate.loop.getInitArgs()[accIndex]
+                        .getDefiningOp<arith::ConstantOp>()
+                  : arith::ConstantOp();
+  auto dense =
+      zero ? dyn_cast<DenseElementsAttr>(zero.getValue()) : DenseElementsAttr();
+  auto accType = cast<RankedTensorType>(candidate.dot.getType());
+  auto mma = dyn_cast<ttg::AMDMfmaEncodingAttr>(accType.getEncoding());
+  auto aPlacement = dyn_cast<ttg::HCUBufferLdsSharedEncodingAttr>(
+      candidate.localA.getSrc().getType().getEncoding());
+  auto aEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(aType.getEncoding());
+  auto bEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(
+      candidate.localB.getType().getEncoding());
+  // Rematch after software pipelining: no extra VMEM or LDS producer may
+  // invalidate the specialized two-operand partial-wait counts.
+  unsigned globalLoads = 0, localLoads = 0;
+  candidate.loop.walk([&](tt::LoadOp) { ++globalLoads; });
+  candidate.loop.walk([&](ttg::LocalLoadOp) { ++localLoads; });
+  if (getNumLDSBuffers(candidate.loop) == 2 && ldsPrefetchDistance == 1 &&
+      hasNSplitTail && globalLoads == 2 && localLoads == 2 &&
+      accType.getElementType().isF32() && mma &&
+      mma.getMmacLayout() == ttg::MmacLayout::LEGACY && mma.getIsTransposed() &&
+      mma.getWarpsPerCTA() == ArrayRef<unsigned>({4, 2}) && aEncoding &&
+      aEncoding.getKWidth() == 8 && bEncoding && bEncoding.getKWidth() == 8 &&
+      aPlacement && aPlacement.getCopyBytesPerLane() == 16 && bPlacement &&
+      bPlacement.getCopyBytesPerLane() == 16 && candidate.blockM == 256 &&
+      candidate.blockN == 256 && candidate.blockK == 32 &&
+      (aType.getElementType().isF16() || aType.getElementType().isBF16()) &&
+      bPlacement && bPlacement.getContiguousDim() == 0 &&
+      ttg::lookupNumWarps(candidate.loop) == 8 && dense && dense.isSplat() &&
+      dense.getSplatValue<APFloat>().isZero())
+    return runNSplit();
   return runPlannedPipeline();
+}
+
+LogicalResult BufferLoadPingponger::runNSplit() {
+  scf::ForOp oldLoop = candidate.loop;
+  auto bPlacement = dyn_cast<ttg::HCUBufferLdsSharedEncodingAttr>(
+      candidate.localB.getSrc().getType().getEncoding());
+  auto aType = cast<RankedTensorType>(candidate.localA.getType());
+  auto bType = cast<RankedTensorType>(candidate.localB.getType());
+  auto accType = cast<RankedTensorType>(candidate.dot.getType());
+  auto fullMma = dyn_cast<ttg::AMDMfmaEncodingAttr>(accType.getEncoding());
+  if (getNumLDSBuffers(oldLoop) != 2 || candidate.blockM != 256 ||
+      candidate.blockN != 256 || candidate.blockK != 32 ||
+      (!aType.getElementType().isF16() && !aType.getElementType().isBF16()) ||
+      !bPlacement || bPlacement.getContiguousDim() != 0 || !fullMma ||
+      ldsPrefetchDistance != 1)
+    return oldLoop.emitError(
+        "N-split requires fp16/bf16 row-col 256x256x32, G2/R1, 8 warps");
+
+  Block *body = oldLoop.getBody();
+  auto yield = dyn_cast<scf::YieldOp>(body->getTerminator());
+  auto accArg = dyn_cast<BlockArgument>(candidate.dot.getC());
+  if (!yield || !accArg || accArg.getOwner() != body ||
+      accArg.getArgNumber() == 0 || !candidate.dot.getResult().hasOneUse())
+    return failure();
+  unsigned accIndex = accArg.getArgNumber() - 1;
+  if (yield.getOperand(accIndex) != candidate.dot.getResult())
+    return failure();
+  auto zero =
+      oldLoop.getInitArgs()[accIndex].getDefiningOp<arith::ConstantOp>();
+  auto dense = zero ? dyn_cast<DenseElementsAttr>(zero.getValue()) : nullptr;
+  if (!dense || !dense.isSplat() || !dense.getSplatValue<APFloat>().isZero())
+    return oldLoop.emitError("N-split requires a zero-initialized accumulator");
+
+  auto getIterIndex = [&](Value value) -> FailureOr<unsigned> {
+    auto arg = dyn_cast<BlockArgument>(value);
+    if (!arg || arg.getOwner() != body || arg.getArgNumber() == 0)
+      return failure();
+    unsigned index = arg.getArgNumber() - 1;
+    if (index >= oldLoop.getInitArgs().size())
+      return failure();
+    return index;
+  };
+  auto aIndex = getIterIndex(candidate.localA.getSrc());
+  auto bIndex = getIterIndex(candidate.localB.getSrc());
+  if (failed(aIndex) || failed(bIndex) || *aIndex == *bIndex)
+    return failure();
+  Value nextASource = yield.getOperand(*aIndex);
+  Value nextBSource = yield.getOperand(*bIndex);
+  if (!isa<BlockArgument>(nextASource) || !isa<BlockArgument>(nextBSource))
+    return failure();
+
+  OpBuilder builder(oldLoop);
+  Location loc = candidate.dot.getLoc();
+  auto halfMma = fullMma;
+  auto halfAType = aType.cloneWithEncoding(
+      ttg::DotOperandEncodingAttr::get(builder.getContext(), 0, halfMma, 8));
+  // One 128-bit LDS read returns eight 16-bit values per lane. The only reads
+  // issued between the A-copy boundary and dot0 are the next A fragment;
+  // keep exactly those reads in flight across dot0, then drain them at the
+  // following control boundary before either wave can recycle that A slot.
+  unsigned aElementsPerLane = ttg::getTotalElemsPerThread(halfAType);
+  if (aElementsPerLane == 0 || aElementsPerLane % 8 != 0)
+    return oldLoop.emitError("N-split requires 128-bit A LDS reads");
+  unsigned pendingAReads = aElementsPerLane / 8;
+  auto halfBEncoding =
+      ttg::DotOperandEncodingAttr::get(builder.getContext(), 1, halfMma, 8);
+  auto bMemType = candidate.localB.getSrc().getType();
+  SmallVector<int64_t> halfBShape(bMemType.getShape());
+  halfBShape[1] /= 2;
+  auto halfBMemType = ttg::MemDescType::get(
+      halfBShape, bMemType.getElementType(), bMemType.getEncoding(),
+      bMemType.getMemorySpace(), bMemType.getMutableMemory(),
+      bMemType.getAllocShape());
+  auto halfBType =
+      RankedTensorType::get(halfBShape, bType.getElementType(), halfBEncoding);
+  auto halfAccType =
+      RankedTensorType::get({candidate.blockM, candidate.blockN / 2},
+                            accType.getElementType(), halfMma);
+  auto halfZero = arith::ConstantOp::create(
+      builder, loc, halfAccType,
+      DenseElementsAttr::get(halfAccType, builder.getF32FloatAttr(0.0)));
+  auto makeBHalf = [&](Value memdesc, unsigned half) {
+    auto subview = ttg::MemDescSubsliceOp::create(
+        builder, loc, halfBMemType, memdesc,
+        ArrayRef<int32_t>{0, static_cast<int32_t>(half * halfBShape[1])});
+    return ttg::LocalLoadOp::create(builder, loc, halfBType,
+                                    subview.getResult());
+  };
+  auto initialA = ttg::LocalLoadOp::create(builder, loc, halfAType,
+                                           oldLoop.getInitArgs()[*aIndex]);
+  auto initialB0 = makeBHalf(oldLoop.getInitArgs()[*bIndex], 0);
+  auto initialB1 = makeBHalf(oldLoop.getInitArgs()[*bIndex], 1);
+  initialB0->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  initialB1->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+
+  unsigned oldBodyArguments = body->getNumArguments();
+  scf::ForOp newLoop =
+      addIterArgsToLoop(builder, oldLoop,
+                        ValueRange{halfZero.getResult(), halfZero.getResult(),
+                                   initialA.getResult(), initialB0.getResult(),
+                                   initialB1.getResult()});
+  candidate.loop = newLoop;
+  body = newLoop.getBody();
+  auto current = [&](unsigned index) {
+    return body->getArgument(oldBodyArguments + index);
+  };
+
+  builder.setInsertionPoint(candidate.dot);
+  auto dot0 = tt::DotOp::create(
+      builder, loc, halfAccType, current(2), current(3), current(0),
+      candidate.dot.getInputPrecision(), candidate.dot.getMaxNumImpreciseAcc());
+  auto dot1 = tt::DotOp::create(
+      builder, loc, halfAccType, current(2), current(4), current(1),
+      candidate.dot.getInputPrecision(), candidate.dot.getMaxNumImpreciseAcc());
+  auto newYield = cast<scf::YieldOp>(body->getTerminator());
+  newYield.setOperand(accIndex, candidate.dot.getC());
+  candidate.dot.erase();
+
+  candidate.localA->setOperand(0, nextASource);
+  candidate.localA.getResult().setType(halfAType);
+  candidate.localA->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  builder.setInsertionPoint(candidate.localB);
+  auto nextB0 = makeBHalf(nextBSource, 0);
+  auto nextB1 = makeBHalf(nextBSource, 1);
+  nextB0->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  nextB1->setAttr(kSyncedViaAsyncWaitAttr, builder.getBoolAttr(true));
+  candidate.localB.erase();
+  appendToForOpYield(newLoop, {dot0.getResult(), dot1.getResult(),
+                               candidate.localA.getResult(), nextB0.getResult(),
+                               nextB1.getResult()});
+
+  // Keep both accumulators separate through the peeled tail. The only
+  // concatenation belongs immediately before the final output conversion.
+  tailAccumulatorEncoding = halfMma;
+
+  Operation *anchor = candidate.globalA->getPrevNode();
+  if (!anchor)
+    return failure();
+  lastInserted = anchor;
+  addAsymmetricSync(builder, loc);
+  builder.setInsertionPointAfter(anchor);
+
+  // The high wave group leads with compute: retain the next A fragment's
+  // LDS reads while consuming the current fragment, then publish the next
+  // copies at their rendezvous. The low group is rotated to lead with copies
+  // after unswitching. Publication waits are explicit here; generic full
+  // local barriers would drain the reads needed for this overlap.
+  auto waitLgkm = [&]() {
+    append(triton::amdgpu::MemoryCounterWaitOp::create(
+        builder, loc, /*load=*/nullptr, /*store=*/nullptr,
+        /*ds=*/builder.getI32IntegerAttr(pendingAReads)));
+  };
+  auto waitVm = [&](unsigned n) {
+    append(triton::amdgpu::MemoryCounterWaitOp::create(
+        builder, loc, builder.getI32IntegerAttr(n), /*store=*/nullptr,
+        /*ds=*/nullptr));
+  };
+  auto bareBarrier = [&]() {
+    append(ROCDL::SchedBarrier::create(builder, loc, 0));
+    append(ROCDL::SBarrierOp::create(builder, loc));
+    append(ROCDL::SchedBarrier::create(builder, loc, 0));
+  };
+  auto computeThenMemory = [&](Operation *dot, auto &&issueCopies,
+                               auto &&issueReads) -> LogicalResult {
+    waitLgkm();
+    append(ROCDL::SchedBarrier::create(builder, loc, 0));
+    append(dot);
+    append(ROCDL::SchedBarrier::create(builder, loc, 0));
+    waitVm(2);
+    bareBarrier();
+    append(ROCDL::SetPrioOp::create(builder, loc, 1));
+    if (failed(issueCopies()))
+      return failure();
+    append(ROCDL::SetPrioOp::create(builder, loc, 0));
+    if (failed(issueReads()))
+      return failure();
+    bareBarrier();
+    return success();
+  };
+  if (failed(computeThenMemory(
+          dot0,
+          [&]() -> LogicalResult {
+            if (failed(moveWithBackwardSlice(candidate.globalA)) ||
+                failed(moveWithBackwardSlice(candidate.storeA)))
+              return failure();
+            return success();
+          },
+          [&]() { return moveWithBackwardSlice(candidate.localA); })))
+    return failure();
+  if (failed(computeThenMemory(
+          dot1,
+          [&]() -> LogicalResult {
+            if (failed(moveWithBackwardSlice(candidate.globalB)) ||
+                failed(moveWithBackwardSlice(candidate.storeB)))
+              return failure();
+            return success();
+          },
+          [&]() -> LogicalResult {
+            if (failed(moveWithBackwardSlice(nextB0)) ||
+                failed(moveWithBackwardSlice(nextB1)))
+              return failure();
+            return success();
+          })))
+    return failure();
+
+  if (failed(deferPlannedEpilogueRefill(builder, loc)))
+    return failure();
+  // With four M warps and two N warps, each wave owns only half as much B
+  // fragment state as the old [8,1] layout.  Unroll two BK tiles to overlap
+  // their direct-to-LDS loads with the two independent accumulator halves.
+  // Runtime short reductions can leave an empty main loop with upper < lower.
+  builder.setInsertionPoint(newLoop);
+  newLoop.setUpperBound(arith::MaxSIOp::create(
+      builder, loc, newLoop.getUpperBound(), newLoop.getLowerBound()));
+  newLoop->setAttr(kLoopUnrollFactorAttr, builder.getI32IntegerAttr(2));
+  newLoop->removeAttr(kCandidateAttr);
+  newLoop->removeAttr(kLocalStoreStageAttr);
+  // Keep the resolved ring size until static buffer finalization.
+  newLoop->setAttr(kAppliedAttr, builder.getUnitAttr());
+  newLoop->setAttr("hcu.block_pingpong.nsplit", builder.getUnitAttr());
+  candidate.allocA->setAttr(kPingpongBufferAttr, builder.getUnitAttr());
+  candidate.allocB->setAttr(kPingpongBufferAttr, builder.getUnitAttr());
+  newLoop->getParentOfType<ModuleOp>()->setAttr("hcu.block_pingpong.nsplit",
+                                                builder.getBoolAttr(true));
+  dot0.emitRemark() << "performed HCU N-half planned scheduling\n";
+  return success();
 }
 
 LogicalResult BufferLoadPingponger::runPlannedPipeline() {
@@ -2909,6 +3194,189 @@ struct TritonHCUPrepareBlockPingpongPass
   }
 };
 
+// Keep the three peeled BK tiles in two N-half accumulators as well. Joining
+// the halves before these dots doubles the live accumulator footprint and
+// spills on gfx936. This matcher intentionally accepts only the canonical
+// peeled tail produced by the planned G2/R1 pipeline.
+static std::optional<NSplitTailPlan>
+matchNSplitPeeledTail(scf::ForOp loop, unsigned accumulatorIndex) {
+  if (accumulatorIndex >= loop.getNumResults())
+    return std::nullopt;
+  auto accType =
+      dyn_cast<RankedTensorType>(loop.getResult(accumulatorIndex).getType());
+  if (!accType || accType.getShape() != ArrayRef<int64_t>({256, 256}))
+    return std::nullopt;
+  NSplitTailPlan plan{accumulatorIndex, {}, {}, {}};
+  DenseSet<Value> available{loop.getResult(accumulatorIndex)};
+  DenseSet<Operation *> consumers;
+  for (Operation *op = loop->getNextNode(); op; op = op->getNextNode()) {
+    if (auto branch = dyn_cast<scf::IfOp>(op)) {
+      if (branch.getNumResults() != 1 ||
+          branch.getResult(0).getType() != accType)
+        continue;
+      if (!branch.elseBlock() ||
+          std::distance(branch.thenBlock()->begin(),
+                        branch.thenBlock()->end()) != 2 ||
+          std::distance(branch.elseBlock()->begin(),
+                        branch.elseBlock()->end()) != 1)
+        return std::nullopt;
+      auto dot = dyn_cast<tt::DotOp>(branch.thenBlock()->front());
+      auto yes = dyn_cast<scf::YieldOp>(branch.thenBlock()->back());
+      auto no = dyn_cast<scf::YieldOp>(branch.elseBlock()->back());
+      if (!dot || !yes || !no || yes.getNumOperands() != 1 ||
+          no.getNumOperands() != 1 || yes.getOperand(0) != dot.getResult() ||
+          !available.contains(dot.getC()) ||
+          !available.contains(no.getOperand(0)))
+        return std::nullopt;
+      auto a = dot.getA().getDefiningOp<ttg::LocalLoadOp>();
+      auto b = dot.getB().getDefiningOp<ttg::LocalLoadOp>();
+      if (!a || !b || a->getBlock() != loop->getBlock() ||
+          b->getBlock() != loop->getBlock() || !a->isBeforeInBlock(branch) ||
+          !b->isBeforeInBlock(branch) ||
+          a.getType().getShape() != ArrayRef<int64_t>({256, 32}) ||
+          b.getType().getShape() != ArrayRef<int64_t>({32, 256}))
+        return std::nullopt;
+      plan.branches.push_back(branch);
+      consumers.insert(dot);
+      consumers.insert(no);
+      available.insert(branch.getResult(0));
+    } else if (auto select = dyn_cast<arith::SelectOp>(op)) {
+      if (select.getType() != accType)
+        continue;
+      if (!available.contains(select.getTrueValue()) ||
+          !available.contains(select.getFalseValue()))
+        return std::nullopt;
+      plan.selects.push_back(select);
+      consumers.insert(select);
+      available.insert(select.getResult());
+    } else if (auto cast = dyn_cast<arith::TruncFOp>(op)) {
+      if (cast.getIn().getType() != accType)
+        continue;
+      if (plan.finalCast || !available.contains(cast.getIn()))
+        return std::nullopt;
+      plan.finalCast = cast;
+      consumers.insert(cast);
+    }
+  }
+  if (plan.branches.size() != 3 || plan.selects.size() != 3 || !plan.finalCast)
+    return std::nullopt;
+  for (Value value : available)
+    for (Operation *user : value.getUsers())
+      if (!consumers.contains(user))
+        return std::nullopt;
+  return plan;
+}
+
+static LogicalResult splitNSplitPeeledTail(scf::ForOp originalLoop,
+                                           scf::ForOp scheduledLoop,
+                                           const NSplitTailPlan &plan,
+                                           Attribute halfEncoding) {
+  unsigned accumulatorIndex = plan.accumulatorIndex;
+  auto originalType = cast<RankedTensorType>(
+      originalLoop.getResult(accumulatorIndex).getType());
+  auto halfType = RankedTensorType::get(
+      {originalType.getShape()[0], originalType.getShape()[1] / 2},
+      originalType.getElementType(), halfEncoding);
+  using Halves = std::array<Value, 2>;
+  DenseMap<Value, Halves> halves;
+  unsigned appended = originalLoop.getNumResults();
+  halves[originalLoop.getResult(accumulatorIndex)] = {
+      scheduledLoop.getResult(appended), scheduledLoop.getResult(appended + 1)};
+  SmallVector<Operation *> oldAccOps;
+  auto tailIfs = plan.branches;
+  auto tailSelects = plan.selects;
+  auto finalCast = plan.finalCast;
+
+  auto *ctx = originalLoop.getContext();
+  auto halfAEncoding =
+      ttg::DotOperandEncodingAttr::get(ctx, 0, halfEncoding, 4);
+  auto halfBEncoding =
+      ttg::DotOperandEncodingAttr::get(ctx, 1, halfEncoding, 4);
+  for (Operation *op = originalLoop->getNextNode(); op;) {
+    Operation *next = op->getNextNode();
+    if (auto branch = dyn_cast<scf::IfOp>(op);
+        branch && llvm::is_contained(tailIfs, branch)) {
+      auto dot = cast<tt::DotOp>(branch.getThenRegion().front().front());
+      auto aLoad = dot.getA().getDefiningOp<ttg::LocalLoadOp>();
+      auto bLoad = dot.getB().getDefiningOp<ttg::LocalLoadOp>();
+      auto c = halves.find(dot.getC());
+      auto elseYield =
+          cast<scf::YieldOp>(branch.getElseRegion().front().getTerminator());
+      auto elseC = halves.find(elseYield.getOperand(0));
+      if (c == halves.end() || elseC == halves.end())
+        return failure();
+      OpBuilder builder(aLoad);
+      auto aType = cast<RankedTensorType>(aLoad.getType())
+                       .cloneWithEncoding(halfAEncoding);
+      Value aHalf = ttg::LocalLoadOp::create(builder, aLoad.getLoc(), aType,
+                                             aLoad.getSrc());
+      auto bMem = bLoad.getSrc().getType();
+      SmallVector<int64_t> bShape(bMem.getShape());
+      bShape[1] /= 2;
+      auto halfMemType = ttg::MemDescType::get(
+          bShape, bMem.getElementType(), bMem.getEncoding(),
+          bMem.getMemorySpace(), bMem.getMutableMemory(), bMem.getAllocShape());
+      auto bType = RankedTensorType::get(
+          bShape, cast<RankedTensorType>(bLoad.getType()).getElementType(),
+          halfBEncoding);
+      Halves bHalf;
+      builder.setInsertionPoint(bLoad);
+      for (int half = 0; half < 2; ++half) {
+        Value view = ttg::MemDescSubsliceOp::create(
+            builder, bLoad.getLoc(), halfMemType, bLoad.getSrc(),
+            ArrayRef<int32_t>{0, half * static_cast<int32_t>(bShape[1])});
+        bHalf[half] =
+            ttg::LocalLoadOp::create(builder, bLoad.getLoc(), bType, view);
+      }
+      builder.setInsertionPoint(branch);
+      auto split = scf::IfOp::create(builder, branch.getLoc(),
+                                     TypeRange{halfType, halfType},
+                                     branch.getCondition(), true);
+      auto thenBuilder = split.getThenBodyBuilder();
+      Halves updated;
+      for (int half = 0; half < 2; ++half)
+        updated[half] = tt::DotOp::create(thenBuilder, dot.getLoc(), halfType,
+                                          aHalf, bHalf[half], c->second[half],
+                                          dot.getInputPrecision(),
+                                          dot.getMaxNumImpreciseAcc());
+      scf::YieldOp::create(thenBuilder, branch.getLoc(),
+                           ValueRange{updated[0], updated[1]});
+      auto elseBuilder = split.getElseBodyBuilder();
+      scf::YieldOp::create(elseBuilder, branch.getLoc(),
+                           ValueRange{elseC->second[0], elseC->second[1]});
+      halves[branch.getResult(0)] = {split.getResult(0), split.getResult(1)};
+      oldAccOps.push_back(branch);
+    } else if (auto select = dyn_cast<arith::SelectOp>(op);
+               select && llvm::is_contained(tailSelects, select)) {
+      auto yes = halves.find(select.getTrueValue());
+      auto no = halves.find(select.getFalseValue());
+      if (yes == halves.end() || no == halves.end())
+        return failure();
+      OpBuilder builder(select);
+      Halves selected;
+      for (int half = 0; half < 2; ++half)
+        selected[half] = arith::SelectOp::create(
+            builder, select.getLoc(), select.getCondition(), yes->second[half],
+            no->second[half]);
+      halves[select.getResult()] = selected;
+      oldAccOps.push_back(select);
+    }
+    op = next;
+  }
+  auto final = halves.find(finalCast.getIn());
+  if (final == halves.end())
+    return failure();
+  OpBuilder builder(finalCast);
+  auto fullHalfType = originalType.cloneWithEncoding(halfEncoding);
+  auto joined = tt::CatOp::create(builder, finalCast.getLoc(), fullHalfType,
+                                  final->second[0], final->second[1]);
+  joined->setAttr("hcu.block_pingpong.nsplit_join", builder.getUnitAttr());
+  finalCast.setOperand(joined.getResult());
+  for (Operation *old : llvm::reverse(oldAccOps))
+    old->erase();
+  return success();
+}
+
 // Post-pipeline pass: reduce masked-tail VGPR pressure and apply
 // the selected HCU two- or four-phase schedule to each expanded
 // candidate.
@@ -2959,7 +3427,13 @@ struct TritonHCUBlockPingpongPass
         return signalPassFailure();
       }
 
-      BufferLoadPingponger pingponger(*clonedCandidate, ldsPrefetchDistance);
+      auto accArg = dyn_cast<BlockArgument>(candidate->dot.getC());
+      auto nsplitTail =
+          accArg && accArg.getArgNumber()
+              ? matchNSplitPeeledTail(loop, accArg.getArgNumber() - 1)
+              : std::nullopt;
+      BufferLoadPingponger pingponger(*clonedCandidate, ldsPrefetchDistance,
+                                      nsplitTail.has_value());
       if (failed(pingponger.run())) {
         // Fragment pipelining may have replaced and erased clonedLoop.
         // Leave the failed IR intact for the pass reproducer.
@@ -2968,6 +3442,14 @@ struct TritonHCUBlockPingpongPass
         return signalPassFailure();
       }
       clonedLoop = pingponger.getLoop();
+
+      if (Attribute tailEncoding = pingponger.getTailAccumulatorEncoding()) {
+        if (!nsplitTail || failed(splitNSplitPeeledTail(
+                               loop, clonedLoop, *nsplitTail, tailEncoding))) {
+          loop.emitError("failed to split N-half peeled tail");
+          return signalPassFailure();
+        }
+      }
 
       // Wide VGPR fragment pipelining appends internal loop-carried A/B
       // tensors.  They have no counterpart on the prepared source loop and

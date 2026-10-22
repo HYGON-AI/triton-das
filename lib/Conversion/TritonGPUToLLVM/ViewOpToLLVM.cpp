@@ -169,19 +169,51 @@ struct CatOpConversion : public ConvertOpToLLVMPattern<CatOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
     auto resultTy = cast<RankedTensorType>(op.getType());
-    unsigned elems = getTotalElemsPerThread(resultTy);
     auto typeConverter = getTypeConverter();
-    Type elemTy = typeConverter->convertType(resultTy.getElementType());
-    SmallVector<Type> types(elems, elemTy);
-    // unpack input values
+    SmallVector<std::pair<bool, unsigned>> permutation;
+    if (isa<AMDMfmaEncodingAttr>(resultTy.getEncoding())) {
+      auto lhsTy = cast<RankedTensorType>(op.getLhs().getType());
+      auto rhsTy = cast<RankedTensorType>(op.getRhs().getType());
+      SmallVector<int64_t> expectedShape(lhsTy.getShape());
+      expectedShape.back() *= 2;
+      if (lhsTy.getEncoding() != resultTy.getEncoding() || rhsTy != lhsTy ||
+          resultTy.getShape() != ArrayRef<int64_t>(expectedShape))
+        return rewriter.notifyMatchFailure(op,
+                                           "unsupported MFMA concatenation");
+      auto srcLayout = toLinearLayout(lhsTy);
+      auto dstLayout = toLinearLayout(resultTy);
+      // A register permutation cannot change lane, warp or CTA ownership.
+      for (StringRef name : {"lane", "warp", "block"}) {
+        auto dim = StringAttr::get(op.getContext(), name);
+        if (srcLayout.getBases().lookup(dim) !=
+            dstLayout.getBases().lookup(dim))
+          return rewriter.notifyMatchFailure(op,
+                                             "MFMA cat requires communication");
+      }
+      auto srcOffsets = emitOffsetForLayout(lhsTy.getEncoding(), lhsTy);
+      auto dstOffsets = emitOffsetForLayout(resultTy.getEncoding(), resultTy);
+      for (auto dst : dstOffsets) {
+        bool right = dst.back() >= lhsTy.getShape().back();
+        dst.back() -= right ? lhsTy.getShape().back() : 0;
+        auto it = llvm::find(srcOffsets, dst);
+        if (it == srcOffsets.end())
+          return rewriter.notifyMatchFailure(op,
+                                             "MFMA cat is not register-local");
+        permutation.emplace_back(right, it - srcOffsets.begin());
+      }
+    }
+    // Finish matching before emitting any IR. MFMA register order interleaves
+    // N repetitions; appending the half structs would silently permute columns.
     auto lhsVals = unpackLLElements(loc, adaptor.getLhs(), rewriter);
     auto rhsVals = unpackLLElements(loc, adaptor.getRhs(), rewriter);
-    // concatenate (and potentially reorder) values
     SmallVector<Value> retVals;
-    for (Value v : lhsVals)
-      retVals.push_back(v);
-    for (Value v : rhsVals)
-      retVals.push_back(v);
+    if (!permutation.empty()) {
+      for (auto [right, index] : permutation)
+        retVals.push_back((right ? rhsVals : lhsVals)[index]);
+    } else {
+      retVals.append(lhsVals);
+      retVals.append(rhsVals);
+    }
     // pack and replace
     Value ret = packLLElements(loc, typeConverter, retVals, rewriter, resultTy);
     rewriter.replaceOp(op, ret);
