@@ -454,6 +454,18 @@ MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
       aElemType.isF32() && !useTF32)
     values = values.take_back(1);
 
+  // The FP4 key also represents mixed F8/F6/F4 operands. The packed FP4
+  // instruction only accepts FP4 on both sides; mixed formats must use the
+  // F8F6F4 instruction even when the input K could fit a larger FP4 tile.
+  if (withScale && (features & HCUISAFeature::MMAC_FP6FP4) &&
+      (!isa<Float4E2M1FNType>(aElemType) ||
+       !isa<Float4E2M1FNType>(bElemType))) {
+    while (!values.empty() && std::get<0>(values.front()).ends_with(".fp4"))
+      values = values.drop_front();
+    if (values.empty())
+      return failure();
+  }
+
   // If We have more than one instrinsics, prefer those with a larger K.
   for (const auto [symbol, k, kBase] : llvm::drop_end(values)) {
     if (inputKDim >= k) {

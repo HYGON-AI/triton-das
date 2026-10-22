@@ -447,6 +447,43 @@ struct DotOpMFMAConversionHelper {
     return success();
   }
 
+  /// Adapt packed FP4 fragments to the unscaled HCU F8F6F4 register ABI.
+  /// Its two VGPRs hold one E2M1 code per byte, in bits [5:2], matching MLS
+  /// B4Mix padding. Already-padded operands and packed FP4-only instructions
+  /// need no adaptation. Keep the scaled path on its existing preparation.
+  void prepareMmacOperands(ValueTable &operands, StringRef intrinsicName,
+                           bool isPackedFp4, bool hasBothScales) const {
+    if (!isPackedFp4 || hasBothScales || !mfmaLayout.isHCUMmac() ||
+        !intrinsicName.ends_with(".f8f6f4"))
+      return;
+
+    constexpr unsigned vgprCount = 2;
+    constexpr unsigned bytesPerVgpr = 4;
+    constexpr unsigned fp4Bits = 4;
+    constexpr unsigned fp4ByteOffset = 2;
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto resultTy = vec_ty(i32_ty, vgprCount);
+    for (auto &entry : operands) {
+      Value packed = entry.second;
+      assert(packed.getType().isInteger(32) &&
+             "K32 packed FP4 requires one i32 per lane");
+      Value words = b.undef(resultTy);
+      for (unsigned word = 0; word < vgprCount; ++word) {
+        Value bytes = b.i32_val(0);
+        for (unsigned byte = 0; byte < bytesPerVgpr; ++byte) {
+          unsigned code = word * bytesPerVgpr + byte;
+          Value nibble = b.and_(
+              b.lshr(packed, b.i32_val(code * fp4Bits)),
+              b.i32_val((1u << fp4Bits) - 1));
+          bytes = b.or_(
+              bytes, b.shl(nibble, b.i32_val(byte * 8 + fp4ByteOffset)));
+        }
+        words = b.insert_element(resultTy, words, bytes, b.i32_val(word));
+      }
+      entry.second = words;
+    }
+  }
+
   /// Process the elements in rawElems and prepare a vector for mfma input.
   /// rawElems is a vector of kBase elements. Each element is of the raw
   /// element type from the input. We need to prepare a vector of kBase
@@ -785,29 +822,34 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto bShapeE = getScaledDotOpElemsShape(op, 1);
     auto aMlsElemBitTyKind = getMlsElemBitTyKind(aEncoding.getMlsScaledExt());
     auto bMlsElemBitTyKind = getMlsElemBitTyKind(bEncoding.getMlsScaledExt());
-    auto aFlow = getMlsDataFlowInfo(aMlsElemBitTyKind);
-    auto bFlow = getMlsDataFlowInfo(bMlsElemBitTyKind);
-    auto isAElemB4Packed = isMlsAB ? aFlow.usesPackedShape(MlsDataFlowView::DotOperand) : aElemType == ScaleDotElemType::E2M1;
-    auto isBElemB4Packed = isMlsAB ? bFlow.usesPackedShape(MlsDataFlowView::DotOperand) : bElemType == ScaleDotElemType::E2M1;
+    // At a dot operand, ordinary FP4 loads still contain two K-packed
+    // values per byte. MLS may keep that representation (B4) or already
+    // pad each code into its own byte (B4Mix/F4). Resolve that per operand
+    // instead of inferring packing from a particular kWidth or from the
+    // presence of MLS on the other operand.
+    auto getDotOperandFlow = [](ScaleDotElemType elemType,
+                                MlsElemBitTyKind mlsKind) {
+      if (mlsKind == MlsElemBitTyKind::None &&
+          elemType == ScaleDotElemType::E2M1)
+        mlsKind = MlsElemBitTyKind::B4;
+      return getMlsDataFlowInfo(mlsKind);
+    };
+    auto aFlow = getDotOperandFlow(aElemType, aMlsElemBitTyKind);
+    auto bFlow = getDotOperandFlow(bElemType, bMlsElemBitTyKind);
+    bool isAElemB4Packed = aFlow.usesPackedShape(MlsDataFlowView::DotOperand);
+    bool isBElemB4Packed = bFlow.usesPackedShape(MlsDataFlowView::DotOperand);
 
     int aKWidth = aEncoding.getKWidth();
     int bKWidth = bEncoding.getKWidth();
-    // Match mfmaDotToLinearLayout (LinearLayoutConversions.cpp): kTileSize =
-    // warpSize / nonKDim * kWidth, with the 64x4 / 4x64 operand-specific *16.
-    constexpr int kWarpSize = 64;
-    auto kTileForDotOperand =
-        [&](unsigned opIdx, int kWidth,
-            MlsElemBitTyKind elemBitTyKind) -> int64_t {
-      int kWidthMfma =
-          mfmaLayout.getScaledOperandKWidth(kWidth, elemBitTyKind);
-      unsigned nonKDim = opIdx == 0 ? mDim : nDim;
-      int64_t kTile = kWarpSize / nonKDim * kWidthMfma;
-      return kTile;
+    unsigned aLogicalKWidth = aFlow.getMfmaKWidth(aKWidth);
+    unsigned bLogicalKWidth = bFlow.getMfmaKWidth(bKWidth);
+    auto kTileForDotOperand = [&](unsigned opIdx,
+                                 unsigned logicalKWidth) -> int64_t {
+      auto shape = mfmaLayout.getInstrShapeForOperand(logicalKWidth, opIdx);
+      return shape[opIdx == 0 ? 1 : 0];
     };
-    int64_t kDimOperandSizeA =
-        kTileForDotOperand(0, aKWidth, aMlsElemBitTyKind);
-    int64_t kDimOperandSizeB =
-        kTileForDotOperand(1, bKWidth, bMlsElemBitTyKind);
+    int64_t kDimOperandSizeA = kTileForDotOperand(0, aLogicalKWidth);
+    int64_t kDimOperandSizeB = kTileForDotOperand(1, bLogicalKWidth);
     assert(kDimOperandSizeA == kDimOperandSizeB &&
            "A/B dot operand K tile sizes must match");
     int64_t kDimOperandSize = kDimOperandSizeA;
@@ -822,7 +864,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         : mlir::triton::HCU::deduceHCUISAFeature(*arch);
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         op.getLoc(), mfmaVersion, mDim, nDim,
-        isAElemB4Packed ? kDimOperandSize * 2 : kDimOperandSize,
+        kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
         scaleDotElemTypeToMLIRType(ctx, bElemType), elemTyD,
         /*withScale=*/true, allowXF32, features);
@@ -837,8 +879,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     unsigned bKBase = isBElemB4Packed ? kBase / 2 : kBase;
 
     const auto kDimInstrSize =
-        mfmaLayout.getInstrShapeForScaledOperand(aKWidth,
-                                                 aMlsElemBitTyKind, 0)[1];
+        mfmaLayout.getInstrShapeForOperand(aLogicalKWidth, 0)[1];
     auto repA = isMlsAB
         ? mfmaLayout.getRepForScaledOperand(aShapeE, aKWidth,
                                             aMlsElemBitTyKind, 0)
@@ -876,6 +917,11 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         loadedB, numRepB, numRepN, numRepK, bKWidth, bKBase,
         bTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
         /*isConstantScale=*/false, isHCUMmac);
+
+    prepareMmacOperands(operandA, intrinsicName, isAElemB4Packed,
+                        existBothScales);
+    prepareMmacOperands(operandB, intrinsicName, isBElemB4Packed,
+                        existBothScales);
 
     // Scales have the same replica distributions as their corresponding
     // operands.

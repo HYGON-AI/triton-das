@@ -1717,7 +1717,18 @@ public:
       auto vType = v.getType();
       // auto newEnc =
       //     DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, kWidth/2);
-      auto newEnc = DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, 8);
+      // A plain K-packed E2M1 tensor stores two logical values per byte.
+      // Derive its storage width from the instruction's logical operand
+      // width, rather than tying the conversion to a K32/kWidth4 case.
+      bool packedFp4 =
+          (opIdx == 0 ? aElemType : bElemType) == ScaleDotElemType::E2M1;
+      bool kPacked = opIdx == 0 ? dotOp.getLhsKPack() : dotOp.getRhsKPack();
+      bool plainNativeFp4 = bothScalesAbsent && !useMatrixLoad &&
+                            packedFp4 && kPacked;
+      constexpr unsigned fp4ValuesPerByte = 2;
+      unsigned storageKWidth = plainNativeFp4 ? kBase / fp4ValuesPerByte : 8;
+      auto newEnc =
+          DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, storageKWidth);
       auto newEncA = DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, 8, aScaledExt);
       auto newEncB = DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, 8, bScaledExt);
       if (aMatInfo.has_value() && opIdx == 0) {
