@@ -47,9 +47,11 @@ struct MfmaIntrinsic {
                                       HCUISAFeature features);
 
   MfmaIntrinsic(StringRef symbol, unsigned m, unsigned n, unsigned k,
-                unsigned kB, Type aET, Type bET, Type cET = {})
+                unsigned kB, Type aET, Type bET, Type cET = {},
+                bool supportsMmacLit = false, bool supportsMmacLts = false)
       : name(symbol), mDim(m), nDim(n), kDim(k), kBase(kB), aElementType(aET),
-        bElementType(bET), cElementType(cET) {}
+        bElementType(bET), cElementType(cET),
+        supportsMmacLit(supportsMmacLit), supportsMmacLts(supportsMmacLts) {}
 
   MfmaIntrinsic(const MfmaIntrinsic &other) = default;
   MfmaIntrinsic(MfmaIntrinsic &&other) = default;
@@ -72,6 +74,11 @@ struct MfmaIntrinsic {
   Type aElementType;
   Type bElementType;
   Type cElementType;
+
+  // HCU instruction modifiers, populated by the MMAC database entry.
+  // AMD MFMA entries leave these false.
+  bool supportsMmacLit = false;
+  bool supportsMmacLts = false;
 };
 } // namespace mlir
 

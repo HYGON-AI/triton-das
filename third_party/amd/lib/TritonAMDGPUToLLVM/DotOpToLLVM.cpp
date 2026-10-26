@@ -43,7 +43,11 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
     Value D = op.getResult();
 
     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
-    if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
+    if (auto mfma = dyn_cast<AMDMfmaEncodingAttr>(dEncoding)) {
+      // HCU layouts belong to the HCU patterns. In particular, do not bypass
+      // their instruction capability checks by retrying an AMD intrinsic.
+      if (mfma.isHCUMmac())
+        return failure();
       return AMD::convertMFMA(op, adaptor, getTypeConverter(), rewriter);
     }
     if (isa<AMDWmmaEncodingAttr>(dEncoding)) {
@@ -70,7 +74,9 @@ struct ScaledDotOpConversion
 
     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
 
-    if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
+    if (auto mfma = dyn_cast<AMDMfmaEncodingAttr>(dEncoding)) {
+      if (mfma.isHCUMmac())
+        return failure();
       return AMD::convertScaledMFMA(op, adaptor, getTypeConverter(), rewriter);
     }
     if (isa<AMDWmmaEncodingAttr>(dEncoding)) {

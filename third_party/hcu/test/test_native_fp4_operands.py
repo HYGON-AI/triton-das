@@ -65,3 +65,38 @@ def test_native_fp4_operand_representation(a_format, b_format, k):
         rhs = "fp4" if b_format == "e2m1" else "fp8"
         allowed = {f"v_mmac_f32_16x16x32_{lhs}_{rhs}"}
     assert set(instructions) <= allowed
+
+
+@pytest.mark.parametrize("a_format,b_format", [
+    ("e4m3", "e2m1"), ("e2m1", "e4m3"), ("e2m1", "e2m1"),
+])
+@pytest.mark.parametrize("k", [32, 64, 128])
+def test_native_fp4_instruction_selection(a_format, b_format, k):
+    # Compile without a device: mixed F8/F4 must not select packed-FP4 K64.
+    from triton._C.libtriton import ir
+    from triton.backends.compiler import GPUTarget
+    from triton.backends.hcu.compiler import HIPBackend
+    from triton.compiler import ASTSource
+
+    backend = HIPBackend(GPUTarget("hip", "gfx946", 64))
+    options = backend.parse_options(dict(num_warps=4, num_stages=1,
+                                         enable_fp_fusion=False))
+    context = ir.context()
+    ir.load_dialects(context)
+    backend.load_dialects(context)
+    source = ASTSource(
+        _native_dot,
+        dict(A="*fp8e4nv" if a_format == "e4m3" else "*u8",
+             B="*fp8e4nv" if b_format == "e4m3" else "*u8", C="*fp32"),
+        constexprs=dict(K=k, A_FORMAT=a_format, B_FORMAT=b_format),
+        attrs={(i,): [["tt.divisibility", 16], ["tt.pointer_range", 32]]
+               for i in range(3)})
+    module = source.make_ir(options, backend.get_codegen_implementation(options),
+                            backend.get_module_map(), context)
+    metadata = {}
+    module = backend.make_ttir(module, metadata, options)
+    module = backend.make_ttgir(module, metadata, options)
+    instruction_k = 64 if a_format == b_format == "e2m1" and k >= 64 else 32
+    assert f"instrShape = [16, 16, {instruction_k}]" in str(module)
+    # Exercise the complete native operand lowering as well as selection.
+    backend.make_llir(module, metadata, options)

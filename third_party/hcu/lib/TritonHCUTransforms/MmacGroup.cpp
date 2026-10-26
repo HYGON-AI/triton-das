@@ -17,8 +17,13 @@ using MfmaKey =
     std::tuple<unsigned /*version*/, unsigned /*mDim*/, unsigned /*nDim*/,
                TypeID /*aElemType*/, TypeID /*bElemType*/, TypeID /*cElemType*/>;
 
-using MfmaMapValue =
-    std::tuple<StringRef /*symbol*/, unsigned /*kDim*/, unsigned /*kBase*/>;
+struct MfmaMapValue {
+  StringRef symbol;
+  unsigned kDim;
+  unsigned kBase;
+  bool supportsLit = true;
+  bool supportsLts = true;
+};
 using MfmaMap = llvm::DenseMap<MfmaKey, SmallVector<MfmaMapValue, 2>>;
 
 class MfmaDatabase {
@@ -216,19 +221,6 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   TRITON_MMAC_v_2case(5, m, n, aET, bET, cET, symbol1, k1, kBase1, symbol2,    \
                        k2, kBase2)
 
-// f32 x8/x4 share one key; reuse v4_2case for version 4.
-#define TRITON_MMAC_v3to4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1,      \
-                                symbol2, k2, kBase2)                           \
-  {                                                                            \
-    /*key=*/{3, m, n, aET.getTypeID(), bET.getTypeID(), cET.getTypeID()},      \
-    /*value=*/{                                                                \
-      {ROCDL::symbol1::getOperationName(), k1, kBase1},                        \
-      {ROCDL::symbol2::getOperationName(), k2, kBase2},                        \
-    }                                                                          \
-  },                                                                           \
-      TRITON_MMAC_v4_2case(m, n, aET, bET, cET, symbol1, k1, kBase1, symbol2,  \
-                           k2, kBase2)
-
   Builder b(context);
   auto f64T = b.getF64Type();
   auto f32T = b.getF32Type();
@@ -249,8 +241,14 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       TRITON_MMAC_v3to4(16, 16, tf32T, tf32T, f32T, mmac_f32_16x16x8tf32, 8, 2),
       // f32 inputs
       // mmac_f32_16x16x8f32 & mmac_f32_16x16x4f32
-      TRITON_MMAC_v3to4_2case(16, 16, f32T, f32T, f32T, mmac_f32_16x16x8f32, 8,
-                              2, mmac_f32_16x16x4f32, 4, 1),
+      // K8 exposes LIT and LTS; K4 exposes only LTS. Keep capabilities
+      // alongside each instruction rather than inferring them from dtype.
+      {{3, 16, 16, f32T.getTypeID(), f32T.getTypeID(), f32T.getTypeID()},
+       {{ROCDL::mmac_f32_16x16x8f32::getOperationName(), 8, 2},
+        {ROCDL::mmac_f32_16x16x4f32::getOperationName(), 4, 1, false, true}}},
+      {{4, 16, 16, f32T.getTypeID(), f32T.getTypeID(), f32T.getTypeID()},
+       {{ROCDL::mmac_f32_16x16x8f32::getOperationName(), 8, 2},
+        {ROCDL::mmac_f32_16x16x4f32::getOperationName(), 4, 1, false, true}}},
 
       // f16 inputs
       // mmac_f32_16x16x16xf16
@@ -262,7 +260,8 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 
       // f64 inputs
       // mmac_f64_16x16x4f64
-      TRITON_MMAC_v(4, 16, 16, f64T, f64T, f64T, mmac_f64_16x16x4f64, 4, 1),
+      {{4, 16, 16, f64T.getTypeID(), f64T.getTypeID(), f64T.getTypeID()},
+       {{ROCDL::mmac_f64_16x16x4f64::getOperationName(), 4, 1, false, true}}},
 
       // bf16 inputs
       // mmac_f32_16x16x16xbf16
@@ -460,24 +459,25 @@ MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
   if (withScale && (features & HCUISAFeature::MMAC_FP6FP4) &&
       (!isa<Float4E2M1FNType>(aElemType) ||
        !isa<Float4E2M1FNType>(bElemType))) {
-    while (!values.empty() && std::get<0>(values.front()).ends_with(".fp4"))
+    while (!values.empty() && values.front().symbol.ends_with(".fp4"))
       values = values.drop_front();
     if (values.empty())
       return failure();
   }
 
   // If We have more than one instrinsics, prefer those with a larger K.
-  for (const auto [symbol, k, kBase] : llvm::drop_end(values)) {
+  for (const auto [symbol, k, kBase, supportsLit, supportsLts] :
+       llvm::drop_end(values)) {
     if (inputKDim >= k) {
       return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType,
-                       intrinsicCType);
+                           intrinsicCType, supportsLit, supportsLts);
     }
   }
 
   // We always have one choice--the only / smallest-K intrinsic.
-  auto [symbol, k, kBase] = values.back();
+  auto [symbol, k, kBase, supportsLit, supportsLts] = values.back();
   return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType,
-                       intrinsicCType);
+                       intrinsicCType, supportsLit, supportsLts);
 }
 
 FailureOr<MfmaIntrinsic> MfmaIntrinsic::get(Location loc, int version,
@@ -503,13 +503,13 @@ FailureOr<MfmaIntrinsic> MfmaIntrinsic::get(Location loc, int version,
     values = values.take_back(1);
 
   auto match = llvm::find_if(values, [&](const MfmaMapValue &val) {
-    return std::get<1>(val) == kDim;
+    return val.kDim == kDim;
   });
   if (match == values.end())
     return failure();
 
-  auto [symbol, k, kBase] = *match;
+  auto [symbol, k, kBase, supportsLit, supportsLts] = *match;
   return MfmaIntrinsic(symbol, mDim, nDim, k, kBase, aElemType, bElemType,
-                       intrinsicCType);
+                       intrinsicCType, supportsLit, supportsLts);
 }
 } // namespace mlir

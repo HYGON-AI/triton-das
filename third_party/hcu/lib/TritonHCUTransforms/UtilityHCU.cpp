@@ -1,4 +1,5 @@
 #include "TritonHCU/Utility.h"
+#include "TritonAMDGPUTransforms/MfmaGroup.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -31,11 +32,28 @@ ttg::MmacLayout getMmacLayoutDefault(llvm::StringRef archGen) {
 // HCU encoding keeps isTransposed=false; transpose intent is materialized in
 // mmacLayout only.
 ttg::MmacLayout getMfmaMappedMmacLayout(bool logicalIsTransposed,
-                                        bool supportMmacLayout) {
+                             bool supportMmacLayout,
+                             const MfmaIntrinsic &intrinsic) {
   if (!supportMmacLayout)
     return ttg::MmacLayout::LEGACY;
-  return logicalIsTransposed ? ttg::MmacLayout::INTERLEAVE
-                             : ttg::MmacLayout::INTERLEAVE_TRANSPOSE;
+  if (!intrinsic.supportsMmacLit)
+    return intrinsic.supportsMmacLts ? ttg::MmacLayout::TRANSPOSE : ttg::MmacLayout::LEGACY;
+  return logicalIsTransposed || !intrinsic.supportsMmacLts
+             ? ttg::MmacLayout::INTERLEAVE
+             : ttg::MmacLayout::INTERLEAVE_TRANSPOSE;
+}
+
+LogicalResult validateMmacLayout(Operation *op, ttg::MmacLayout layout,
+                                 const MfmaIntrinsic &intrinsic) {
+  bool needsLit = layout == ttg::MmacLayout::INTERLEAVE ||
+                  layout == ttg::MmacLayout::INTERLEAVE_TRANSPOSE;
+  bool needsLts = layout == ttg::MmacLayout::TRANSPOSE ||
+                  layout == ttg::MmacLayout::INTERLEAVE_TRANSPOSE;
+  if ((needsLit && !intrinsic.supportsMmacLit) ||
+      (needsLts && !intrinsic.supportsMmacLts))
+    return op->emitError() << "MMAC layout " << ttg::stringifyMmacLayout(layout)
+                           << " is not supported by " << intrinsic.name;
+  return success();
 }
 
 FailureOr<std::pair<triton::DotOpInterface, unsigned>>

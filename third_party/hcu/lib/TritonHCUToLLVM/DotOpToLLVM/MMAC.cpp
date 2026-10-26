@@ -32,6 +32,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "TritonHCU/MlsGroup.h"
 #include "TritonHCU/WaspSplitPlan.h"
+#include "TritonHCU/Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton::HCU;
@@ -337,6 +338,11 @@ struct DotOpMFMAConversionHelper {
     int kWidth = aEncoding.getKWidth();
 
     intrinsicName = maybeMfmaIntrinsic->name;
+    // Do not discard modifier bits that the selected intrinsic cannot express,
+    // including when an encoded dot bypasses the acceleration pass.
+    if (failed(mlir::triton::HCU::validateMmacLayout(
+            op, mfmaLayout.getMmacLayout(), *maybeMfmaIntrinsic)))
+      return failure();
 
     // Upstream doubles kWidth here for the XF32 instruction (16x16x32: 2x K
     // and 2x per-lane fragment of F32). HCU f32 MMAC (mmac_f32_16x16x8tf32/
@@ -871,6 +877,10 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     if (failed(maybeMfmaIntrinsic))
       return op.emitError(
           "no matching matrix core intrinsic due to unsupported element type");
+
+    if (failed(mlir::triton::HCU::validateMmacLayout(
+            op, mfmaLayout.getMmacLayout(), *maybeMfmaIntrinsic)))
+      return failure();
 
     StringRef intrinsicName = maybeMfmaIntrinsic->name;
     unsigned kBase = maybeMfmaIntrinsic->kBase;

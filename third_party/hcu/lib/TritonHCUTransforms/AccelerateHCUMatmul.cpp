@@ -1029,13 +1029,14 @@ class BlockedToMFMA : public OpRewritePattern<tt::DotOp> {
   int kPack;
   HCUISAFeature features;
   MmacLayout mmacLayout;  // Added for HCUs
+  bool &invalidLayout;
 public:
   BlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim, int kPack,
                 MmacLayout mmacLayout, HCUISAFeature features,
-                PatternBenefit benefit = 1)
+                bool &invalidLayout, PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
         nonKDim(nonKDim), kPack(kPack),
-        features(features), mmacLayout(mmacLayout) {}
+        features(features), mmacLayout(mmacLayout), invalidLayout(invalidLayout) {}
   LogicalResult matchAndRewrite(tt::DotOp dotOp,
                                 PatternRewriter &rewriter) const override {
     using TensorValue = TypedValue<RankedTensorType>;
@@ -1179,11 +1180,15 @@ public:
         tilesPerWarp = {1, 2};
       }
     }
+    if (failed(validateMmacLayout(dotOp, mmacLayout, *mfmaInstr))) {
+      invalidLayout = true;
+      return failure();
+    }
     auto effectiveMmacLayout =
         mmacLayout == MmacLayout::MFMA
             ? getMfmaMappedMmacLayout(
-                  isTransposed,
-                  (features & HCUISAFeature::MMAC_LAYOUT) != 0)
+                  isTransposed, (features & HCUISAFeature::MMAC_LAYOUT) != 0,
+                  *mfmaInstr)
             : mmacLayout;
     if (aElemTy.isF64() && mDim == 16 && nDim == 16 && kDim == 4) {
       // The current layout preserves rows but orders columns incorrectly for
@@ -1437,7 +1442,8 @@ public:
         mmacLayout == MmacLayout::MFMA
             ? getMfmaMappedMmacLayout(
                   /*logicalIsTransposed=*/true,
-                  (features & HCUISAFeature::MMAC_LAYOUT) != 0)
+                  (features & HCUISAFeature::MMAC_LAYOUT) != 0,
+                  *mfmaInstr)
             : mmacLayout;
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*version=*/mfmaVersion, mfmaWarpsPerCTA, {mDim, nDim, kDim},
@@ -1679,7 +1685,8 @@ public:
         mmacLayout == MmacLayout::MFMA
             ? getMfmaMappedMmacLayout(
                   /*logicalIsTransposed=*/true,
-                  (hcuFeatures & HCUISAFeature::MMAC_LAYOUT) != 0)
+                  (hcuFeatures & HCUISAFeature::MMAC_LAYOUT) != 0,
+                  *mfmaInstr)
             : mmacLayout;
     mlir::Attribute mfmaEnc;
     if (llvm::any_of(tilesPerWarp, [](int x) { return x != 1; })) {
@@ -2199,6 +2206,7 @@ struct TritonHCUAccelerateMatmulPass
     MLIRContext *context = &getContext();
     ModuleOp m = getOperation();
     RewritePatternSet mfmaPatterns(context);
+    bool invalidLayout = false;
     auto features = mlir::triton::HCU::deduceHCUISAFeature(archGenerationName);
     bool supportsMmacLayout = (features & HCUISAFeature::MMAC_LAYOUT) != 0;
     auto mmacLayout = mmacLayoutForce != -1 ? *ttg::symbolizeMmacLayout(mmacLayoutForce) : MmacLayout::MFMA;
@@ -2218,10 +2226,12 @@ struct TritonHCUAccelerateMatmulPass
             features,
             /*benefit=*/10);
       }
-      mfmaPatterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
+      mfmaPatterns.add<::BlockedToMFMA>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
-          mmacLayout, features,
-          /*benefit=*/2);
+          mmacLayout, features, invalidLayout, /*benefit=*/2);
+      mfmaPatterns.add<::ScaledBlockedToMFMA>(
+          context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
+          mmacLayout, features, /*benefit=*/2);
       break;
     case ISAFamily::RDNA3:
       ttg::populateDecomposeScaledBlockedPatterns(mfmaPatterns,
@@ -2233,8 +2243,11 @@ struct TritonHCUAccelerateMatmulPass
     default:
       break;
     }
-    if (applyPatternsGreedily(m, std::move(mfmaPatterns)).failed())
+    if (applyPatternsGreedily(m, std::move(mfmaPatterns)).failed() ||
+        invalidLayout) {
       signalPassFailure();
+      return;
+    }
     RewritePatternSet patterns(context);
     patterns.add<AccelerateBlocked>(context, archGenerationName, /*benefit=*/1);
     if (applyPatternsGreedily(m, std::move(patterns)).failed())

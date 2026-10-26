@@ -8,12 +8,21 @@
 
 #include <utility>
 
+namespace mlir {
+struct MfmaIntrinsic;
+} // namespace mlir
+
 namespace mlir::triton::HCU {
 
 gpu::MmacLayout getMmacLayoutDefault(llvm::StringRef archGen);
 
 gpu::MmacLayout
-getMfmaMappedMmacLayout(bool logicalIsTransposed, bool supportMmacLayout);
+getMfmaMappedMmacLayout(bool logicalIsTransposed, bool supportMmacLayout,
+                       const MfmaIntrinsic &intrinsic);
+
+// Diagnose layout bits that the selected instruction cannot represent.
+LogicalResult validateMmacLayout(Operation *op, gpu::MmacLayout layout,
+                                 const MfmaIntrinsic &intrinsic);
 
 FailureOr<std::pair<DotOpInterface, unsigned>>
 getDotOpIdxFromMatrixLoad(MatrixLoadOp matrixOp);
