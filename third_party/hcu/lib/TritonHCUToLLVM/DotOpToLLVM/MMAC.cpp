@@ -245,10 +245,13 @@ struct DotOpMFMAConversionHelper {
   /// A' = [1,2,1,2] B' = [3,4,3,4]
   /// C' = (1*3+2*4) + (1*3+2*4) = 22
   ///
-  /// Following code adjusts accumulator values in such cases.
-  /// If accumulator is integer, shift accumulator right by
-  /// log2(duplicationRate). If accumulator is float, multiply accum
-  /// with 1/duplicationRate constant.
+  /// Following code adjusts accumulator values in such cases. Only the dot
+  /// contribution (acc - carriedInC) is duplicated; the carried-in
+  /// accumulator itself must be preserved as-is. If the dot contribution
+  /// is integer, shift it right by log2(duplicationRate); if float,
+  /// multiply it with the 1/duplicationRate constant. Adding the
+  /// contribution back to the carried-in accumulator last keeps earlier
+  /// K-loop iterations from being diluted.
   void adjustAccForSmallKDim(SmallVector<Value> &fc, Value &acc, Type dstElemTy,
                              int b, int m, int n, int64_t numRepM,
                              int64_t numRepN, int64_t kDimInstrSize,
@@ -257,25 +260,34 @@ struct DotOpMFMAConversionHelper {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     for (unsigned v = 0; v < elemsPerVec; ++v) {
       Value accElem = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
+      auto linearIdx = b * numRepM * numRepN * elemsPerVec +
+                       m * numRepN * elemsPerVec + n * elemsPerVec + v;
       if (kDimInstrSize > kDimOperandSize) {
         assert(kDimInstrSize % kDimOperandSize == 0);
         int duplicationRate = kDimInstrSize / kDimOperandSize;
         assert(llvm::isPowerOf2_32(duplicationRate));
+        // Only the dot contribution (acc - c) is duplicated along K. The
+        // carried-in accumulator c (still in fc[linearIdx]) must be kept
+        // intact: rescaling the whole accumulator would dilute the partial
+        // sums accumulated by previous K-loop iterations.
         if (dstElemTy.isInteger()) {
+          Value dotAcc = tb.sub(accElem, fc[linearIdx]);
           auto shiftSize = llvm::Log2_32(duplicationRate);
-          assert(!accElem.getType().isUnsignedInteger() &&
+          assert(!dotAcc.getType().isUnsignedInteger() &&
                  "MFMA uses signed accumulator");
-          accElem = tb.ashr(accElem, tb.i32_val(shiftSize));
+          dotAcc = tb.ashr(dotAcc, tb.i32_val(shiftSize));
+          accElem = tb.add(dotAcc, fc[linearIdx]);
         } else {
+          Value dotAcc = LLVM::FSubOp::create(rewriter, loc, dstElemTy,
+                                              accElem, fc[linearIdx]);
           auto multiplierAttr =
               rewriter.getFloatAttr(dstElemTy, 1.0 / duplicationRate);
           auto multiplierVal = LLVM::ConstantOp::create(
               rewriter, loc, dstElemTy, multiplierAttr);
-          accElem = tb.fmul(accElem, multiplierVal);
+          dotAcc = tb.fmul(dotAcc, multiplierVal);
+          accElem = tb.fadd(dotAcc, fc[linearIdx]);
         }
       }
-      auto linearIdx = b * numRepM * numRepN * elemsPerVec +
-                       m * numRepN * elemsPerVec + n * elemsPerVec + v;
       fc[linearIdx] = accElem;
     }
   }
@@ -616,13 +628,17 @@ struct DotOpMFMAConversionHelper {
                 tb.extract_element(type, rawElems, tb.i32_val(0));
           #endif
             /* HCU support: add mmac_f32_m16n16k8_f32 support */
-            if (kWidth == 1) {
+            if (kBase == 1) {
+              // Scalar-operand MMACs (mmac_f32_16x16x4f32 /
+              // mmac_f64_16x16x4f64) consume one element per lane per
+              // instruction. kPack only widens kWidth, not kBase, so the
+              // scalar case must be keyed on kBase, not on kWidth.
               dotOpVals[{b, nonK, kBaseVec}] =
                 tb.extract_element(type, rawElems, tb.i32_val(0));
             } else {
               // mmac_f32_m16n16k8_f32 support
               dotOpVals[{b, nonK, kBaseVec}] =
-                prepareOperands(rawElems, kBase, f32_ty, preserveBF16, isHCUMmac);
+                prepareOperands(rawElems, kBase, type, preserveBF16, isHCUMmac);
             }
           } else {
             Value vals;
