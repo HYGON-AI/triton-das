@@ -258,7 +258,7 @@ def TT_MatrixStoreOp : TT_Op<"matrix_store", [AttrSizedOperandSegments]> {
 
     let description = [{
       Store `value` to global memory through the HCU matrix_store path.
-      Currently this supports fp16 output produced from an fp32 MMAC C
+      Currently this supports fp16/bf16 output produced from an fp32 MMAC C
       layout-3 accumulator and stores it directly from VGPRs. Prefer this over
       many scalar/buffer stores to cut store instruction count and FIFO pressure.
     }];

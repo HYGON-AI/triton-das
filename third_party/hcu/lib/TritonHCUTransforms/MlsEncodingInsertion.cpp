@@ -58,7 +58,7 @@ SmallVector<unsigned> getMatrixLoadTensorOrder(triton::MatrixLoadOp matrixOp, in
 
 ttg::AMDMfmaEncodingAttr findSourceMfmaEncoding(Value value);
 bool requiresBInterleave2(triton::MatrixStoreOp storeOp);
-bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot);
+bool feedsInterleaved16BitMatrixStore(tt::DotOpInterface dot);
 
 SmallVector<unsigned> getMatrixStoreTensorOrder(triton::MatrixStoreOp storeOp) {
   auto strides = storeOp.getStrides();
@@ -124,9 +124,9 @@ FailureOr<MlsInsn> chooseMlsInstruction(tt::DotOpInterface dot, int opIdx,
   }
 
   auto altKind = MlsInterleaveKind::InterleaveNone;
-  // Interleave B along N for fp16 VGPR matrix-store packing. N-major B uses
+  // Interleave B along N for fp16/bf16 VGPR matrix-store packing. N-major B uses
   // the non-transposed M32x16 DS read; K-major B uses MT16x32 instead.
-  if (opIdx == 1 && feedsInterleavedFp16MatrixStore(dot))
+  if (opIdx == 1 && feedsInterleaved16BitMatrixStore(dot))
     altKind = MlsInterleaveKind::Interleave2;
 
   // Try candidate MLS elems tiles first (same strategy as
@@ -223,7 +223,7 @@ ttg::AMDMfmaEncodingAttr findSourceMfmaEncoding(Value value) {
 
 bool requiresBInterleave2(triton::MatrixStoreOp storeOp) {
   auto valueTy = dyn_cast<RankedTensorType>(storeOp.getValue().getType());
-  if (!valueTy || !valueTy.getElementType().isF16())
+  if (!valueTy || !(valueTy.getElementType().isF16() || valueTy.getElementType().isBF16()))
     return false;
 
   // VGPR matrix-store packing is currently defined for output produced by
@@ -248,7 +248,8 @@ bool hasInterleavableBOperand(triton::MatrixStoreOp storeOp) {
       if (attr.getOpIdx() == 1 &&
           (attr.getOrder()[0] == 1 ||
            (attr.getVersion() >= 2 && attr.getElemBitWidth() == 16 &&
-            loadOp.getType().getElementType().isF16() &&
+            (loadOp.getType().getElementType().isF16() ||
+             loadOp.getType().getElementType().isBF16()) &&
             attr.getMlsTile()[0] == 64 && attr.getMlsTile()[1] == 64)))
         found = true;
       return;
@@ -258,7 +259,7 @@ bool hasInterleavableBOperand(triton::MatrixStoreOp storeOp) {
       auto order = getMatrixLoadTensorOrder(loadOp, /*opIdx=*/1);
       auto type = loadOp.getType();
       if (order[0] == 1 ||
-          (type.getElementType().isF16() && type.getShape()[0] % 64 == 0 &&
+          ((type.getElementType().isF16() || type.getElementType().isBF16()) && type.getShape()[0] % 64 == 0 &&
            type.getShape()[1] % 64 == 0))
         found = true;
     }
@@ -266,7 +267,7 @@ bool hasInterleavableBOperand(triton::MatrixStoreOp storeOp) {
   return found;
 }
 
-bool feedsInterleavedFp16MatrixStore(tt::DotOpInterface dot) {
+bool feedsInterleaved16BitMatrixStore(tt::DotOpInterface dot) {
   auto resultTy = dyn_cast<RankedTensorType>(dot->getResult(0).getType());
   if (!resultTy || !resultTy.getElementType().isF32())
     return false;
@@ -547,7 +548,7 @@ public:
   }
 };
 
-/// Select an fp16 VGPR-store encoding for MMAC C layout 3.
+/// Select an fp16/bf16 VGPR-store encoding for MMAC C layout 3.
 struct MlsStoreEncodingInsertion
     : public OpRewritePattern<triton::MatrixStoreOp> {
   int mlsVersion;
@@ -564,7 +565,7 @@ public:
 
     auto value = storeOp.getValue();
     auto valueType = cast<RankedTensorType>(value.getType());
-    if (valueType.getRank() != 2 || !valueType.getElementType().isF16() ||
+    if (valueType.getRank() != 2 || !(valueType.getElementType().isF16() || valueType.getElementType().isBF16()) ||
         !requiresBInterleave2(storeOp) || !hasInterleavableBOperand(storeOp))
       return failure();
 
@@ -672,23 +673,23 @@ public:
       return;
     }
 
-    bool invalidFp16MatrixStore = false;
+    bool invalid16BitMatrixStore = false;
     mod.walk([&](triton::MatrixStoreOp storeOp) {
       if (storeOp->hasAttr(
               triton::amdgpu::MlsStoreEncodingAttr::getMnemonic()))
         return;
       auto valueType = dyn_cast<RankedTensorType>(storeOp.getValue().getType());
-      if (!valueType || !valueType.getElementType().isF16() ||
+      if (!valueType || !(valueType.getElementType().isF16() || valueType.getElementType().isBF16()) ||
           !requiresBInterleave2(storeOp) ||
           hasInterleavableBOperand(storeOp))
         return;
       storeOp.emitError()
-          << "FP16 matrix_store from MMAC layout 3 requires a B operand "
-             "supporting N-direction Interleave2 (N-major, or FP16 K-major "
+          << "FP16/BF16 matrix_store from MMAC layout 3 requires a B operand "
+             "supporting N-direction Interleave2 (N-major, or FP16/BF16 K-major "
              "with 64x64 MLS tiles); use tt.store for unsupported layouts";
-      invalidFp16MatrixStore = true;
+      invalid16BitMatrixStore = true;
     });
-    if (invalidFp16MatrixStore)
+    if (invalid16BitMatrixStore)
       signalPassFailure();
   }
 };

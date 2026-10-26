@@ -2202,7 +2202,7 @@ def matrix_store(base: tensor,
                  _semantic=None):
     """Store a block of data via HCU matrix_store.
 
-    Currently this supports fp16 output produced from an fp32 MMAC C layout-3
+    Currently this supports fp16/bf16 output produced from an fp32 MMAC C layout-3
     accumulator and stores it directly from VGPRs. A supported matrix-store
     tile can replace multiple scalar or buffer stores.
     """

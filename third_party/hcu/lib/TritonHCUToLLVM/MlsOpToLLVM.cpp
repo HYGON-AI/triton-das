@@ -789,7 +789,7 @@ struct MLSMatrixStoreFromRegOpConversion
         adaptor.getBoundaryCheck(), storeEncoding, op);
   }
 
-  /// VGPR→GMEM matrix_store for fp16 MMAC C layout 3.
+  /// VGPR→GMEM matrix_store for fp16/bf16 MMAC C layout 3.
   LogicalResult lowerMatrixStoreFromReg(
       Location loc, ConversionPatternRewriter &rewriter,
       RankedTensorType valueTy, Value llValue, Value llBasePtr,
@@ -801,14 +801,14 @@ struct MLSMatrixStoreFromRegOpConversion
     auto *typeConverter = getTypeConverter();
 
     auto mfmaEnc = dyn_cast<AMDMfmaEncodingAttr>(valueTy.getEncoding());
-    if (!valueTy.getElementType().isF16() || !mfmaEnc ||
+    if (!(valueTy.getElementType().isF16() || valueTy.getElementType().isBF16()) || !mfmaEnc ||
         mfmaEnc.getElementBitWidth() != 32 ||
         mfmaEnc.getMmacLayout() != MmacLayout::TRANSPOSE ||
         storeEncoding.getInterleaveKind() !=
             static_cast<unsigned>(MlsInterleaveKind::Interleave2)) {
       return rewriter.notifyMatchFailure(
           opToErase,
-          "matrix_store_from_reg requires fp16 MMAC C layout 3 with interleave 2");
+          "matrix_store_from_reg requires fp16/bf16 MMAC C layout 3 with interleave 2");
     }
 
     auto storeTile = storeEncoding.getStoreTile();

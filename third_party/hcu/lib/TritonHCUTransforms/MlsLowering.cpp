@@ -136,7 +136,7 @@ public:
     rewriter.setInsertionPoint(storeOp);
 
     auto mfmaEnc = dyn_cast<ttg::AMDMfmaEncodingAttr>(valueTy.getEncoding());
-    if (!valueTy.getElementType().isF16() || !mfmaEnc ||
+    if (!(valueTy.getElementType().isF16() || valueTy.getElementType().isBF16()) || !mfmaEnc ||
         mfmaEnc.getElementBitWidth() != 32 ||
         mfmaEnc.getMmacLayout() != ttg::MmacLayout::TRANSPOSE ||
         mlsAttr.getInterleaveKind() !=
