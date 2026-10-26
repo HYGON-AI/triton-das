@@ -1180,21 +1180,9 @@ public:
         tilesPerWarp = {1, 2};
       }
     }
-    if (failed(validateMmacLayout(dotOp, mmacLayout, *mfmaInstr))) {
-      invalidLayout = true;
-      return failure();
-    }
-    auto effectiveMmacLayout =
-        mmacLayout == MmacLayout::MFMA
-            ? getMfmaMappedMmacLayout(
-                  isTransposed, (features & HCUISAFeature::MMAC_LAYOUT) != 0,
-                  *mfmaInstr)
-            : mmacLayout;
-    if (aElemTy.isF64() && mDim == 16 && nDim == 16 && kDim == 4) {
-      // The current layout preserves rows but orders columns incorrectly for
-      // this F64 MMAC shape; temporarily use legacy.
-      effectiveMmacLayout = MmacLayout::LEGACY;
-    }
+    auto effectiveMmacLayout = resolveMmacLayout(
+        mmacLayout, isTransposed, (features & HCUISAFeature::MMAC_LAYOUT) != 0,
+        {mDim, nDim, kDim});
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(), /*verison=*/mfmaVersion, warpsPerTile,
         {mDim, nDim, kDim}, /*isTransposed=*/false, CTALayout,
@@ -1438,13 +1426,9 @@ public:
     // setting the M/N dimension as numWarps.
     SmallVector<unsigned, 2> mfmaWarpsPerCTA(rank, 1);
     mfmaWarpsPerCTA[aScale ? 0 : 1] = numWarps;
-    auto effectiveMmacLayout =
-        mmacLayout == MmacLayout::MFMA
-            ? getMfmaMappedMmacLayout(
-                  /*logicalIsTransposed=*/true,
-                  (features & HCUISAFeature::MMAC_LAYOUT) != 0,
-                  *mfmaInstr)
-            : mmacLayout;
+    auto effectiveMmacLayout = resolveMmacLayout(
+        mmacLayout, /*logicalIsTransposed=*/true,
+        (features & HCUISAFeature::MMAC_LAYOUT) != 0, {mDim, nDim, kDim});
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*version=*/mfmaVersion, mfmaWarpsPerCTA, {mDim, nDim, kDim},
         /*isTransposed=*/false, ctaLayout, {},
@@ -1681,13 +1665,9 @@ public:
       warpsPerTile = warpsPerTileMFMA(dotOp, oldShape, numWarps,
                                       {tileM, tileN});
     }
-    auto effectiveMmacLayout =
-        mmacLayout == MmacLayout::MFMA
-            ? getMfmaMappedMmacLayout(
-                  /*logicalIsTransposed=*/true,
-                  (hcuFeatures & HCUISAFeature::MMAC_LAYOUT) != 0,
-                  *mfmaInstr)
-            : mmacLayout;
+    auto effectiveMmacLayout = resolveMmacLayout(
+        mmacLayout, /*logicalIsTransposed=*/true,
+        (hcuFeatures & HCUISAFeature::MMAC_LAYOUT) != 0, {mDim, nDim, kDim});
     mlir::Attribute mfmaEnc;
     if (llvm::any_of(tilesPerWarp, [](int x) { return x != 1; })) {
       mfmaEnc = ttg::AMDMfmaEncodingAttr::get(

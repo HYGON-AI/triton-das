@@ -398,3 +398,55 @@ def test_int8_kpack2_mmac_kloop_accuracy():
     assert re.search(r"\bv_mmac_i32_16x16x32_i8\b", program.asm["amdgcn"]), (
         "expected v_mmac_i32_16x16x32_i8 in generated GCN assembly"
     )
+
+
+@pytest.mark.skipif(
+    not is_hip_hcu_mmac_layout(),
+    reason="mmac_layout_force is only honored on MMAC_LAYOUT arches "
+    "(gfx938/gfx946); other HCU arches fall back to LEGACY, so the "
+    "non-LEGACY forced modes would not be exercised",
+)
+@pytest.mark.parametrize(
+    "mmac_layout_force",
+    [1, 2, 3, 4],
+    ids=["legacy", "interleave", "transpose", "interleave_transpose"],
+)
+@pytest.mark.parametrize("kpack", [1, 2])
+def test_fp32_blk4_mmac_physical_layout_modes(mmac_layout_force, kpack):
+    """Every forced MMAC layout mode must be numerically correct for 16x16x4.
+
+    Runs only on arches that honor mmac_layout_force (MMAC_LAYOUT feature);
+    elsewhere the option is ignored and all modes would silently run as
+    LEGACY.
+
+    Regression test for the 16x16x4 C-fragment misordering: the
+    v_mmac_16x16x4_f32/f64 instructions only carry the "lts" (transpose)
+    C-fragment flag; they have no "lit" (interleave) hardware mode. So the
+    INTERLEAVE bit is not physically realizable for this instruction shape
+    and is clamped to the non-interleave mode when the MMAC encoding is
+    created (INTERLEAVE -> LEGACY, INTERLEAVE_TRANSPOSE -> TRANSPOSE); the
+    "interleave" parameters below therefore realize the non-interleave
+    fragments. Before the fix, forcing the INTERLEAVE (or
+    INTERLEAVE_TRANSPOSE) mode produced a C tile layout that does not match
+    the hardware fragment and corrupted ~12 of the 16 columns of every tile.
+    kPack=2 widens the dot-operand kWidth to
+    2*kBase on the scalar-operand instruction, so it pins the interaction
+    between the operand-type fix and the physical C layout.
+    """
+    M = N = 64
+    K = 32
+    torch.manual_seed(0)
+    a = torch.randn((M, K), device="cuda", dtype=torch.float32)
+    b = torch.randn((K, N), device="cuda", dtype=torch.float32)
+    c = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    grid = (triton.cdiv(M, 16), triton.cdiv(N, 16))
+    program = f32_kpack_kernel[grid](
+        a, b, c,
+        a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1),
+        K=K, BLOCK_M=16, BLOCK_N=16, BLOCK_K=4, INPUT_PRECISION="ieee",
+        num_warps=4, kpack=kpack, mmac_layout_force=mmac_layout_force,
+    )
+    assert_mmac_result(c.cpu(), matmul_ref(a, b, torch.float32))
+    assert re.search(r"\bv_mmac_16x16x4_f32\b", program.asm["amdgcn"]), (
+        "expected v_mmac_16x16x4_f32 in generated GCN assembly"
+    )

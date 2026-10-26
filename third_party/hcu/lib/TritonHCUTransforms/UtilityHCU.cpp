@@ -3,6 +3,7 @@
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 
@@ -26,21 +27,42 @@ ttg::MmacLayout getMmacLayoutDefault(llvm::StringRef archGen) {
   return it != defaultLayoutMap.end() ? it->second : ttg::MmacLayout::MFMA;
 }
 
-// AMD MFMA to HCU-equivalent mapping (gfx938+):
+// Single point that resolves the mode recorded in the AMDMfmaEncodingAttr
+// produced by the accelerate-matmul pass. Both the default mapping
+// (forcedOrDefault == MFMA) and an explicit --mmac-layout-force selection
+// flow through here, so the returned mode is clamped to one the instruction
+// can physically produce: the 16x16x4 HCU MMAC instructions
+// (mmac_f32_16x16x4f32 / mmac_f64_16x16x4f64) have no interleave ("lit")
+// hardware mode, so INTERLEAVE -> LEGACY and INTERLEAVE_TRANSPOSE ->
+// TRANSPOSE for that shape. Every consumer of the raw mode (the C tile
+// layout, the lit/lts instruction flags, matrix-store checks) then sees a
+// physically realizable mode and needs no knowledge of the hardware
+// restriction.
+//
+// Default mapping (AMD MFMA to HCU-equivalent, gfx938+):
 // | AMD MFMA isTransposed=false | MmacLayout::INTERLEAVE_TRANSPOSE |
 // | AMD MFMA isTransposed=true  | MmacLayout::INTERLEAVE           |
 // HCU encoding keeps isTransposed=false; transpose intent is materialized in
 // mmacLayout only.
-ttg::MmacLayout getMfmaMappedMmacLayout(bool logicalIsTransposed,
-                             bool supportMmacLayout,
-                             const MfmaIntrinsic &intrinsic) {
-  if (!supportMmacLayout)
-    return ttg::MmacLayout::LEGACY;
-  if (!intrinsic.supportsMmacLit)
-    return intrinsic.supportsMmacLts ? ttg::MmacLayout::TRANSPOSE : ttg::MmacLayout::LEGACY;
-  return logicalIsTransposed || !intrinsic.supportsMmacLts
-             ? ttg::MmacLayout::INTERLEAVE
-             : ttg::MmacLayout::INTERLEAVE_TRANSPOSE;
+ttg::MmacLayout resolveMmacLayout(ttg::MmacLayout forcedOrDefault,
+                                  bool logicalIsTransposed,
+                                  bool supportMmacLayout,
+                                  llvm::ArrayRef<unsigned> instrShape) {
+  ttg::MmacLayout layout =
+      (forcedOrDefault != ttg::MmacLayout::MFMA)
+          ? forcedOrDefault
+          : (supportMmacLayout
+                 ? (logicalIsTransposed ? ttg::MmacLayout::INTERLEAVE
+                                        : ttg::MmacLayout::INTERLEAVE_TRANSPOSE)
+                 : ttg::MmacLayout::LEGACY);
+  if (instrShape.size() == 3 && instrShape[0] == 16 && instrShape[1] == 16 &&
+      instrShape[2] == 4) {
+    if (layout == ttg::MmacLayout::INTERLEAVE)
+      return ttg::MmacLayout::LEGACY;
+    if (layout == ttg::MmacLayout::INTERLEAVE_TRANSPOSE)
+      return ttg::MmacLayout::TRANSPOSE;
+  }
+  return layout;
 }
 
 LogicalResult validateMmacLayout(Operation *op, ttg::MmacLayout layout,
