@@ -124,6 +124,7 @@ static bool hasDefPartition(scf::ForOp loop, Operation *op,
 static void scheduleDependencies(scf::ForOp loop, WarpSchedule &schedule,
                                  Partition *partition, Operation *op) {
   SmallVector<Value> deps;
+  DenseSet<Value> visited;
   for (Value value : getNestedOperands(op)) {
     if (isa<RankedTensorType, MemDescType>(value.getType()))
       deps.push_back(value);
@@ -131,6 +132,9 @@ static void scheduleDependencies(scf::ForOp loop, WarpSchedule &schedule,
 
   while (!deps.empty()) {
     Value dep = deps.pop_back_val();
+    // A loop-invariant iter_arg can yield itself without a defining op.
+    if (!visited.insert(dep).second)
+      continue;
 
     if (auto arg = dyn_cast<BlockArgument>(dep)) {
       if (arg.getOwner() == loop.getBody() && arg != loop.getInductionVar())
@@ -286,18 +290,23 @@ static std::optional<WarpSchedule> getInitialSchedule(scf::ForOp loop) {
   if (loadsAndAllocs.empty() && mmas.empty())
     return std::nullopt;
 
-  // Propagate users of loads and MMAs.
+  // Give the consumer ownership of the MMA epilogue before propagating load
+  // users. Block-scaled dots have a separate mul/add reduction: visiting scale
+  // loads first would assign that reduction to root (stage 0), creating a
+  // backwards dependency on the MMA result in the consumer (stage 1).
+  for (auto mmaOp : mmas)
+    scheduleUsers(loop, schedule, mmaPartition, mmaOp);
+
+  // Keep tensor dependencies of that epilogue (e.g. scale decoding and
+  // broadcasts) with the consumer, stopping at the already assigned producer
+  // loads. Root operations are replicated into every warp group and cannot
+  // consume producer-owned scale values at the producer's own stage.
+  for (Operation *op : llvm::to_vector(mmaPartition->getOps()))
+    scheduleDependencies(loop, schedule, mmaPartition, op);
+
+  // Propagate only the remaining load users into the default partition.
   for (Operation *loadOrAlloc : loadsAndAllocs)
     scheduleUsers(loop, schedule, defaultPartition, loadOrAlloc);
-
-  //SmallVector<Partition *> userPartitions;
-  //while (userPartitions.size() < mmas.size()) {
-  //  userPartitions.push_back(schedule.addPartition(userPartitions.size()));
-  //}
-  //for (auto [mmaOp, userPartition] : llvm::zip(mmas, userPartitions)) {
-  for (auto mmaOp : mmas) {
-    scheduleUsers(loop, schedule, mmaPartition, mmaOp);
-  }
 
   return schedule;
 }
