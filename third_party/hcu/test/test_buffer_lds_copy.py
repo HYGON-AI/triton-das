@@ -230,7 +230,9 @@ def test_standalone_buffer_lds_copy(monkeypatch, dtype, column_b, bm, bn, bk, wa
         B_COLUMN_MAJOR=column_b, num_warps=waves, num_stages=2,
         use_block_pingpong=False, use_async_copy=True,
         matrix_instr_nonkdim=16, optimize_epilogue=False)
-    torch.testing.assert_close(c, a @ b, atol=0.02, rtol=0.02)
+    # Independent reference: the small NMZ FP16 rocBLAS solution can be wrong.
+    reference = (a.cpu().float() @ b.cpu().float()).to(c.dtype).to(c.device)
+    torch.testing.assert_close(c, reference, atol=0.02, rtol=0.02)
     assert compiled.metadata.uses_bank_conflict_aware_lds_placement
     assert "isTransposed = true" not in compiled.asm["ttgir"]
     assert "hcu.block_pingpong" not in compiled.asm["ttgir"]
@@ -259,7 +261,9 @@ def test_nmz_buffer_lds_copy(monkeypatch, dtype, column_b, bm, bn, bk, waves):
         B_COLUMN_MAJOR=column_b, num_warps=waves, num_stages=2,
         use_block_pingpong=False, use_async_copy=True,
         matrix_instr_nonkdim=16, optimize_epilogue=False)
-    torch.testing.assert_close(c, a @ b, atol=0.02, rtol=0.02)
+    # Independent reference: the small NMZ FP16 rocBLAS solution can be wrong.
+    reference = (a.cpu().float() @ b.cpu().float()).to(c.dtype).to(c.device)
+    torch.testing.assert_close(c, reference, atol=0.02, rtol=0.02)
     assert compiled.metadata.uses_bank_conflict_aware_lds_placement
     assert "#ttg.hcu_buffer_lds_shared" in compiled.asm["ttgir"]
     assert "llvm.amdgcn.raw.ptr.buffer.load.async.lds" in compiled.asm["llir"]

@@ -89,20 +89,31 @@ static bool preservesGlobalSource(Operation *op) {
   return isMemoryEffectFree(op);
 }
 
+// Check the executed prefix at each nesting level. An output store after the
+// enclosing loop/if is not crossed by the retimed read. Cyclic regions still
+// require the entire region to preserve the source: a write after the new read
+// can invalidate a tensor carried from the preceding iteration.
 static bool canRetimeRead(Operation *destination) {
   auto function = destination->getParentOfType<triton::FuncOp>();
   if (!function || !llvm::hasSingleElement(function.getBody()))
     return false;
   Operation *anchor = destination;
-  while (anchor->getParentOp() != function)
-    anchor = anchor->getParentOp();
-  for (Operation &op : function.getBody().front()) {
-    if (&op == anchor)
-      return anchor == destination || preservesGlobalSource(anchor);
-    if (!preservesGlobalSource(&op))
+  while (true) {
+    for (Operation &op : *anchor->getBlock()) {
+      if (&op == anchor)
+        break;
+      if (!preservesGlobalSource(&op))
+        return false;
+    }
+    Operation *parent = anchor->getParentOp();
+    if (parent == function)
+      return true;
+    // SCF if executes only the selected branch. For loops and other region
+    // operations, retain the conservative whole-region proof.
+    if (!isa<scf::IfOp>(parent) && !preservesGlobalSource(parent))
       return false;
+    anchor = parent;
   }
-  return false;
 }
 
 // Warp specialization puts the producer load and its LDS store in the same

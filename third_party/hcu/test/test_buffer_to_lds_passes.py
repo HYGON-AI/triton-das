@@ -427,11 +427,7 @@ module attributes {"ttg.target" = "hip:gfx936", "ttg.num-warps" = 8 : i32, "ttg.
     assert "llvm.trunc %arg2 : i32 to i16" in result
 
 
-@pytest.mark.parametrize("vary", ["pointer", "stride", "initial_pointer",
-                                  "initial_offsets", "global_write",
-                                  "initial_mask", "none"])
-@pytest.mark.parametrize("store_after_loop", [False, True])
-def test_loop_producer_requires_invariant_descriptor(tmp_path, capfd, vary, store_after_loop):
+def loop_producer_ir(vary, store_after_loop):
     source = '''
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [32, 2], warpsPerCTA = [8, 1], order = [1, 0]}>
 #shared = #ttg.shared_linear<{offset = [[0, 1], [0, 2], [0, 4], [0, 8], [1, 0], [2, 0], [4, 0], [64, 0], [128, 0], [8, 0], [16, 0], [32, 0]]}, alignment = 16>
@@ -468,6 +464,15 @@ module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 64 : i32,
         source = source.replace("%initial = amdg.buffer_load %p[%offset]", "%initial = amdg.buffer_load %p[%offset], %mask")
     if vary == "global_write":
         source = source.replace("%p_next =", "%zero_f = arith.constant 0.0 : f16\n      tt.store %p, %zero_f : !tt.ptr<f16>\n      %p_next =")
+    return source
+
+
+@pytest.mark.parametrize("vary", ["pointer", "stride", "initial_pointer",
+                                  "initial_offsets", "global_write",
+                                  "initial_mask", "none"])
+@pytest.mark.parametrize("store_after_loop", [False, True])
+def test_loop_producer_requires_invariant_descriptor(tmp_path, capfd, vary, store_after_loop):
+    source = loop_producer_ir(vary, store_after_loop)
     source = with_buffer_to_lds(source, True)
     if vary in ("none", "initial_mask"):
         result = run_pass(tmp_path, source, add_scheduled_buffer_to_lds)
@@ -481,6 +486,41 @@ module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 64 : i32,
     with pytest.raises(RuntimeError):
         run_pass(tmp_path, source, add_scheduled_buffer_to_lds)
     assert "buffer-to-LDS wrap requires" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize("store_after_loop", [False, True])
+@pytest.mark.parametrize("write_position", ["none", "epilogue", "sibling",
+                                            "before_loop", "loop_prefix",
+                                            "loop_suffix"])
+def test_loop_producer_retime_nested_if(tmp_path, capfd, store_after_loop,
+                                       write_position):
+    source = loop_producer_ir("none", store_after_loop)
+    source = source.replace("%n: i32, %dst:", "%n: i32, %condition: i1, %dst:")
+    begin = source.index("    %zero =")
+    end = source.index("    tt.return", begin)
+    body = source[begin:end]
+    write = "%zero_f = arith.constant 0.0 : f16\n      tt.store %p, %zero_f : !tt.ptr<f16>\n      "
+    if write_position == "before_loop":
+        body = body.replace("%r:2 =", write + "%r:2 =")
+    elif write_position == "loop_prefix":
+        body = body.replace("%p_next =", write + "%p_next =")
+    elif write_position == "loop_suffix":
+        body = body.replace("scf.yield ", write + "scf.yield ")
+    elif write_position == "epilogue":
+        body += "    " + write
+    branch = "    scf.if %condition {\n" + body + "    }"
+    if write_position == "sibling":
+        branch += " else {\n      " + write + "    }"
+    source = source[:begin] + branch + "\n" + source[end:]
+    source = with_buffer_to_lds(source, True)
+    if write_position in ("none", "epilogue", "sibling"):
+        result = run_pass(tmp_path, source, add_scheduled_buffer_to_lds)
+        assert "amdg.buffer_load_to_local" in result
+        assert "ttg.local_store" not in result
+    else:
+        with pytest.raises(RuntimeError):
+            run_pass(tmp_path, source, add_scheduled_buffer_to_lds)
+        assert "buffer-to-LDS wrap requires" in capfd.readouterr().err
 
 
 def test_buffer_to_lds_option_is_cache_keyed(monkeypatch):

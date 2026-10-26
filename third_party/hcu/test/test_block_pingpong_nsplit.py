@@ -202,3 +202,41 @@ def test_auxiliary_global_load_uses_generic_waits(dtype):
         torch.testing.assert_close(c, ref.to(dtype), rtol=.02,
                                    atol=.125 if dtype == torch.bfloat16 else .02)
         torch.testing.assert_close(r, p[:k].sum(), rtol=1e-4, atol=1e-4)
+
+
+@triton.jit
+def _guarded_row_col_gemm(A, B, C, M, N, K, STRIDE: tl.constexpr,
+                          STRIDE_C: tl.constexpr):
+    # BoltOps linear guards its whole GEMM, including the output store.
+    if tl.program_id(0) < tl.cdiv(M, 256) * tl.cdiv(N, 256):
+        _row_col_gemm(A, B, C, M, N, K, STRIDE, STRIDE, STRIDE_C,
+                      BM=256, BN=256, BK=32, EVEN_K=True)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_nsplit_guarded_epilogue_retime(monkeypatch, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("requires an HCU device")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    torch.manual_seed(88)
+    m = n = 768
+    storage_k = 512
+    a = torch.randn((m, storage_k), device="cuda", dtype=dtype)
+    b = torch.randn((n, storage_k), device="cuda", dtype=dtype).T
+    storage = torch.full((m * n + 32,), 17, device="cuda", dtype=dtype)
+    c = storage[:m * n].view(m, n)
+    for k in [448, 512]:
+        compiled = _guarded_row_col_gemm[(10,)](
+            a, b, c, m, n, k, storage_k, n, num_warps=8, num_stages=4,
+            use_async_copy=True, use_block_pingpong=True,
+            block_pingpong_async_global_prefetch=2,
+            block_pingpong_async_local_prefetch=1,
+            matrix_instr_nonkdim=16, mmac_layout_force=1,
+            optimize_epilogue=False)
+        reference = a[:, :k].float() @ b[:k, :].float()
+        torch.testing.assert_close(c.float(), reference, rtol=.02,
+                                   atol=.125 if dtype == torch.bfloat16 else .02)
+        assert torch.all(storage[m * n:] == 17).item()
+        assert "hcu.block_pingpong.nsplit_applied" in compiled.asm["ttgir"]
+        assert "amdg.buffer_load_to_local" in compiled.asm["ttgir"]
+        assert "ttg.local_store" not in compiled.asm["ttgir"]
