@@ -8,6 +8,7 @@ set(TRITON_HCU_INCLUDE_DIRS
 
 add_triton_library(TritonHCUToLLVM
   TritonHCUToLLVM.cpp
+  ConvertLayoutOpToLLVM.cpp
   DotOpToLLVM/MMAC.cpp
   DotOpToLLVMHCU.cpp
   ElementwiseOpToLLVM.cpp

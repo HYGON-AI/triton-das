@@ -64,6 +64,10 @@ void populateBufferLdsLocalLoadPatterns(LLVMTypeConverter &typeConverter,
                                           RewritePatternSet &patterns,
                                           const AMD::TargetInfo &targetInfo,
                                           PatternBenefit benefit);
+void populateConvertLayoutOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                           const AMD::TargetInfo &targetInfo,
+                                           RewritePatternSet &patterns,
+                                           PatternBenefit benefit);
 } // namespace mlir::triton::HCU
 
 namespace {
@@ -338,6 +342,8 @@ struct ConvertTritonHCUToLLVM
       populateFunc(typeConverter, patterns, targetInfo, benefit);
     };
 
+    HCU::populateConvertLayoutOpToLLVMPatterns(typeConverter, targetInfo,
+                                               patterns, HCUBenefit);
     AMD::populateConvertLayoutOpToLLVMPatterns(typeConverter, targetInfo,
                                                patterns, AMDBenefit);
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(

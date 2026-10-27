@@ -260,6 +260,12 @@ bool cvtReordersRegisters(RankedTensorType srcTy, RankedTensorType dstTy);
 // within a warp.  No data exchange across warps or blocks is needed.
 bool cvtNeedsWarpShuffle(RankedTensorType srcTy, RankedTensorType dstTy);
 
+// True when `srcTy` -> `dstTy` is the HCU LEGACY MMAC accumulator -> dot-A
+// operand conversion of a chained dot (16/32-bit elements). HCU lowers it with
+// dedicated warp shuffles, so cvtNeedsWarpShuffle must not send it through
+// shared memory.
+bool isHCULegacyMmacToDotA(RankedTensorType srcTy, RankedTensorType dstTy);
+
 // Conversion from `srcTy` to `dstTy` involves data exchange across threads,
 // warps, and possibly blocks.
 bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy);

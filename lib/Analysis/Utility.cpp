@@ -987,6 +987,36 @@ bool cvtReordersRegisters(RankedTensorType srcTy, RankedTensorType dstTy) {
   return outDims.empty() || ArrayRef(outDims) == ArrayRef({kRegister});
 }
 
+// An HCU LEGACY MMAC accumulator feeding the A operand of a chained dot is
+// exactly a permutation of two (register, lane) bits: the accumulator's N
+// basis (l4/l5) becomes A's K register basis, while A's K register basis
+// (r0/r1) becomes the accumulator's N lane basis, i.e. a (lane x register)
+// transpose within each 16-lane quad.
+bool isHCULegacyMmacToDotA(RankedTensorType srcTy, RankedTensorType dstTy) {
+  if (srcTy.getRank() != 2 || srcTy.getShape() != dstTy.getShape())
+    return false;
+  int bitwidth = getIntOrFloatOrPtrBitWidth(srcTy.getElementType());
+  if (bitwidth != 16 && bitwidth != 32)
+    return false;
+
+  auto srcMma = dyn_cast<AMDMfmaEncodingAttr>(srcTy.getEncoding());
+  auto dot = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+  if (!srcMma || !dot || dot.getOpIdx() != 0 || dot.getKWidth() != 4)
+    return false;
+
+  auto dstMma = dyn_cast<AMDMfmaEncodingAttr>(dot.getParent());
+  if (!dstMma)
+    return false;
+
+  auto isLegacy16 = [](AMDMfmaEncodingAttr mma) {
+    auto shape = mma.getInstrShape();
+    return mma.isHCUMmac() && mma.getMmacLayout() == MmacLayout::LEGACY &&
+           !mma.getIsTransposed() && shape.size() == 3 && shape[0] == 16 &&
+           shape[1] == 16;
+  };
+  return isLegacy16(srcMma) && isLegacy16(dstMma);
+}
+
 bool cvtNeedsWarpShuffle(RankedTensorType srcTy, RankedTensorType dstTy) {
   auto layout = minimalCvtLayout(srcTy, dstTy);
   MLIRContext *ctx = srcTy.getContext();
@@ -995,7 +1025,10 @@ bool cvtNeedsWarpShuffle(RankedTensorType srcTy, RankedTensorType dstTy) {
   if (to_vector(layout.getOutDimNames()) ==
       SmallVector<StringAttr, 2>{kRegister, kLane}) {
     auto factors = getWarpLayoutConvertDecomposition(srcTy, dstTy, 32);
-    return (factors.mixedTranspositions.size() < 2);
+    if (factors.mixedTranspositions.size() < 2)
+      return true;
+    // HCU lowers this case with a dedicated shuffle sequence.
+    return isHCULegacyMmacToDotA(srcTy, dstTy);
   }
   return false;
 }
