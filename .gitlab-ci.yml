@@ -21,7 +21,7 @@ quality-gate:
   tags:
     - nmz
   script:
-    - pip install hygon_quality_gate[scanners]
+    - pip install hygon_quality_gate[scanners] -i http://10.16.1.201:9929/nightly/dtk/+simple/ --trusted-host 10.16.1.201
     - python -m hygon_pr_gate.install_tools
     # 拉取目标分支，供 --base 对比
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
