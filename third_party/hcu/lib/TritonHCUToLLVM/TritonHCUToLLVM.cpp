@@ -49,6 +49,10 @@ void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns, bool ftz,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, ModuleAllocation &allocation,
     const AMD::TargetInfo &targetInfo, PatternBenefit benefit);
+void populateFp4ToFpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                 RewritePatternSet &patterns,
+                                 const AMD::TargetInfo &targetInfo,
+                                 PatternBenefit benefit);
 void adjustModeRegister(ModuleOp mod, const AMD::TargetInfo &targetInfo);
 void populateHCUDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                     RewritePatternSet &patterns,
@@ -387,8 +391,8 @@ struct ConvertTritonHCUToLLVM
                                                           patterns, AMDBenefit);
     mlir::triton::AMD::populateUpcastMXFPToLLVMPatterns(typeConverter, patterns,
                                                         targetInfo, AMDBenefit);
-    mlir::triton::AMD::populateFp4ToFpToLLVMPatterns(typeConverter, patterns,
-                                                     targetInfo, AMDBenefit);
+    HCU::populateFp4ToFpToLLVMPatterns(typeConverter, patterns,
+                                    targetInfo, AMDBenefit);
     // TODO(thomas): this should probably be done in a separate step to not
     // interfere with our own lowering of arith ops. Add arith/math's patterns
     // to help convert scalar expression to LLVM.

@@ -11,6 +11,7 @@ add_triton_library(TritonHCUToLLVM
   DotOpToLLVM/MMAC.cpp
   DotOpToLLVMHCU.cpp
   ElementwiseOpToLLVM.cpp
+  Fp4ToFpOpToLLVM.cpp
   DsReadM.cpp
   BufferLdsLocalLoadLowering.cpp
   BufferLdsAddress.cpp
