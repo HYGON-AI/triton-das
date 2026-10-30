@@ -415,6 +415,14 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
   }
   // Case 3: Regular cases
   SmallVector<int64_t, 2> tensorShape = {shape[0], shape[1]};
+  int64_t mSlots = tensorShape[0] / shapePerWarp.first;
+  int64_t nSlots = tensorShape[1] / shapePerWarp.second;
+  // Shapes and warp counts are powers of two. Once all tiles are covered,
+  // filling N exactly minimizes replication without duplicating B panels;
+  // place the surplus warps on M.
+  if (mSlots > 0 && nSlots > 0 && numWarps > mSlots * nSlots)
+    return {static_cast<unsigned>(numWarps / nSlots),
+            static_cast<unsigned>(nSlots)};
   SmallVector<unsigned, 3> ret = {1, 1};
   do {
     if (ret[0] * ret[1] >= numWarps)
@@ -431,7 +439,16 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
     }
   } while (true);
   if (ret[1] * shapePerWarp.second > tensorShape[1]) {
-    return {ret[1], ret[0]};
+    // Swapping only helps when it reduces the number of warps that compute
+    // replicated tiles. With a non-square shapePerWarp (e.g. ds_read_m's
+    // 16x32 panel) the swapped split can replicate more: 64x32 with 8 warps
+    // gives [4,2] -> 2x but [2,4] -> 4x redundant MMACs.
+    auto replication = [&](unsigned w0, unsigned w1) {
+      return std::max<int64_t>(1, w0 * shapePerWarp.first / tensorShape[0]) *
+             std::max<int64_t>(1, w1 * shapePerWarp.second / tensorShape[1]);
+    };
+    if (replication(ret[1], ret[0]) <= replication(ret[0], ret[1]))
+      return {ret[1], ret[0]};
   }
   return ret;
 }
@@ -1149,6 +1166,8 @@ public:
 
     std::optional<DsReadMStagingPlan> dsReadMStagingPlan;
     if (dsReadMDot) {
+      // Keep matrix reads eligible even when panels are over-subscribed;
+      // warpsPerTileMFMA minimizes replication for the 16x32 panel shape.
       unsigned tileM = mDim, tileN = 32;
       tilesPerWarp = {tileM / mDim, tileN / nDim}; // {1, 2}
       warpsPerTile =
