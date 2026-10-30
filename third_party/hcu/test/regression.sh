@@ -51,6 +51,9 @@ base_pytest_cases=(
   "${hcu_file_path}/blocked-scale-matmul.py"
 )
 
+# Fixed-schedule performance references are checked only on the calibrated NMZ.
+gemm_perf_cases=("${hcu_file_path}/test_gemm_performance.py")
+
 # Compile-only checks stop at LLVM IR; no GPU or device libraries are needed.
 scale_compile_file="${hcu_file_path}/test_scaled_compile.py"
 scale_runtime_file="${hcu_file_path}/test_scaled_runtime.py"
@@ -124,7 +127,10 @@ done
 
 case "${suite}" in
   all)
-    pytest_cases=("${base_pytest_cases[@]}" "${scale_compile_cases[@]}" "${scale_runtime_cases[@]}")
+    pytest_cases=("${base_pytest_cases[@]}" "${scale_compile_cases[@]}" "${scale_runtime_cases[@]}" "${gemm_perf_cases[@]}")
+    ;;
+  gemm-perf)
+    pytest_cases=("${gemm_perf_cases[@]}")
     ;;
   scale)
     pytest_cases=("${scale_compile_cases[@]}" "${scale_runtime_cases[@]}")
@@ -136,7 +142,7 @@ case "${suite}" in
     pytest_cases=("${scale_runtime_cases[@]}")
     ;;
   *)
-    echo "unknown suite: ${suite} (expected all, scale, scale-compile or scale-runtime)" >&2
+    echo "unknown suite: ${suite} (expected all, gemm-perf, scale, scale-compile or scale-runtime)" >&2
     exit 2
     ;;
 esac

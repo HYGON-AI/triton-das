@@ -47,3 +47,21 @@ Compile checks stop at LLVM IR; assembly and execution checks require gfx946.
 ```bash
 python -m pytest third_party/hcu/test/test_scaled_compile.py -k upstream_scaled_compile -q
 ```
+
+## NMZ GEMM performance gates
+
+The `all` suite includes eight FP16 GEMM gates for 72-CU gfx938 (BW1100).
+They cover 4096/5120, row-row/row-col, and default/legacy MMAC layouts with
+fixed schedules and runtime K. Other device profiles skip these references.
+To run only the gates on an idle GPU:
+
+```bash
+HIP_VISIBLE_DEVICES=0 bash third_party/hcu/test/regression.sh --suite=gemm-perf -q
+```
+
+Each gate checks the full result against FP32, verifies that K-64 and K reuse
+one binary, and measures the median of 11 HIP-graph samples of four launches.
+The floor is 99% of the lowest median from three independent calibration runs
+in opt:8576 with Triton `cdf6827` and LLVM `96fd797`. Calibration data and the
+release comparison are in
+[triton_gemm_asm](http://42.228.13.241:10068/xukang/triton_gemm_asm/-/tree/tune/opt8576-bmz-nmz-20261017/experiments/20261030-nmz-release-regression).
