@@ -100,7 +100,7 @@ def default_wasp_config():
     return {
         "BLOCK_SIZE_M": 128,
         "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
+        "BLOCK_SIZE_K": 64,
         "GROUP_SIZE_M": 1,
         "wasp_partition_warps": (4, 4),
         "wasp_wdra": False,

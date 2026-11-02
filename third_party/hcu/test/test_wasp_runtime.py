@@ -224,8 +224,8 @@ def test_dense_fa_wdra_spill_repair(monkeypatch):
     from test_wasp_mls_regression import run_dense_fa
 
     # Observe real backend feedback, without replacing it with synthetic demand.
-    # These manual quotas spill; repair must converge within two adjustments
-    # and run_dense_fa must still pass its CPU output/LSE reference checks.
+    # Keep consumer quotas deliberately low so the test continues to exercise
+    # spill repair when compiler changes reduce register demand.
     monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
     checks = []
     check = wasp.check_and_adjust_wasp_wdra_regs
@@ -238,7 +238,7 @@ def test_dense_fa_wdra_spill_repair(monkeypatch):
         return check(gcn, src, metadata, options)
 
     monkeypatch.setattr(wasp, "check_and_adjust_wasp_wdra_regs", record_feedback)
-    run_dense_fa(160, 2, 64, False, partition_regs=(32, 164, 164))
+    run_dense_fa(160, 2, 64, False, partition_regs=(40, 16, 16))
     assert 2 <= len(checks) <= 3
     assert any(entry["vgpr_spill_count"] for entry in checks[0].values())
     assert all(entry["vgpr_spill_count"] == 0 for entry in checks[-1].values())
