@@ -55,7 +55,7 @@ inline bool hasLegacyMatrixReadProfile(std::string_view arch,
                                        MatrixReadOpcode opcode) {
   if (arch == "gfx936")
     return opcode <= MatrixReadOpcode::M32x8B32;
-  if (arch == "gfx92a" || arch == "gfx938" || arch == "gfx946")
+  if (arch == "gfx92a" || arch == "gfx938" || arch == "gfx946" || arch == "gfx948")
     return opcode == MatrixReadOpcode::M32x16B16 ||
            opcode == MatrixReadOpcode::M32x32B8;
   return false;

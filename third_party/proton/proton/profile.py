@@ -33,7 +33,7 @@ def _get_mode_str(backend: str, mode: Optional[Union[str, BaseMode]]) -> str:
 def _is_hcu_target() -> bool:
     target = triton.runtime.driver.active.get_current_target()
     # Keep in sync with HIP_HCU_ARCHS in triton._internal_testing / compiler.py
-    hcu_archs = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
+    hcu_archs = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946", "gfx948"}
     return target is not None and target.backend == "hip" and target.arch in hcu_archs
 
 

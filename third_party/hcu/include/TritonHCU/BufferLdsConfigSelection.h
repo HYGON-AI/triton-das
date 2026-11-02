@@ -109,7 +109,8 @@ selectBufferLdsConfig(unsigned rows, unsigned rowBytes, unsigned waves,
       !isBufferLdsPowerOfTwo(hw.banks) ||
       !isBufferLdsPowerOfTwo(hw.bankBytes) ||
       !isBufferLdsPowerOfTwo(hw.phaseBytes) ||
-      !isBufferLdsPowerOfTwo(hw.capacityBytes) ||
+      // Capacity need not be a power of two (gfx948 has 160 KiB).
+      !hw.capacityBytes ||
       !isBufferLdsPowerOfTwo(wrap.granuleBytes) ||
       (copyBytesPerLane != 4 && copyBytesPerLane != 8 &&
        copyBytesPerLane != 16) ||

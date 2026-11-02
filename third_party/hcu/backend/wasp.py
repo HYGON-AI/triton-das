@@ -52,7 +52,7 @@ def configure_wasp(mod, metadata, options):
         if options.wasp_partition_regs is not None:
             raise ValueError("wasp_partition_regs requires a warp_specialize=True loop")
         return
-    if options.arch != "gfx946":
+    if options.arch not in ("gfx946", "gfx948"):
         raise ValueError(f"HCU WASP is not supported on {options.arch}")
     # WASP owns LDS multi-buffering through LoadMMASpecialization; num_stages
     # is the LDS buffer depth, not the ordinary AMD software-pipeline depth.
@@ -83,8 +83,8 @@ def normalize_regs(regs, arch):
     #   S % (4 * B) == 0, so S / B is integral and also 4-aligned.
     # Compare quotas directly with capacity, without multiplying by 64 lanes
     # or 4 SIMDs. Unused capacity is allowed; infeasible quotas are rejected.
-    # WASP currently supports gfx946 only.
-    vgpr_size = {"gfx946": 512}.get(arch, 512)
+    # WASP supports the instruction-compatible gfx946/gfx948 pair.
+    vgpr_size = {"gfx946": 512, "gfx948": 512}.get(arch, 512)
     if len(regs) not in (2, 3, 4) or any(type(n) is not int or n <= 0 for n in regs):
         raise ValueError("WASP requires 2, 3, or 4 positive integer partition quotas")
     # WDRA allocation rules belong here, not in the target capacity query.
@@ -291,7 +291,7 @@ def check_and_adjust_wasp_wdra_regs(gcn, src, metadata, options):
     # Keep sum(N[i]) within the arch's capacity and divisible by 4 * B:
     # gfx946 allows totals 512/504/512 for B = 2/3/4. normalize_regs enforces
     # each quota's 4..256 bounds and 4-alignment before a retry.
-    vgpr_size = {"gfx946": 512}.get(options.arch, 512)
+    vgpr_size = {"gfx946": 512, "gfx948": 512}.get(options.arch, 512)
     budget = vgpr_size // (4 * len(regs)) * (4 * len(regs))
 
     # 1. Round each demand independently. Total alignment is handled only after

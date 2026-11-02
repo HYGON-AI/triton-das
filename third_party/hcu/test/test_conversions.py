@@ -41,7 +41,7 @@ def is_hip_gfx946():
     if not is_hip():
         return False
     arch = triton.runtime.driver.active.utils.get_device_properties(0)["arch"]
-    return arch.split(":")[0] == "gfx946"
+    return arch.split(":")[0] in ("gfx946", "gfx948")
 
 
 def is_hip_hcu_ocp_fp8():

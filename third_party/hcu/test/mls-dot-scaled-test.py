@@ -19,11 +19,11 @@ def is_hcu_support_mls():
     target = triton.runtime.driver.active.get_current_target()
     if target is None:
         return False
-    return target.backend == 'hip' and target.arch in ('gfx938', 'gfx946', 'gfx92a')
+    return target.backend == 'hip' and target.arch in ('gfx938', 'gfx946', 'gfx948', 'gfx92a')
 
 def is_hcu_support_dot_scaled():
     # These FP4/FP8 dot-scaled cases require gfx946, independently of MLS support.
-    return is_hcu_support_mls() and triton.runtime.driver.active.get_current_target().arch == 'gfx946'
+    return is_hcu_support_mls() and triton.runtime.driver.active.get_current_target().arch in ('gfx946', 'gfx948')
 
 
 def is_hcu_support_mmac_layout():
@@ -31,7 +31,7 @@ def is_hcu_support_mmac_layout():
     if target is None:
         return False
     return target.backend == 'hip' and (
-        target.arch == 'gfx938' or target.arch == 'gfx946'
+        target.arch == 'gfx938' or target.arch in ('gfx946', 'gfx948')
     )
 
 # import os

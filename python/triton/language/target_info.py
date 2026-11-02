@@ -6,7 +6,7 @@ from triton.runtime.jit import constexpr_function
 __all__ = ["current_target"]
 
 HIP_CDNA3_ARCHS = {"gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"}
-HIP_CDNA4_ARCHS = {"gfx946", "gfx950"}
+HIP_CDNA4_ARCHS = {"gfx946", "gfx948", "gfx950"}
 
 
 def current_target():

@@ -11,13 +11,13 @@ os.environ["AMDGCN_USE_BUFFER_OPS"] = "1"
 
 def is_hcu_support_mls():
     target = triton.runtime.driver.active.get_current_target()
-    return target.backend == 'hip' and (target.arch == 'gfx938' or target.arch == 'gfx946' or target.arch == 'gfx92a')
+    return target.backend == 'hip' and (target.arch == 'gfx938' or target.arch in ('gfx946', 'gfx948') or target.arch == 'gfx92a')
 
 def is_hcu_support_mmac_layout():
     target = triton.runtime.driver.active.get_current_target()
     if target is None:
         return False
-    return target.backend == 'hip' and (target.arch == 'gfx938' or target.arch == 'gfx946')
+    return target.backend == 'hip' and (target.arch == 'gfx938' or target.arch in ('gfx946', 'gfx948'))
 
 
 regression_run = True

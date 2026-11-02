@@ -1630,7 +1630,7 @@ class TritonSemantic(Generic[TensorTy]):
             type_name = "fp8e4b8" if uses_fp8e4b8 else "fp8e5b16"
             if type_name in self.builder.options.deprecated_fp8_dot_operand_dtypes:
                 arch = self.builder.options.arch
-                hcu_archs = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
+                hcu_archs = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946", "gfx948"}
                 if arch in hcu_archs:
                     warnings.warn(
                         f"{type_name} is not supported on HCU so it's upcasted to fp16 and can cause significant slow down. "

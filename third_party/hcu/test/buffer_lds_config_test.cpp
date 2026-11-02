@@ -122,7 +122,25 @@ int main() {
     auto yy = getBufferLdsTargetProfile("gfx92a");
     auto sb = getBufferLdsTargetProfile("gfx946");
     assert(bmz && nmz && yy && sb);
-    assert(!getBufferLdsTargetProfile("gfx948"));
+    auto sb948 = getBufferLdsTargetProfile("gfx948");
+    assert(sb948 && sb948->lds.capacityBytes == 160 * 1024);
+    assert(sb948->ldsOffsetBits == 18 && sb948->ldsOffsetMask() == 0x3ffff);
+    assert(sb948->lds.banks == sb->lds.banks);
+    assert(sb948->lds.phaseBytes == sb->lds.phaseBytes);
+    assert(sb948->wrapFieldOffset == sb->wrapFieldOffset);
+    for (unsigned bytes = 0; bytes <= 63 * 4; bytes += 4)
+      assert(sb948->encodeWrapBytes(bytes) == sb->encodeWrapBytes(bytes));
+    // A non-power-of-two LDS capacity must not disable configuration search.
+    auto cfg946 = selectMmacBufferLdsConfig(
+        64, 32, 2, 4, 0, true, 16, 4, sb->lds, true, 16, sb->wrap,
+        "gfx946");
+    auto cfg948 = selectMmacBufferLdsConfig(
+        64, 32, 2, 4, 0, true, 16, 4, sb948->lds, true, 16, sb948->wrap,
+        "gfx948");
+    assert(cfg946 && cfg948);
+    assert(cfg946->copyBytesPerLane == cfg948->copyBytesPerLane);
+    assert(cfg946->worstReadWay == cfg948->worstReadWay);
+    assert(cfg946->readPhaseCost == cfg948->readPhaseCost);
 
     assert(bmz->ldsOffsetBits == 16 && bmz->wrapFieldOffset == 16);
     assert(bmz->encodeWrapBytes(0) == 0);
@@ -258,7 +276,7 @@ int main() {
   }
   // The four legacy HCU targets share matrix-read lane routing/phases while
   // retaining target-specific LDS geometry and M0 wrap encodings.
-  for (std::string_view arch : {"gfx92a", "gfx936", "gfx938", "gfx946"}) {
+  for (std::string_view arch : {"gfx92a", "gfx936", "gfx938", "gfx946", "gfx948"}) {
     auto profile = getBufferLdsTargetProfile(arch);
     assert(profile);
     auto copyConfig = selectMmacBufferLdsConfig(

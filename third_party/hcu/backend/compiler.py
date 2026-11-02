@@ -32,7 +32,7 @@ def is_in_thread_transpose_enabled(arch):
 
 
 def supports_buffer_lds(arch):
-    return arch in ("gfx92a", "gfx936", "gfx938", "gfx946")
+    return arch in ("gfx92a", "gfx936", "gfx938", "gfx946", "gfx948")
 
 
 def _validate_prefetch_distances(global_distance, lds_distance):
@@ -228,7 +228,7 @@ class HIPBackend(BaseBackend):
         super().__init__(target)
         assert isinstance(target.arch, str)
         self.binary_ext = "hsaco"
-        self.is_hcu = target.arch in ('gfx926', 'gfx928', 'gfx936', 'gfx938', 'gfx92a', 'gfx946')
+        self.is_hcu = target.arch in ('gfx926', 'gfx928', 'gfx936', 'gfx938', 'gfx92a', 'gfx946', 'gfx948')
 
     def get_target_name(self, options) -> str:
         return f"hip:{options.arch}"
@@ -504,6 +504,9 @@ class HIPBackend(BaseBackend):
             "gfx946": [
                         "-mllvm=-support-512-vgprs=true",
                       ],
+            "gfx948": [
+                        "-mllvm=-support-512-vgprs=true",
+                      ],
             "gfx92a": [
                         "-mllvm=-support-512-vgprs=true",
                       ],
@@ -553,7 +556,7 @@ class HIPBackend(BaseBackend):
         if options.amdgpu_enable_max_ilp_scheduling_strategy:
             options_args.append("-mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true")
 
-        if (options.arch == "gfx946" and
+        if (options.arch in ("gfx946", "gfx948") and
                 not options.hcu_use_gfx946_sched_model_v2):
             options_args.append("-mllvm=-hcu-use-gfx946-sched-model-v2=false")
 

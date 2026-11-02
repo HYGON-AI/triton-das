@@ -56,7 +56,7 @@ struct BufferLdsTargetProfile {
       encoded = wrapBytes / 16;
       break;
     case BufferLdsWrapEncoding::SplitCoarse4DwordFineDword: {
-      // NMZ/YY expose five control bits in an unusual order: the low three
+      // gfx938/gfx92a expose five control bits in an unusual order: the low three
       // field bits select a 4-dword group and the high two select a dword
       // inside that group. The physical rotation is still
       // coarse * 16B + fine * 4B; only its M0 representation is split.
@@ -97,7 +97,7 @@ struct BufferLdsTargetProfile {
 
 inline std::optional<BufferLdsTargetProfile>
 getBufferLdsTargetProfile(std::string_view arch) {
-  // BMZ / gfx936: M0[15:0] LDS bytes, M0[20:16] in 4-dword units.
+  // gfx936: M0[15:0] LDS bytes, M0[20:16] in 4-dword units.
   if (arch == "gfx936")
     return BufferLdsTargetProfile{
         {/*banks=*/32, /*bankBytes=*/4, /*waveSize=*/64,
@@ -107,7 +107,7 @@ getBufferLdsTargetProfile(std::string_view arch) {
         /*wrapFieldOffset=*/16,
         /*wrapFieldBits=*/5,
         BufferLdsWrapEncoding::BmzCoarse4Dword};
-  // NMZ / gfx938: M0[15:0] LDS bytes. M0[18:16] selects a 4-dword
+  // gfx938: M0[15:0] LDS bytes. M0[18:16] selects a 4-dword
   // group and M0[20:19] selects a dword within that group.
   if (arch == "gfx938")
     return BufferLdsTargetProfile{
@@ -118,7 +118,7 @@ getBufferLdsTargetProfile(std::string_view arch) {
         /*wrapFieldOffset=*/16,
         /*wrapFieldBits=*/5,
         BufferLdsWrapEncoding::SplitCoarse4DwordFineDword};
-  // YY / gfx92a uses the NMZ split encoding in M0[28:24].
+  // gfx92a uses the gfx938 split encoding in M0[28:24].
   if (arch == "gfx92a")
     return BufferLdsTargetProfile{
         {/*banks=*/32, /*bankBytes=*/4, /*waveSize=*/64,
@@ -128,16 +128,18 @@ getBufferLdsTargetProfile(std::string_view arch) {
         /*wrapFieldOffset=*/24,
         /*wrapFieldBits=*/5,
         BufferLdsWrapEncoding::SplitCoarse4DwordFineDword};
-  // SB / gfx946 has 128 KiB LDS and 64 physical 4-byte banks.  A hardware
-  // phase remains 128 bytes (32 bank accesses), rather than widening to all
-  // 64 banks. M0[16:0] is the LDS byte address and M0[29:24] is a linear
-  // 0..63 dword wrap offset.
-  if (arch == "gfx946")
+  // gfx946 has 128 KiB LDS; gfx948 has 160 KiB. Both have 64 physical
+  // 4-byte banks. A hardware phase remains 128 bytes (32 bank accesses),
+  // rather than widening to all 64 banks. LDS byte addresses need 17 bits
+  // on gfx946 and 18 on gfx948;
+  // M0[29:24] is a linear 0..63 dword wrap offset.
+  if (arch == "gfx946" || arch == "gfx948")
     return BufferLdsTargetProfile{
         {/*banks=*/64, /*bankBytes=*/4, /*waveSize=*/64,
-         /*phaseBytes=*/128, /*capacityBytes=*/128 * 1024},
+         /*phaseBytes=*/128,
+         /*capacityBytes=*/(arch == "gfx948" ? 160u : 128u) * 1024},
         {/*granuleBytes=*/4, /*maxBytes=*/63 * 4},
-        /*ldsOffsetBits=*/17,
+        /*ldsOffsetBits=*/arch == "gfx948" ? 18u : 17u,
         /*wrapFieldOffset=*/24,
         /*wrapFieldBits=*/6,
         BufferLdsWrapEncoding::LinearDword};

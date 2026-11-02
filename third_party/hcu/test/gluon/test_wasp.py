@@ -30,7 +30,7 @@ def require_gfx946():
     if not torch.cuda.is_available():
         pytest.skip("Gluon WASP runtime tests require a gfx946 GPU")
     target = triton.runtime.driver.active.get_current_target()
-    if target.backend not in ("hcu", "hip") or target.arch != "gfx946":
+    if target.backend not in ("hcu", "hip") or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("Gluon WASP runtime tests require an HCU gfx946 target")
 
 

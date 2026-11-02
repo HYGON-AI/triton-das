@@ -1226,7 +1226,7 @@ struct AsyncCopyGlobalToLocalOpConversion
         mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
             cacheMod, /*isLoad=*/true, targetInfo);
 
-    if (targetInfo.getArch() == "gfx946") {
+    if (targetInfo.getArch() == "gfx946" || targetInfo.getArch() == "gfx948") {
       assert((vecBits == 32 || vecBits == 64 || vecBits == 128) &&
              "unsupported HCU global-to-LDS load width");
       std::string intrinsic = "llvm.hcu.global.load.dword";

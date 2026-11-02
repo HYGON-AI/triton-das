@@ -25,7 +25,7 @@ def is_hip_gfx946():
     if not is_hip():
         return False
     target = triton.runtime.driver.active.get_current_target()
-    return target is not None and target.arch == "gfx946"
+    return target is not None and target.arch in ("gfx946", "gfx948")
 
 
 def is_hip_hcu_without_acc16():
@@ -217,7 +217,7 @@ def test_mmac_acc16_falls_back_to_f32_accumulation(
 # v_mmac_f32_16x16x8_tf32); the other HCU arches only expose the K=4
 # scalar-operand variant (v_mmac_16x16x4_f32).
 _HCU_F32_K8_ARCHES = {"gfx928", "gfx936", "gfx938"}
-_HCU_ARCHES = _HCU_F32_K8_ARCHES | {"gfx92a", "gfx946"}
+_HCU_ARCHES = _HCU_F32_K8_ARCHES | {"gfx92a", "gfx946", "gfx948"}
 
 
 def is_hip_hcu():
@@ -230,7 +230,7 @@ def is_hip_hcu():
 # HCU arches with the MMAC_LAYOUT feature (gfx938/gfx946): the only arches
 # that honor mmac_layout_force. Other HCU arches fall back to the LEGACY
 # layout with a diagnostic, so forcing a mode there exercises nothing.
-_HCU_MMAC_LAYOUT_ARCHES = {"gfx938", "gfx946"}
+_HCU_MMAC_LAYOUT_ARCHES = {"gfx938", "gfx946", "gfx948"}
 
 
 def is_hip_hcu_mmac_layout():

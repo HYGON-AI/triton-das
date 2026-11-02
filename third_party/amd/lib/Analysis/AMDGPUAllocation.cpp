@@ -34,7 +34,9 @@ static int32_t getMaxPreferredScratchBytes(Operation *op) {
     return 0;
   if (arch == "gfx1250")
     return 320 * 1024;
-  if (arch == "gfx946" || arch == "gfx950")
+  if (arch == "gfx946")
+    return 128 * 1024;
+  if (arch == "gfx948" || arch == "gfx950")
     return 160 * 1024;
   return 64 * 1024;
 }

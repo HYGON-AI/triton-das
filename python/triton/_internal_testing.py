@@ -25,9 +25,9 @@ torch_dtypes = ['bool'] + int_dtypes + ['uint8'] + float_dtypes + ['bfloat16']
 tma_dtypes = sorted(set(dtypes_with_bfloat16) - {"int64", "uint64", "float64"})
 
 HIP_CDNA3_ARCHS = {"gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"}
-HIP_CDNA4_ARCHS = {"gfx946", "gfx950"}
+HIP_CDNA4_ARCHS = {"gfx946", "gfx948", "gfx950"}
 # Hygon HCU arches (subset also appears in CDNA3/4 lists for shared HIP tests).
-HIP_HCU_ARCHS = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"}
+HIP_HCU_ARCHS = {"gfx926", "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946", "gfx948"}
 
 
 def is_interpreter():

@@ -42,7 +42,7 @@ def test_native_fp4_operand_representation(a_format, b_format, k):
     if not torch.cuda.is_available():
         pytest.skip("requires gfx946")
     target = triton.runtime.driver.active.get_current_target()
-    if target.backend != "hip" or target.arch.split(":")[0] != "gfx946":
+    if target.backend != "hip" or target.arch.split(":")[0] not in ("gfx946", "gfx948"):
         pytest.skip("requires gfx946 native MMAC")
 
     generator = torch.Generator().manual_seed(43)

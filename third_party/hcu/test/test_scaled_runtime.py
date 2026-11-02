@@ -32,7 +32,7 @@ def require_gfx946():
     if not torch.cuda.is_available():
         pytest.skip("scaled GEMM execution requires gfx946")
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("scaled GEMM execution requires gfx946")
 
 
@@ -51,7 +51,7 @@ def make_operand(rows, logical_k, seed, scaled=True, r_contiguous=False):
 def check_optional_scale(tmp_path, side, stages, mls, async_copy, r_contiguous, m, n, tiles,
                          warp_specialize=False, bk=256, **options):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("optional scale checks require gfx946")
     a, sa, ar = make_operand(m, tiles * bk, 101, side in ("a", "both"), r_contiguous)
     b, sb, br = make_operand(n, tiles * bk, 102, side in ("b", "both"), r_contiguous)
@@ -101,7 +101,7 @@ def check_optional_scale(tmp_path, side, stages, mls, async_copy, r_contiguous, 
 ])
 def test_scaled_formats(a_format, b_format, async_copy, a_mls, b_mls, k):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("scaled format execution requires gfx946")
 
     def operand(fmt, seed):
@@ -145,7 +145,7 @@ def test_scaled_formats(a_format, b_format, async_copy, a_mls, b_mls, k):
                                                         pytest.param(False, 8, 5, 1, id="dynamic-one")])
 def test_two_stage_scale_pipeline(tmp_path, mls, async_copy, r_contiguous, s, tiles, limit):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("scale pipeline checks require gfx946")
     a, sa, ar = make_operand(64, tiles * s * 32, 42, r_contiguous=r_contiguous)
     b, sb, br = make_operand(64, tiles * s * 32, 43, r_contiguous=r_contiguous)
@@ -229,7 +229,7 @@ def test_two_stage_scale_pipeline(tmp_path, mls, async_copy, r_contiguous, s, ti
 @pytest.mark.parametrize("mls_side", ["a", "b"])
 def test_two_stage_mixed_scale_pipeline(tmp_path, r_contiguous, async_copy, mls_side):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("mixed scale pipeline checks require gfx946")
     tiles, s = 3, 8
 
@@ -284,7 +284,7 @@ def test_two_stage_mixed_scale_pipeline(tmp_path, r_contiguous, async_copy, mls_
 @pytest.mark.parametrize("buffer_ops", [False, True])
 def test_scale_global_lds(tmp_path, monkeypatch, mls, async_copy, stages, buffer_ops):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("HCU global-to-LDS checks require gfx946")
     monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1" if buffer_ops else "0")
     a, sa, ar = make_operand(64, 768, 71)
@@ -350,7 +350,7 @@ def test_optional_scale_non_square(tmp_path, side, m, n):
 @pytest.mark.parametrize("async_copy", [False, True])
 def test_mmac_scales_use_opposite_banks(m, n, bk, r_contiguous, async_copy):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("requires gfx946 scale instructions")
     kernel = compile_bank_kernel(target, m, n, bk, r_contiguous=r_contiguous, async_copy=async_copy,
                                  compiler=triton.compile)
@@ -379,7 +379,7 @@ def test_mmac_scales_use_opposite_banks(m, n, bk, r_contiguous, async_copy):
 ])
 def test_scaled_wasp(tmp_path, warps, stages, wdra, mls, async_copy, r_contiguous):
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("requires gfx946 WASP and scale instructions")
     m = n = bk = 128
     tiles = 2 * stages  # Exercise producer-slot reuse and the phase rollover.
@@ -435,7 +435,7 @@ def test_small_register_tile_is_correct():
     import torch
 
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("small scale tile checks require gfx946")
     source = ASTSource(small_scale_kernel, signature={"A": "*u8", "B": "*u8", "SA": "*u8", "SB": "*u8", "C": "*fp32"})
     compiled = triton.compile(source, target=target, options={"num_warps": 4, "num_stages": 1, "mmac_layout_force": 2})
@@ -456,7 +456,7 @@ def test_scale_regions_reuse_without_result_store(mls, async_copy, barrier):
     import torch
 
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("scale-region reuse checks require gfx946")
     slots = []
     for dots in (1, 9):
@@ -499,7 +499,7 @@ def test_gfx946_global_lds_direct_copy(tmp_path, masked, copy_bytes):
     import torch
 
     target = triton.runtime.driver.active.get_current_target()
-    if target is None or target.backend != "hip" or target.arch != "gfx946":
+    if target is None or target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
         pytest.skip("HCU global-to-LDS checks require gfx946")
     # Start at TTGIR so no BufferOps conversion runs. Exercise all three
     # global LDS instruction widths, including masked copies with other.

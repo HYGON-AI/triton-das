@@ -682,7 +682,8 @@ struct HCUConvertWarpSpecializeToLLVM
     ModuleOp mod = getOperation();
 
     AMD::TargetInfo targetInfo(this->arch.getValue());
-    if (targetInfo.getGPUKind() != llvm::AMDGPU::GK_GFX946) {
+    if (targetInfo.getGPUKind() != llvm::AMDGPU::GK_GFX946 &&
+        targetInfo.getGPUKind() != llvm::AMDGPU::GK_GFX948) {
       mod.emitError("wasp unsupported target: '") << this->arch.getValue() << "'";
       return signalPassFailure();
     }

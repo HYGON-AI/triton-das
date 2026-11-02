@@ -87,7 +87,11 @@ int TargetInfo::getWarpSize() const {
 }
 
 int TargetInfo::getSharedMemorySize() const {
-  // Should return the maximum capacity in kbyte
+  // Maximum capacity in bytes. gfx948 differs from gfx946 only in LDS size.
+  if (arch == "gfx946")
+    return 128 * 1024;
+  if (arch == "gfx948")
+    return 160 * 1024;
   switch (getISAFamily()) {
   case ISAFamily::GFX1250:
     return 320 * 1024;
@@ -650,7 +654,8 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
   // transfers.  Keep this target capability here instead of teaching the
   // common load/store lowering about a planned-copy encoding.
   if (llvm::is_contained({StringRef("gfx936"), StringRef("gfx938"),
-                          StringRef("gfx92a"), StringRef("gfx946")},
+                          StringRef("gfx92a"), StringRef("gfx946"),
+                          StringRef("gfx948")},
                          StringRef(arch)))
     return llvm::is_contained({128, 64, 32}, bitWidth);
 

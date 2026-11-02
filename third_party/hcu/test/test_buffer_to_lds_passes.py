@@ -615,8 +615,8 @@ def test_buffer_to_lds_accepts_wave_counts(monkeypatch, waves):
 def test_buffer_to_lds_target_profiles_are_shared_with_backend_selection():
     from triton.backends.hcu.compiler import supports_buffer_lds
     assert all(supports_buffer_lds(arch)
-               for arch in ("gfx936", "gfx938", "gfx92a", "gfx946"))
-    assert not supports_buffer_lds("gfx948")
+               for arch in ("gfx936", "gfx938", "gfx92a", "gfx946", "gfx948"))
+    assert not supports_buffer_lds("gfx950")
 
 
 @pytest.mark.parametrize("enabled", [None, False, True])

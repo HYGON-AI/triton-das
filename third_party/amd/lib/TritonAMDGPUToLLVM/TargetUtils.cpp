@@ -38,6 +38,7 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
   case llvm::AMDGPU::GK_GFX92A:
     return ISAFamily::CDNA3;
   case llvm::AMDGPU::GK_GFX946:
+  case llvm::AMDGPU::GK_GFX948:
     return ISAFamily::CDNA4;
   default:
     break;
@@ -117,6 +118,9 @@ HCUISAFeature deduceHCUISAFeature(llvm::StringRef arch) {
     {llvm::AMDGPU::GK_GFX946,
      commonFeatures1 | commonFeatures2 | commonFeatures3 | acc16Features |
          HCUISAFeature::CVT_SCALE_PK},
+    {llvm::AMDGPU::GK_GFX948,
+     commonFeatures1 | commonFeatures2 | commonFeatures3 | acc16Features |
+         HCUISAFeature::CVT_SCALE_PK},
   };
 
   llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::parseArchAMDGCN(arch);
@@ -144,6 +148,7 @@ bool supportsBufferCacheSwizzle(llvm::StringRef arch) {
       "gfx938",
       "gfx92a",
       "gfx946",
+      "gfx948",
   };
   for (llvm::StringRef supported : kCacheSwizzleArchs)
     if (arch == supported)
@@ -159,7 +164,7 @@ bool supports32KiBCacheSwizzle(llvm::StringRef arch) {
   // in different L1 sets, and a read can observe stale data after a write.
   // Only use this mode when changing the base also makes the old and new
   // request VA ranges disjoint.
-  return arch == "gfx938" || arch == "gfx946";
+  return arch == "gfx938" || arch == "gfx946" || arch == "gfx948";
 }
 
 static int64_t roundUpLegacyCacheSwizzleStrideBytes(int64_t strideBytes) {
@@ -202,13 +207,15 @@ int64_t normalizeCacheSwizzleStrideBytes(int64_t strideBytes,
 }
 
 llvm::StringRef getPermlane16SwapIntrinsic(llvm::StringRef arch) {
-  if (llvm::AMDGPU::parseArchAMDGCN(arch) == llvm::AMDGPU::GK_GFX946)
+  if (auto kind = llvm::AMDGPU::parseArchAMDGCN(arch);
+      kind == llvm::AMDGPU::GK_GFX946 || kind == llvm::AMDGPU::GK_GFX948)
     return "llvm.hcu.permlane16.swap.b32";
   return "llvm.amdgcn.permlane16.swap";
 }
 
 llvm::StringRef getPermlane32SwapIntrinsic(llvm::StringRef arch) {
-  if (llvm::AMDGPU::parseArchAMDGCN(arch) == llvm::AMDGPU::GK_GFX946)
+  if (auto kind = llvm::AMDGPU::parseArchAMDGCN(arch);
+      kind == llvm::AMDGPU::GK_GFX946 || kind == llvm::AMDGPU::GK_GFX948)
     return "llvm.hcu.permlane32.swap.b32";
   return "llvm.amdgcn.permlane32.swap";
 }

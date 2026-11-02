@@ -52,7 +52,7 @@ except ImportError:
 @lru_cache(maxsize=1)
 def get_cdna_version():
     """Get CDNA version lazily to avoid CUDA initialization during import."""
-    if arch_info.get_arch() in ["gfx946", "gfx950"]:
+    if arch_info.get_arch() in ["gfx946", "gfx948", "gfx950"]:
         return 4
     elif arch_info.get_arch() in ["gfx928", "gfx936", "gfx938", "gfx92a", "gfx942"]:
         return 3

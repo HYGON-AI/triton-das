@@ -41,7 +41,7 @@ class AMDFMAVectorMultiplier : public FMAVectorMultiplier {
       if ((aElemTy.isF16() || aElemTy.isBF16()) && dElemTy.isF32()) {
         chosenOp.vectorSize = 2;
         chosenOp.outElemTy = f32_ty;
-        if (aElemTy.isBF16() && *arch == "gfx946") {
+        if (aElemTy.isBF16() && (*arch == "gfx946" || *arch == "gfx948")) {
           // gfx946 lowers packed BF16 dot through the HCU intrinsic. Its
           // operands carry the BF16 bit patterns as v2i16, followed by the
           // default op_sel=0 and op_sel_hi=3 immediates.

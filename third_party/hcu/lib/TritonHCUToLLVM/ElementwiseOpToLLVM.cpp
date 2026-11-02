@@ -1910,6 +1910,7 @@ struct ElementwiseOpConversionWithTargetInfoBase
       features = AMD::deduceHCUISAFeature("gfx92a");
       break;
     case llvm::AMDGPU::GPUKind::GK_GFX946:
+    case llvm::AMDGPU::GPUKind::GK_GFX948:
       features = AMD::deduceHCUISAFeature("gfx946");
       break;
     default:
@@ -1923,7 +1924,7 @@ struct ElementwiseOpConversionWithTargetInfoBase
   bool supportsF16BF16F32Cvt() const {
     return llvm::is_contained(
         {llvm::AMDGPU::GPUKind::GK_GFX938, llvm::AMDGPU::GPUKind::GK_GFX92A,
-         llvm::AMDGPU::GPUKind::GK_GFX946},
+         llvm::AMDGPU::GPUKind::GK_GFX946, llvm::AMDGPU::GPUKind::GK_GFX948},
         gpuKind);
   }
 
@@ -1932,7 +1933,8 @@ struct ElementwiseOpConversionWithTargetInfoBase
   bool supportsPkF32() const {
     return llvm::is_contained(
         {llvm::AMDGPU::GPUKind::GK_GFX936, llvm::AMDGPU::GPUKind::GK_GFX938,
-         llvm::AMDGPU::GPUKind::GK_GFX92A, llvm::AMDGPU::GPUKind::GK_GFX946},
+         llvm::AMDGPU::GPUKind::GK_GFX92A, llvm::AMDGPU::GPUKind::GK_GFX946,
+         llvm::AMDGPU::GPUKind::GK_GFX948},
         gpuKind);
   }
 
@@ -1940,7 +1942,8 @@ struct ElementwiseOpConversionWithTargetInfoBase
    * gfx938/gfx946. */
   bool supportsPkBF16() const {
     return llvm::is_contained(
-        {llvm::AMDGPU::GPUKind::GK_GFX938, llvm::AMDGPU::GPUKind::GK_GFX946},
+        {llvm::AMDGPU::GPUKind::GK_GFX938, llvm::AMDGPU::GPUKind::GK_GFX946,
+         llvm::AMDGPU::GPUKind::GK_GFX948},
         gpuKind);
   }
 

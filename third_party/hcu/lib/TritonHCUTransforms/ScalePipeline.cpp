@@ -76,7 +76,7 @@ selectScaleProducer(IRRewriter &rewriter, tt::DotScaledOp dotOp,
       ttg::lookupNumWarps(load ? load.getOperation() : dotOp.getOperation());
   auto module = dotOp->getParentOfType<ModuleOp>();
   auto arch = getAMDArch(module);
-  bool nativeGlobalEnabled = arch && *arch == "gfx946";
+  bool nativeGlobalEnabled = arch && (*arch == "gfx946" || *arch == "gfx948");
   bool nativeDirectEnabled =
       load && (nativeGlobalEnabled || hasUniformScaleBase(load.getPtr()));
   triton::ModuleAxisInfoAnalysis axis(module);

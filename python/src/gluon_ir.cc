@@ -431,9 +431,9 @@ void init_gluon_ir(py::module &&m) {
              // Determine mmacLayout and isTransposed from arch + Python transposed.
              // Must match deduceHCUISAFeature in TargetUtils.cpp.
              static const llvm::DenseSet<llvm::StringRef> mmacLayoutArchs = {
-                 "gfx938", "gfx946"};
+                 "gfx938", "gfx946", "gfx948"};
              static const llvm::DenseSet<llvm::StringRef> hcuArchs = {
-                 "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946"};
+                 "gfx928", "gfx936", "gfx938", "gfx92a", "gfx946", "gfx948"};
 
              bool isTransposed;
              ttg::MmacLayout mmacLayout;
