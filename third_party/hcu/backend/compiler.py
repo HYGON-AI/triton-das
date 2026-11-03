@@ -785,14 +785,11 @@ class HIPBackend(BaseBackend):
             )
             if uses_buffer_lds:
                 hcu.passes.ttgpuir.add_convert_buffer_lds_copies(pm)
-                # Copy conversion is independent of synchronization ownership.
-                # The pipeline scheduler handles publication and slot reuse;
-                # standalone copies use immediate, conservative synchronization.
+
+                hcu.passes.ttgpuir.add_synchronize_buffer_lds_copies(pm)
                 if use_block_pingpong:
                     hcu.passes.ttgpuir.add_schedule_buffer_to_lds(
                         pm, options.block_pingpong_async_local_prefetch)
-                else:
-                    hcu.passes.ttgpuir.add_synchronize_buffer_lds_copies(pm)
                 passes.common.add_canonicalizer(pm)
                 passes.ttgpuir.add_remove_layout_conversions(pm)
 

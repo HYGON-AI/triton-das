@@ -1336,6 +1336,167 @@ namespace mlir {
 #include "TritonHCU/Passes.h.inc"
 using namespace triton::HCU::planned;
 
+// Follow memdesc views to the physical allocation a pipelined ring view
+// addresses, through loop-carried slot arguments (back to the init operand)
+// and loop results (through the yield operand that produces them).
+static Value ringRoot(Value value) {
+  if (!value)
+    return {};
+  for (;;) {
+    if (auto argument = dyn_cast<BlockArgument>(value)) {
+      auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+      if (!loop || argument.getOwner() != loop.getBody() ||
+          argument.getArgNumber() == 0)
+        return {};
+      value = loop.getInitArgs()[argument.getArgNumber() - 1];
+      continue;
+    }
+    if (auto result = dyn_cast<OpResult>(value))
+      if (auto loop = dyn_cast<scf::ForOp>(result.getOwner())) {
+        value = cast<scf::YieldOp>(loop.getBody()->getTerminator())
+                    .getOperand(result.getResultNumber());
+        continue;
+      }
+    Value source;
+    if (auto view = dyn_cast<ttg::MemDescIndexOp>(value.getDefiningOp()))
+      source = view.getSrc();
+    else if (auto reshape =
+                 dyn_cast<ttg::MemDescReshapeOp>(value.getDefiningOp()))
+      source = reshape.getSrc();
+    else if (auto slice = dyn_cast<ttg::MemDescSubsliceOp>(value.getDefiningOp()))
+      source = slice.getSrc();
+    else if (auto reinterpret =
+                 dyn_cast<ttg::MemDescReinterpretOp>(value.getDefiningOp()))
+      source = reinterpret.getSrc();
+    if (!source)
+      break;
+    value = source;
+  }
+  return value;
+}
+
+// Collect the physical LDS slot allocations a value may denote. Ping-pong
+// slot rotation walks sibling allocations through scf.if / arith.select
+// selectors, so a single-root walk cannot name such a ring; these resolvers
+// enumerate every allocation a selector, a loop-carried slot argument, or a
+// view chain can reach. The slot's encoding is irrelevant: BPP loops use
+// BufferLds wrapped storage as well as ordinary shared layouts. Non-slot
+// values (tensors, pointers, counters) resolve to nothing.
+static void collectSlotAllocs(Value value, DenseSet<Value> &allocs) {
+  SmallVector<Value> worklist;
+  DenseSet<Value> seen;
+  auto enqueue = [&worklist, &seen](Value candidate) {
+    if (candidate && seen.insert(candidate).second)
+      worklist.push_back(candidate);
+  };
+  enqueue(value);
+  while (!worklist.empty()) {
+    Value current = worklist.pop_back_val();
+    if (auto argument = dyn_cast<BlockArgument>(current)) {
+      auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+      if (loop && argument.getOwner() == loop.getBody() &&
+          argument.getArgNumber() > 0)
+        enqueue(loop.getInitArgs()[argument.getArgNumber() - 1]);
+      continue;
+    }
+    if (auto result = dyn_cast<OpResult>(current))
+      if (auto loop = dyn_cast<scf::ForOp>(result.getOwner())) {
+        enqueue(cast<scf::YieldOp>(loop.getBody()->getTerminator())
+                    .getOperand(result.getResultNumber()));
+        continue;
+      }
+    if (Operation *def = current.getDefiningOp()) {
+      if (auto ifOp = dyn_cast<scf::IfOp>(def)) {
+        if (ifOp.getNumResults() == 1)
+          for (Region *region : ifOp.getRegions())
+            enqueue(cast<scf::YieldOp>(&region->front().back())
+                        .getOperand(0));
+        continue;
+      }
+      if (auto select = dyn_cast<arith::SelectOp>(def)) {
+        enqueue(select.getTrueValue());
+        enqueue(select.getFalseValue());
+        continue;
+      }
+      Value source;
+      if (auto view = dyn_cast<ttg::MemDescIndexOp>(def))
+        source = view.getSrc();
+      else if (auto reshape = dyn_cast<ttg::MemDescReshapeOp>(def))
+        source = reshape.getSrc();
+      else if (auto slice = dyn_cast<ttg::MemDescSubsliceOp>(def))
+        source = slice.getSrc();
+      else if (auto reinterpret =
+                   dyn_cast<ttg::MemDescReinterpretOp>(def))
+        source = reinterpret.getSrc();
+      if (source) {
+        enqueue(source);
+        continue;
+      }
+    }
+    if (auto alloc =
+            dyn_cast_or_null<ttg::LocalAllocOp>(current.getDefiningOp()))
+      if (!alloc.getSrc())
+        allocs.insert(current);
+  }
+}
+
+// Slot allocations owned by loops where BlockPingpong actually applied.
+// Both sync passes must follow the loop's actual schedule instead of the
+// module-level ping-pong option: a loop that requested BPP but did not
+// match is an ordinary pipeline owned by SynchronizeBufferLdsCopies. Slots
+// are collected from the applied loops' yields (ring-carried form) and from
+// the copies and reads inside their bodies (static-buffer form, where the
+// slots are function-level allocations referenced directly).
+static DenseSet<Value> appliedPingpongSlots(Operation *root) {
+  DenseSet<Value> slots;
+  root->walk([&](scf::ForOp loop) {
+    if (!loop->hasAttr("hcu.block_pingpong.applied"))
+      return;
+    for (Value operand :
+         cast<scf::YieldOp>(loop.getBody()->getTerminator()).getOperands())
+      collectSlotAllocs(operand, slots);
+    loop->walk([&](triton::amdgpu::BufferLoadToLocalOp copy) {
+      collectSlotAllocs(copy.getDest(), slots);
+    });
+    loop->walk([&](ttg::LocalLoadOp load) {
+      collectSlotAllocs(load.getSrc(), slots);
+    });
+  });
+  return slots;
+}
+
+static bool isAppliedPingpongSlot(Value value,
+                                  const DenseSet<Value> &slots) {
+  if (slots.empty())
+    return false;
+  DenseSet<Value> leaves;
+  collectSlotAllocs(value, leaves);
+  for (Value leaf : leaves)
+    if (slots.contains(leaf))
+      return true;
+  return false;
+}
+
+// A copy scheduled by a loop BlockPingpong applied is published by
+// ScheduleBufferToLds, not by the standalone synchronization pass. Loop
+// membership covers bodies whose destinations are not ring allocations
+// (single static buffers); slot identity covers the prologue copies that
+// feed a ring before the loop.
+static bool inAppliedPingpongLoop(Operation *op) {
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (auto loop = dyn_cast<scf::ForOp>(parent))
+      if (loop->hasAttr("hcu.block_pingpong.applied"))
+        return true;
+  return false;
+}
+
+static bool isAppliedPingpongCopy(triton::amdgpu::BufferLoadToLocalOp copy,
+                                  const DenseSet<Value> &slots) {
+  return inAppliedPingpongLoop(&*copy) ||
+         isAppliedPingpongSlot(copy.getDest(), slots);
+}
+
 // Standalone synchronization remains a separate pass from copy conversion.
 // Pipeline users instead let ScheduleBufferToLds own publication and reuse.
 struct TritonHCUSynchronizeBufferLdsCopiesPass
@@ -1343,32 +1504,194 @@ struct TritonHCUSynchronizeBufferLdsCopiesPass
           TritonHCUSynchronizeBufferLdsCopiesPass> {
   using Base::Base;
 
-  void runOnOperation() override {
-    // Snapshot the producers before inserting synchronization. Native generic
-    // async copies keep their existing synchronization path unchanged.
-    SmallVector<triton::amdgpu::BufferLoadToLocalOp> copies;
-    getOperation().walk([&](triton::amdgpu::BufferLoadToLocalOp copy) {
-      if (isa<triton::gpu::HCUBufferLdsSharedEncodingAttr>(
-              copy.getDest().getType().getEncoding()))
-        copies.push_back(copy);
+  // Per-generation publication for pipelined rings.
+  //
+  // A ring has P slots; iteration i reads generation i while its in-loop
+  // copies refill generation i+P. Draining every copy (commit + wait(0) +
+  // barrier right after each) puts the DMA latency on the MMA critical
+  // path. Instead, in-loop ring copies only commit their group, and each ring
+  // read waits for exactly the generation it consumes: at that read, exactly
+  // C*P-1 groups (C = ring copies per iteration) were committed after the
+  // group that produced the data, so async_wait num=C*P-1 releases precisely
+  // when the data is complete while the following C*P-1 generations may
+  // still be in flight. The block barrier after the wait publishes the data
+  // to all warps. In steady state the waits are no-ops: the next generation
+  // is issued right after the reads that free its slot and completes under
+  // the MMA.
+  //
+  // Prologue copies (outside the loop) keep the legacy full drain, so the
+  // loop starts with every prologue generation published and the uniform
+  // count is valid from iteration 0. A ring read after the loop (epilogue
+  // consumption) gets one explicit full drain before the first such read.
+  // Rings with nested or WASP-specialized copies/reads keep the conservative
+  // full-drain sequence.
+  void publishRingReads() {
+    struct RingLoop {
+      scf::ForOp loop;
+      DenseSet<Value> roots;
+      unsigned depth;  // P
+      unsigned copies; // C
+    };
+    SmallVector<RingLoop> rings;
+
+    getOperation().walk<WalkOrder::PostOrder>([&](scf::ForOp loop) {
+      // Loops BlockPingpong actually applied are published by
+      // ScheduleBufferToLds; the uniform C*P-1 count does not hold for
+      // their ping-pong bodies, so they must not be treated as ordinary
+      // rings here.
+      if (loop->hasAttr("hcu.block_pingpong.applied"))
+        return;
+      // Ring roots carried by this loop.
+      DenseSet<Value> roots;
+      for (Value operand : cast<scf::YieldOp>(loop.getBody()->getTerminator())
+                               .getOperands()) {
+        Value root = ringRoot(operand);
+        if (!root)
+          continue;
+        auto alloc = dyn_cast_or_null<ttg::LocalAllocOp>(root.getDefiningOp());
+        if (!alloc || alloc.getSrc())
+          continue;
+        auto desc = dyn_cast<ttg::MemDescType>(alloc.getType());
+        if (!desc || !requiresWrappedProducer(desc) ||
+            desc.getShape().front() < 1)
+          continue;
+        roots.insert(root);
+      }
+      if (roots.empty())
+        return;
+
+      // The uniform group count requires every ring copy and read of the
+      // loop to be flat in the body.
+      unsigned copies = 0, readCount = 0;
+      bool valid = true;
+      for (Operation &op : *loop.getBody()) {
+        if (auto copy = dyn_cast<triton::amdgpu::BufferLoadToLocalOp>(op)) {
+          if (roots.contains(ringRoot(copy.getDest()))) {
+            copies++;
+            if (copy->getParentOfType<triton::gpu::WarpSpecializeOp>())
+              valid = false;
+          }
+          continue;
+        }
+        if (auto read = dyn_cast<ttg::LocalLoadOp>(op))
+          if (roots.contains(ringRoot(read.getSrc())))
+            readCount++;
+      }
+      if (valid)
+        loop.getBody()->walk([&](Operation *op) {
+          if (op->getParentOp() == loop)
+            return; // top level of the body: already counted
+          if (auto copy = dyn_cast<triton::amdgpu::BufferLoadToLocalOp>(op))
+            if (roots.contains(ringRoot(copy.getDest())))
+              valid = false;
+          else if (auto read = dyn_cast<ttg::LocalLoadOp>(op))
+            if (roots.contains(ringRoot(read.getSrc())))
+              valid = false;
+        });
+      if (!valid || copies == 0 || readCount == 0)
+        return;
+
+      // Uniform ring depth across the used roots.
+      unsigned depth = 0;
+      for (Value root : roots) {
+        auto alloc = dyn_cast_or_null<ttg::LocalAllocOp>(root.getDefiningOp());
+        auto desc =
+            dyn_cast<ttg::MemDescType>(alloc ? alloc.getType() : Type());
+        if (!desc)
+          return;
+        unsigned p = desc.getShape().front();
+        if (depth && p != depth)
+          return;
+        depth = p;
+      }
+      rings.push_back(RingLoop{loop, roots, depth, copies});
     });
-    for (auto copy : copies) {
+
+    // Per-read publication: wait for the consumed generation + block barrier.
+    DenseSet<Operation *> ringReads;
+    SmallVector<std::pair<Operation *, unsigned>> epilogue;
+    for (auto &ring : rings) {
+      unsigned outstanding = ring.copies * ring.depth - 1;
+      for (Operation &op : *ring.loop.getBody())
+        if (auto read = dyn_cast<ttg::LocalLoadOp>(op))
+          if (ring.roots.contains(ringRoot(read.getSrc()))) {
+            OpBuilder builder(read);
+            triton::gpu::AsyncWaitOp::create(
+                builder, read.getLoc(), ValueRange{}, outstanding);
+            triton::gpu::LocalBarrierOp::create(builder, read.getLoc());
+            ringReads.insert(&op);
+          }
+    }
+    // One full drain before the first ring read outside the rings (epilogue).
+    Operation *firstEpilogue = nullptr;
+    getOperation().walk([&](ttg::LocalLoadOp read) {
+      if (firstEpilogue || ringReads.contains(read))
+        return;
+      Value root = ringRoot(read.getSrc());
+      for (auto &ring : rings)
+        if (ring.roots.contains(root) &&
+            !static_cast<Operation *>(ring.loop)
+                 ->isAncestor(read->getParentOp()))
+          firstEpilogue = read;
+    });
+    if (firstEpilogue) {
+      OpBuilder builder(firstEpilogue);
+      triton::gpu::AsyncWaitOp::create(
+          builder, firstEpilogue->getLoc(), ValueRange{}, 0);
+      triton::gpu::LocalBarrierOp::create(builder, firstEpilogue->getLoc());
+    }
+
+    // In-loop ring copies commit only; everything else keeps the legacy
+    // commit + full drain (+ barrier) sequence.
+    DenseSet<Operation *> ringCopies;
+    for (auto &ring : rings)
+      for (Operation &op : *ring.loop.getBody())
+        if (auto copy = dyn_cast<triton::amdgpu::BufferLoadToLocalOp>(op))
+          if (ring.roots.contains(ringRoot(copy.getDest())))
+            ringCopies.insert(&op);
+    DenseSet<Value> appliedSlots = appliedPingpongSlots(getOperation());
+    getOperation().walk([&](triton::amdgpu::BufferLoadToLocalOp copy) {
+      if (!isa<triton::gpu::HCUBufferLdsSharedEncodingAttr>(
+              copy.getDest().getType().getEncoding()))
+        return;
+      if (isAppliedPingpongCopy(copy, appliedSlots))
+        return; // Published by ScheduleBufferToLds.
       OpBuilder builder(copy);
       builder.setInsertionPointAfter(copy);
       auto commit = triton::gpu::AsyncCommitGroupOp::create(
           builder, copy.getLoc(), ValueRange{copy.getResult()});
+      if (ringCopies.contains(copy.getOperation()))
+        return;
       triton::gpu::AsyncWaitOp::create(
           builder, copy.getLoc(), ValueRange{commit.getResult()}, 0);
       if (!copy->getParentOfType<triton::gpu::WarpSpecializeOp>())
         triton::gpu::LocalBarrierOp::create(builder, copy.getLoc());
-    }
+    });
   }
+
+  void runOnOperation() override { publishRingReads(); }
 };
 
 struct TritonHCUScheduleBufferToLdsPass
     : impl::TritonHCUScheduleBufferToLdsBase<TritonHCUScheduleBufferToLdsPass> {
   using Base::Base;
   void runOnOperation() override {
+    // Publication follows the loop's actual schedule, not the module-level
+    // ping-pong option. This pass owns exactly the loops BlockPingpong
+    // applied (and the prologue copies feeding their rings); a module with
+    // no applied loop is published entirely by SynchronizeBufferLdsCopies.
+    // Running this pass's conservative wait(0) drains over unmatched loops
+    // would make every read also wait for the next generation's DMA,
+    // putting it on the current iteration's critical path.
+    bool hasAppliedLoop = false;
+    getOperation().walk([&](scf::ForOp loop) {
+      if (loop->hasAttr("hcu.block_pingpong.applied"))
+        hasAppliedLoop = true;
+    });
+    if (!hasAppliedLoop)
+      return;
+    DenseSet<Value> appliedSlots = appliedPingpongSlots(getOperation());
+
     triton::HCU::configureScheduledCopyCache(getOperation());
     scheduleStaticCopiesBeforeReads(getOperation());
 
@@ -1378,7 +1701,8 @@ struct TritonHCUScheduleBufferToLdsPass
     // Publication waits count these groups, never individual VMEM events.
     SmallVector<triton::amdgpu::BufferLoadToLocalOp> asyncCopies;
     getOperation().walk([&](triton::amdgpu::BufferLoadToLocalOp copy) {
-      asyncCopies.push_back(copy);
+      if (isAppliedPingpongCopy(copy, appliedSlots))
+        asyncCopies.push_back(copy);
     });
     for (auto copy : asyncCopies) {
       OpBuilder builder(copy);
@@ -1395,7 +1719,8 @@ struct TritonHCUScheduleBufferToLdsPass
         return signalPassFailure();
       asyncCopies.clear();
       getOperation().walk([&](triton::amdgpu::BufferLoadToLocalOp copy) {
-        asyncCopies.push_back(copy);
+        if (isAppliedPingpongCopy(copy, appliedSlots))
+          asyncCopies.push_back(copy);
       });
     }
     resolvePublicationWaits(getOperation());
@@ -1410,7 +1735,9 @@ struct TritonHCUScheduleBufferToLdsPass
       auto synced =
           load->getAttrOfType<BoolAttr>("ttg.amdg.syncedViaAsyncWait");
       if (requiresWrappedProducer(load.getSrc().getType()) &&
-          !(synced && synced.getValue()))
+          !(synced && synced.getValue()) &&
+          (inAppliedPingpongLoop(&*load) ||
+           isAppliedPingpongSlot(load.getSrc(), appliedSlots)))
         drainReads.push_back(load);
     });
     for (auto load : drainReads) {

@@ -346,6 +346,10 @@ module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 64 : i32,
         if synchronization == "standalone":
             hcu.passes.ttgpuir.add_synchronize_buffer_lds_copies(pm)
         elif synchronization == "pipeline":
+            # Mirror the real pipeline order: ownership is per loop, so the
+            # sync pass runs first and owns modules without applied loops;
+            # the schedule pass follows and no-ops there.
+            hcu.passes.ttgpuir.add_synchronize_buffer_lds_copies(pm)
             hcu.passes.ttgpuir.add_schedule_buffer_to_lds(pm)
 
     if contract and extra_use:
@@ -963,3 +967,192 @@ def test_unsupported_copy_retains_generic_pipeline(monkeypatch, arch, dtype,
     assert not metadata["uses_bank_conflict_aware_lds_placement"]
     assert "#ttg.hcu_buffer_lds_shared" not in str(module)
     assert "hcu.block_pingpong.static_buffers" not in str(module)
+
+
+def _compile_ttgir(monkeypatch, kernel, signature, constexprs, arch="gfx946", **opts):
+    """Compile ``kernel`` through make_ttgir with async copy on; return (ttgir, metadata)."""
+    from triton.compiler import ASTSource
+    from triton._C.libtriton import ir
+
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    backend = HIPBackend(GPUTarget("hip", arch, 64))
+    options = backend.parse_options(dict(use_async_copy=True, matrix_instr_nonkdim=16, **opts))
+    context = ir.context()
+    ir.load_dialects(context)
+    backend.load_dialects(context)
+    # Pointers are 16-byte aligned and 32-bit addressable; the trailing int is aligned too.
+    num_pointers = sum(1 for t in signature.values() if t.startswith("*"))
+    attrs = {(i,): [["tt.divisibility", 16], ["tt.pointer_range", 32]]
+             for i in range(num_pointers)} | {(num_pointers,): [["tt.divisibility", 16]]}
+    source = ASTSource(kernel, signature, constexprs=constexprs, attrs=attrs)
+    module = source.make_ir(options, backend.get_codegen_implementation(options),
+                            backend.get_module_map(), context)
+    metadata = {}
+    module = backend.make_ttir(module, metadata, options)
+    return str(backend.make_ttgir(module, metadata, options)), metadata
+
+
+def _loop_body(text):
+    return text[text.index("scf.for"):text.rindex("scf.yield")]
+
+
+def _first_loop_body(text):
+    # The body up to the loop's own terminator.  The epilogue's tail reads
+    # legally follow the last in-loop copy, so a whole-function scan would
+    # mis-scope the in-place invariants.
+    start = text.index("scf.for")
+    return text[start:text.index("scf.yield", start)]
+
+
+def _in_place_copies_guarded_by_barrier(loop_body):
+    # In-place copies are immediately preceded by the race-closure barrier:
+    # in every warp the reads of the written slot complete (at the barrier)
+    # before any warp issues its copy.
+    lines = [line for line in loop_body.splitlines() if line.strip()]
+    return sum(
+        1 for i, line in enumerate(lines)
+        if i > 0 and "amdg.buffer_load_to_local" in line
+        and "ttg.local_barrier" in lines[i - 1])
+
+
+@pytest.mark.parametrize("num_stages", [2, 3, 4])
+@pytest.mark.parametrize("pingpong", [False, True])
+def test_pipelined_copy_crosses_global_write(monkeypatch, pingpong, num_stages):
+    # A global write in the loop body still selects the in-place primary:
+    # the reads move ahead of the copy at the original load, and the
+    # per-generation publication (wait num=C*P-1 + barrier before each ring
+    # read) carries the ring. A BlockPingpong request that matches no loop
+    # must not change that.
+    from buffer_lds_test_utils import _store_in_loop_gemm
+
+    text, metadata = _compile_ttgir(
+        monkeypatch, _store_in_loop_gemm,
+        dict(a="*fp16", b="*fp16", c="*fp16", d="*fp16", K="i32"), dict(BK=64),
+        use_block_pingpong=pingpong, num_warps=4, num_stages=num_stages)
+    assert metadata["uses_bank_conflict_aware_lds_placement"]
+    assert "hcu.block_pingpong.applied" not in text
+    assert "amdg.buffer_load_to_local" in text
+    assert "ttg.local_store" not in text
+    assert re.search(rf"local_alloc : \(\) -> !ttg.memdesc<{num_stages - 1}x", text)
+    body = _loop_body(text)
+    assert body.index("amdg.buffer_load_to_local") < body.index("amdg.buffer_store")
+    # The in-place fallback only fires on region-free bodies, so the first
+    # yield after the loop is the loop's own terminator (the epilogue's tail
+    # reads legally stay outside it).
+    start = text.index("scf.for")
+    loop_body = text[start:text.index("scf.yield", start)]
+    # The dot's reads must be moved ahead of the copies that overwrite their
+    # slot: no read may remain after the copies (the broken schedule left
+    # the reads below the copies, so the dot consumed the freshly written
+    # generation).
+    assert loop_body.index("ttg.local_load") < loop_body.index("amdg.buffer_load_to_local")
+    assert loop_body.rindex("ttg.local_load") < loop_body.rindex("amdg.buffer_load_to_local")
+    # Every in-place copy carries its race-closure barrier (reads complete in
+    # every warp before any warp issues the copy of the overwritten slot).
+    assert loop_body.count("amdg.buffer_load_to_local") == \
+        _in_place_copies_guarded_by_barrier(loop_body)
+    # Per-generation publication (non-PP sync owner): the consumed
+    # generation's wait (num=C*P-1) + barrier precedes each ring read and no
+    # full drain remains in the loop. With the pingpong option, publication
+    # is owned by ScheduleBufferToLds instead, which conservatively drains
+    # (num=0) before each ring read.
+    if not pingpong:
+        assert f"{{num = {2 * num_stages - 3} : i32}}" in loop_body
+        assert "{num = 0 : i32}" not in loop_body
+
+
+@pytest.mark.parametrize("arch", ["gfx936", "gfx938", "gfx946"])
+def test_matched_gemm_keeps_block_pingpong(monkeypatch, arch):
+    # A loop BlockPingpong accepts must stay on its own schedule; the direct
+    # LDS copy rewrite must not disturb its producer-consumer partitions.
+    from buffer_lds_test_utils import _runtime_k_gemm
+
+    text, _ = _compile_ttgir(
+        monkeypatch, _runtime_k_gemm, dict(a="*fp16", b="*fp16", c="*fp16", K="i32"),
+        dict(COLUMN_B=False, BK=16), arch=arch, use_block_pingpong=True,
+        num_warps=8, num_stages=4, optimize_epilogue=False)
+    assert "hcu.block_pingpong.applied" in text
+
+
+@pytest.mark.parametrize("num_stages", [2, 3, 4])
+def test_loop_without_global_write_keeps_register_staged_path(monkeypatch, num_stages):
+    # Selected BufferLds loops remain register-staged: use one fewer slot than
+    # num_stages and synchronize copies before each consumer.
+    from buffer_lds_test_utils import _runtime_k_gemm
+
+    text, _ = _compile_ttgir(
+        monkeypatch, _runtime_k_gemm, dict(a="*fp16", b="*fp16", c="*fp16", K="i32"),
+        dict(COLUMN_B=False, BK=16), num_warps=8, num_stages=num_stages,
+        optimize_epilogue=False)
+    assert re.search(rf"local_alloc : \(\) -> !ttg.memdesc<{num_stages - 1}x", text)
+    assert "ttg.local_barrier" in _loop_body(text)
+
+
+@pytest.mark.parametrize("num_stages", [2, 3, 4])
+def test_loop_without_global_write_uses_in_place_primary(monkeypatch,
+                                                         num_stages):
+    # In-place is the primary schedule: the copy sits at the original load
+    # (ahead of the dot) so its DMA flies under the MMA, and the
+    # per-generation publication replaces the full post-copy drain: every
+    # ring read is preceded by wait(num=C*P-1) + barrier with C=2 ring
+    # copies and P=num_stages-1 slots.
+    from buffer_lds_test_utils import _runtime_k_gemm
+
+    text, _ = _compile_ttgir(
+        monkeypatch, _runtime_k_gemm, dict(a="*fp16", b="*fp16", c="*fp16", K="i32"),
+        dict(COLUMN_B=False, BK=16), num_warps=8, num_stages=num_stages,
+        optimize_epilogue=False)
+    loop_body = _first_loop_body(text)
+    assert loop_body.index("ttg.local_load") < loop_body.index("amdg.buffer_load_to_local")
+    assert loop_body.rindex("ttg.local_load") < loop_body.rindex("amdg.buffer_load_to_local")
+    assert loop_body.count("amdg.buffer_load_to_local") == \
+        _in_place_copies_guarded_by_barrier(loop_body)
+    assert f"{{num = {2 * num_stages - 3} : i32}}" in loop_body
+    assert "{num = 0 : i32}" not in loop_body
+
+
+@pytest.mark.parametrize("pingpong", [False, True])
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_256_tile_in_loop_store_in_place_fallback(monkeypatch, pingpong,
+                                                  num_stages):
+    # PP-eligible geometry (256x256, 8 warps) plus an in-loop global write.
+    # BlockPingpong rejects loops with in-loop stores, so the loop must stay
+    # on the ordinary pipeline and the in-place fallback (not retiming) must
+    # resolve the wrap.  If BlockPingpong ever accepts such loops, the
+    # in-place fallback must not misfire on the pingpong schedule.
+    from buffer_lds_test_utils import _store_in_loop_gemm_256
+
+    text, _ = _compile_ttgir(
+        monkeypatch, _store_in_loop_gemm_256,
+        dict(a="*fp16", b="*fp16", c="*fp16", d="*fp16", K="i32"), dict(BK=16),
+        use_block_pingpong=pingpong, num_warps=8, num_stages=num_stages)
+    assert "ttg.local_store" not in text
+    loop_body = _first_loop_body(text)
+    n_copies = loop_body.count("amdg.buffer_load_to_local")
+    assert n_copies > 0
+    if "hcu.block_pingpong.applied" in text:
+        # Pingpong schedule: the in-place fallback must not have fired.
+        assert _in_place_copies_guarded_by_barrier(loop_body) == 0
+    else:
+        # Ordinary pipeline: every wrap resolved in place, each copy guarded
+        # by its barrier, all slot reads ahead of the copies, and the
+        # per-generation publication (wait C*P-1, C=2) instead of a full
+        # wait(0) drain, which would also wait for the next generation's
+        # in-flight DMA and put it on the current iteration's critical path.
+        assert _in_place_copies_guarded_by_barrier(loop_body) == n_copies
+        assert loop_body.index("ttg.local_load") < loop_body.index("amdg.buffer_load_to_local")
+        assert loop_body.rindex("ttg.local_load") < loop_body.rindex("amdg.buffer_load_to_local")
+        assert f"{{num = {2 * num_stages - 3} : i32}}" in loop_body
+        assert "{num = 0 : i32}" not in loop_body
+
+
+def test_single_stage_loop_with_global_write_is_unchanged(monkeypatch):
+    # num_stages=1 is never pipelined, so it keeps the original single-slot
+    # BufferLds schedule.
+    from buffer_lds_test_utils import _store_in_loop_gemm
+
+    text, _ = _compile_ttgir(
+        monkeypatch, _store_in_loop_gemm,
+        dict(a="*fp16", b="*fp16", c="*fp16", d="*fp16", K="i32"), dict(BK=64),
+        num_warps=4, num_stages=1)
+    assert "ttg.local_barrier" in _loop_body(text)
