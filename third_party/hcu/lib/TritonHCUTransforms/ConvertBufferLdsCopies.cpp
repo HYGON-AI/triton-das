@@ -44,17 +44,26 @@ static bool requiresWrappedProducer(ttg::MemDescType type) {
   return isa<ttg::HCUBufferLdsSharedEncodingAttr>(type.getEncoding());
 }
 
-// TODO(hcu): Split an initialized local_alloc into an empty allocation before
-// the original global load and emit buffer_load_to_local at that load's exact
-// program point. That avoids retiming the read and should become a shared
-// primitive for BufferLds and generic async copy. The generic path can then
-// diagnose or fall back for unsupported masks/other values without leaving an
-// unlowered buffer_load_to_local operation. Until that refactor is complete,
-// BufferLds selection rejects sources that would cross a global write.
-// Retiming a global read is legal only while its source is unchanged. This
-// deliberately conservative check admits shared-memory effects, but rejects
-// global writes, atomics, calls and unknown effects in the enclosing prefix
-// (including the entire loop containing the new read).
+// Pipelined loop copies are rewritten in place, at the original load
+// position: the copy issues right after the reads that free its slot, so
+// its DMA completes under the MMA while the synchronize pass publishes each
+// generation at its consume point (wait for the consumed generation + block
+// barrier before each read) instead of draining every copy. In-place
+// emission puts the copy before the same-iteration reads of the slot it
+// overwrites, so it additionally proves every such read can move before the
+// copy, and inserts a local barrier between the reads and the copy: in
+// every warp the reads of the written slot precede the barrier and the copy
+// follows it, so all warps' reads complete (at the barrier) before any warp
+// issues its copy. That closes the cross-warp read/write race formally
+// instead of relying on the HBM latency margin. Retimed emission (copy at
+// the store, after the dot) is the fallback when the read-before-copy proof
+// fails or the loop is WASP-specialized. The
+// initialized-allocation fallback below still retimes its producer; future
+// work should make direct placement a shared primitive for other async-copy
+// users. Retiming a global read is legal only while its source is unchanged.
+// This deliberately conservative check admits shared-memory effects, but
+// rejects global writes, atomics, calls and unknown effects in the enclosing
+// prefix (including the entire loop containing the new read).
 static bool preservesGlobalSource(Operation *op) {
   // UTC warmup is modeled as a GlobalMemory write solely to keep ordinary
   // payload loads below the cache-priming request. Converting a later payload
@@ -130,6 +139,166 @@ static bool canRetimeRead(Operation *source, Operation *destination) {
     return true;
   }
   return canRetimeRead(destination);
+}
+
+// Follow memdesc views and loop-carried slot arguments back to the physical
+// allocation they address.
+static Value rootSharedAlloc(Value value) {
+  for (;;) {
+    if (auto argument = dyn_cast<BlockArgument>(value)) {
+      auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+      if (!loop || argument.getOwner() != loop.getBody())
+        break;
+      value = loop.getInitArgs()[argument.getArgNumber() - 1];
+      continue;
+    }
+    auto definingOp = value.getDefiningOp();
+    if (!definingOp)
+      break;
+    Value source;
+    if (auto view = dyn_cast<ttg::MemDescIndexOp>(definingOp))
+      source = view.getSrc();
+    else if (auto reshape = dyn_cast<ttg::MemDescReshapeOp>(definingOp))
+      source = reshape.getSrc();
+    else if (auto slice = dyn_cast<ttg::MemDescSubsliceOp>(definingOp))
+      source = slice.getSrc();
+    else if (auto reinterpret = dyn_cast<ttg::MemDescReinterpretOp>(definingOp))
+      source = reinterpret.getSrc();
+    if (!source)
+      break;
+    value = source;
+  }
+  return value;
+}
+
+// Moving a local_load earlier can only expose it to operations that write
+// shared memory or have unknown side effects. Global writes do not matter:
+// the read stays in SSA order relative to its users and reads the same LDS
+// slot. Region ops are proven recursively over their whole content, which
+// is conservative for cyclic regions but keeps a nested local_store from
+// being treated as harmless just because the region only advertises the
+// generic Memory resource.
+static bool preservesLdsReadSource(Operation *op, Value readRoot) {
+  // A local barrier only orders warps; it never writes shared memory. A read
+  // moved across it (from after to before) still precedes the other pattern's
+  // copy in every warp, and the barrier only reinforces that protocol, so it
+  // is safe to cross. This keeps the A/B pattern applications
+  // order-independent when each has already inserted its own barrier.
+  if (isa<ttg::LocalBarrierOp>(op))
+    return true;
+  if (isa<ttg::LocalAllocOp, ttg::LocalStoreOp, ttg::LocalDeallocOp,
+          gpu::BarrierOp>(op))
+    return false;
+  if (op->getNumRegions() > 0) {
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        for (Operation &nested : block)
+          if (!preservesLdsReadSource(&nested, readRoot))
+            return false;
+    return true;
+  }
+  if (isMemoryEffectFree(op))
+    return true;
+  auto effects = dyn_cast<MemoryEffectOpInterface>(op);
+  if (!effects)
+    return false;
+  SmallVector<MemoryEffects::EffectInstance> instances;
+  effects.getEffectsOnResource(triton::gpu::SharedMemory::get(), instances);
+  if (!llvm::all_of(instances, [](auto &instance) {
+        return isa<MemoryEffects::Read>(instance.getEffect());
+      }))
+  {
+    if (auto copy = dyn_cast<triton::amdgpu::BufferLoadToLocalOp>(op);
+        copy && !instances.empty() &&
+        rootSharedAlloc(copy.getDest()) != rootSharedAlloc(readRoot))
+      return true;
+    return false;
+  }
+  return true;
+}
+
+static bool canMoveSharedReadBefore(ttg::LocalLoadOp read, Operation *anchor) {
+  if (read->getBlock() != anchor->getBlock() || !anchor->isBeforeInBlock(read))
+    return false;
+  // Every operand must dominate the new position, or the move is illegal.
+  for (Value operand : read->getOperands()) {
+    if (auto definingOp = operand.getDefiningOp()) {
+      if (definingOp->getBlock() != read->getBlock() ||
+          !definingOp->isBeforeInBlock(anchor))
+        return false;
+    }
+  }
+  for (Operation *op = anchor->getNextNode(); op && op != read;
+       op = op->getNextNode())
+    if (!preservesLdsReadSource(op, read.getSrc()))
+      return false;
+  return true;
+}
+
+// The pipelined ring writes the next generation into the very slot the
+// current iteration reads: with S slots, the generation-N+1 copy overwrites
+// the slot holding the data generation N is about to consume, and program
+// order is the only protection. Emission at the original load puts the copy
+// before those reads, so every shared read of the written allocation that
+// follows the copy point must be proven movable before it. This covers every
+// ring depth, not just a single physical slot. Returns nullopt when the
+// proof fails; the caller must fall back (retiming or the original error).
+static std::optional<SmallVector<ttg::LocalLoadOp, 2>>
+inPlaceCopyReads(Operation *copyPoint, scf::ForOp loop, Value writtenSlot) {
+  Value writtenRoot = rootSharedAlloc(writtenSlot);
+  SmallVector<ttg::LocalLoadOp, 2> reads;
+  for (Operation *op = copyPoint->getNextNode(); op;
+       op = op->getNextNode()) {
+    // A nested region can hide reads of the written slot that this scan
+    // cannot reach or move; give up on the in-place fallback rather than
+    // prove incomplete.
+    if (op->getNumRegions() > 0)
+      return std::nullopt;
+    auto read = dyn_cast<ttg::LocalLoadOp>(op);
+    if (!read || rootSharedAlloc(read.getSrc()) != writtenRoot)
+      continue;
+    if (!canMoveSharedReadBefore(read, copyPoint))
+      return std::nullopt;
+    reads.push_back(read);
+  }
+  llvm::sort(reads, [](ttg::LocalLoadOp lhs, ttg::LocalLoadOp rhs) {
+    return lhs->isBeforeInBlock(rhs);
+  });
+  return reads;
+}
+
+static void moveReadsBeforeCopy(ArrayRef<ttg::LocalLoadOp> reads,
+                                Operation *copyPoint) {
+  for (auto read : llvm::reverse(reads))
+    read->moveBefore(copyPoint);
+}
+
+static bool movePureOperationBefore(Operation *operation, Operation *point) {
+  if (operation->getBlock() != point->getBlock())
+    return true;
+  if (!isMemoryEffectFree(operation) || !operation->getRegions().empty())
+    return false;
+  for (Value operand : operation->getOperands())
+    if (auto definingOp = operand.getDefiningOp();
+        definingOp && definingOp->getBlock() == point->getBlock() &&
+        !movePureOperationBefore(definingOp, point))
+      return false;
+  if (point->isBeforeInBlock(operation))
+    operation->moveBefore(point);
+  return true;
+}
+
+static Value materializeNextSlotBefore(PatternRewriter &rewriter,
+                                       Operation *point, Value nextSlot) {
+  auto view = nextSlot.getDefiningOp<ttg::MemDescIndexOp>();
+  if (!view)
+    return {};
+  if (auto index = view.getIndex().getDefiningOp();
+      index && !movePureOperationBefore(index, point))
+    return {};
+  rewriter.setInsertionPoint(point);
+  return rewriter.create<ttg::MemDescIndexOp>(
+      view.getLoc(), view.getType(), view.getSrc(), view.getIndex());
 }
 
 // A carried tensor and carried offsets must describe the same load on BOTH
@@ -270,12 +439,77 @@ struct CombineBufferLdsBufferLoadToLocal
   matchAndRewrite(ttg::LocalStoreOp store,
                   PatternRewriter &rewriter) const override {
     auto load = store.getSrc().getDefiningOp<triton::amdgpu::BufferLoadOp>();
+    if (load && load->getBlock() == store->getBlock() &&
+        load->isBeforeInBlock(store) && !load.getOther() &&
+        load.getResult().hasOneUse() &&
+        isBufferLdsTensorAndMemDesc(cast<RankedTensorType>(load.getType()),
+                                    store.getDst().getType())) {
+      auto loop = dyn_cast<scf::ForOp>(store->getParentOp());
+      // In-place is the primary schedule for plain pipelined loops: the
+      // early issue lets the DMA fly under the MMA while the synchronize
+      // pass publishes per generation. A global write between the load and
+      // the store no longer forces a different schedule: the reads simply
+      // move ahead of the copy. Retiming stays as the fallback when the
+      // read-before-copy proof fails (or the loop is WASP-specialized).
+      bool inWasp = load->getParentOfType<ttg::WarpSpecializeOp>() != nullptr;
+      if (loop && !inWasp) {
+        auto reads = inPlaceCopyReads(load, loop, store.getDst());
+        if (reads) {
+          Value slot =
+              materializeNextSlotBefore(rewriter, load, store.getDst());
+          if (slot) {
+            auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+            unsigned slotIndex = 0;
+            bool carried = false;
+            for (auto [index, operand] : llvm::enumerate(yield.getOperands()))
+              if (operand == store.getDst()) {
+                slotIndex = index;
+                carried = true;
+              }
+            if (carried) {
+              yield->setOperand(slotIndex, slot);
+              auto tokenType = rewriter.getType<ttg::AsyncTokenType>();
+              rewriter.setInsertionPoint(load);
+              auto barrier = ttg::LocalBarrierOp::create(rewriter, load.getLoc());
+              auto copy = triton::amdgpu::BufferLoadToLocalOp::create(
+                  rewriter, load.getLoc(), tokenType, slot,
+                  load.getPtr(), load.getOffsets(), load.getMask(), Value(),
+                  load.getStride(), load.getCache(),
+                  /*contiguity=*/8);
+              moveReadsBeforeCopy(*reads, barrier);
+              // The barrier above closes the cross-warp race on the written
+              // slot (reads complete in every warp before any copy issues);
+              // the synchronize pass then publishes the copy (wait + barrier)
+              // right after it, matching the retimed schedule's contract that
+              // the next generation is only visible after the fence.
+              rewriter.eraseOp(store);
+              rewriter.eraseOp(load);
+              return success();
+            }
+          }
+        }
+      }
+    }
+
     if (!load || !canRetimeRead(load, store) || load.getOther() ||
         !load.getResult().hasOneUse() ||
         !isBufferLdsTensorAndMemDesc(cast<RankedTensorType>(load.getType()),
                                      store.getDst().getType()))
       return failure();
 
+    // The in-place attempt may have moved the insertion point (a slot view
+    // materialized at the load); pin the retimed copy to the store.
+    rewriter.setInsertionPoint(store);
+    // The in-place schedule inserts a barrier before the copy so that no
+    // warp overwrites a slot until every warp has completed all earlier
+    // reads of it. The retimed copy at the store has no such barrier, and
+    // the per-generation publication commits it without a post-copy drain,
+    // so restore the same protocol here. BPP-applied loops own their own
+    // publication schedule; WASP copies keep the legacy post-copy barrier.
+    if (auto copyLoop = dyn_cast<scf::ForOp>(store->getParentOp()))
+      if (!store->getParentOfType<ttg::WarpSpecializeOp>() &&
+          !copyLoop->hasAttr("hcu.block_pingpong.applied"))
+        ttg::LocalBarrierOp::create(rewriter, store.getLoc());
     auto tokenType = rewriter.getType<ttg::AsyncTokenType>();
     triton::amdgpu::BufferLoadToLocalOp::create(
         rewriter, store.getLoc(), tokenType, store.getDst(), load.getPtr(),
@@ -294,6 +528,59 @@ struct CombineBufferLdsLoopBufferLoadToLocal
 
   LogicalResult matchAndRewrite(ttg::LocalStoreOp store,
                                 PatternRewriter &rewriter) const override {
+    if (auto sourceResult = dyn_cast<OpResult>(store.getSrc())) {
+      if (auto loop = dyn_cast<scf::ForOp>(sourceResult.getOwner())) {
+        auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+        if (auto load = yield.getOperand(sourceResult.getResultNumber())
+                            .getDefiningOp<triton::amdgpu::BufferLoadOp>();
+            load && load->getBlock() == store->getBlock() &&
+            load->isBeforeInBlock(store)) {
+          auto srcTy = cast<RankedTensorType>(load.getType());
+          if (!load.getOther() && load.getResult().hasOneUse() &&
+              isBufferLdsTensorAndMemDesc(srcTy, store.getDst().getType())) {
+            // Same contract as the same-block pattern above: in-place is
+            // primary, gated only by the proof that every read of the
+            // written allocation can precede the copy.
+            if (!load->getParentOfType<ttg::WarpSpecializeOp>()) {
+              auto reads = inPlaceCopyReads(load, loop, store.getDst());
+              if (reads) {
+                Value slot =
+                    materializeNextSlotBefore(rewriter, load, store.getDst());
+                if (slot) {
+                  unsigned slotIndex = 0;
+                  bool carried = false;
+                  for (auto [index, operand] :
+                       llvm::enumerate(yield.getOperands()))
+                    if (operand == store.getDst()) {
+                      slotIndex = index;
+                      carried = true;
+                    }
+                  if (carried) {
+                    yield->setOperand(slotIndex, slot);
+                    auto tokenType = rewriter.getType<ttg::AsyncTokenType>();
+                    rewriter.setInsertionPoint(load);
+                    auto barrier =
+                        ttg::LocalBarrierOp::create(rewriter, load.getLoc());
+                    auto copy = triton::amdgpu::BufferLoadToLocalOp::create(
+                        rewriter, load.getLoc(), tokenType, slot,
+                        load.getPtr(), load.getOffsets(), load.getMask(),
+                        Value(), load.getStride(), load.getCache(),
+                        /*contiguity=*/8);
+                    moveReadsBeforeCopy(*reads, barrier);
+                    // Same race closure and publication contract as the
+                    // same-block pattern above.
+                    rewriter.eraseOp(store);
+                    rewriter.eraseOp(load);
+                    return success();
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     auto srcTy = dyn_cast<RankedTensorType>(store.getSrc().getType());
     if (!isBufferLdsTensorAndMemDesc(srcTy, store.getDst().getType()) ||
         !canRetimeRead(store))
@@ -335,6 +622,9 @@ struct CombineBufferLdsLoopBufferLoadToLocal
     if (!offsetIndex)
       return failure();
 
+    // The in-place attempt may have moved the insertion point (a slot view
+    // materialized at the load); pin the retimed copy to the store.
+    rewriter.setInsertionPoint(store);
     Value offsets = carried ? Value(loop.getRegionIterArgs()[*offsetIndex])
                             : loop.getResult(*offsetIndex);
     ProducerProof proof;
@@ -347,6 +637,17 @@ struct CombineBufferLdsLoopBufferLoadToLocal
     }
     Value mask = materializeMask(rewriter, store.getLoc(), proof,
                                  carried ? loop : scf::ForOp());
+    // Same pre-copy barrier protocol as the same-block pattern above: the
+    // per-generation publication commits this copy without a post-copy
+    // drain, so the slot overwrite must wait for every warp's earlier
+    // reads. Created only after the producer proof succeeded so that a
+    // failed pattern leaves no barrier behind. BPP-applied loops own their
+    // own publication schedule; WASP copies keep the legacy post-copy
+    // barrier.
+    if (auto copyLoop = dyn_cast<scf::ForOp>(store->getParentOp()))
+      if (!store->getParentOfType<ttg::WarpSpecializeOp>() &&
+          !copyLoop->hasAttr("hcu.block_pingpong.applied"))
+        ttg::LocalBarrierOp::create(rewriter, store.getLoc());
     triton::amdgpu::BufferLoadToLocalOp::create(
         rewriter, store.getLoc(), rewriter.getType<ttg::AsyncTokenType>(),
         store.getDst(), load.getPtr(), offsets, mask, Value(), load.getStride(),
@@ -456,10 +757,11 @@ struct TritonHCUConvertBufferLdsCopiesPass
         invalid = requiresWrappedProducer(copy.getResult().getType());
       if (!invalid)
         return WalkResult::advance();
-      op->emitError(
-          "buffer-to-LDS wrap requires a buffer_load_to_local producer; "
-          "generic LDS writes are not a safe fallback (disable "
-          "use_async_copy for this kernel)");
+      op->emitError()
+          << "buffer-to-LDS wrap requires a buffer_load_to_local producer ("
+          << op->getName() << " writes a wrapped tile); "
+          << "generic LDS writes are not a safe fallback (disable "
+          << "use_async_copy for this kernel)";
       return WalkResult::interrupt();
     });
     if (result.wasInterrupted())

@@ -665,3 +665,92 @@ def test_default_pingpong_gpu(monkeypatch, dtype, bm, bn, bk):
     assert not h.metadata.use_async_copy
     assert h.metadata.block_pingpong_async_global_prefetch is None
     assert h.metadata.block_pingpong_async_local_prefetch == 1
+
+
+@pytest.mark.parametrize("num_stages", [2, 3, 4])
+def test_store_in_loop_gemm_in_place_fallback_gpu(monkeypatch, num_stages):
+    # A global write in the loop blocks retiming, so the copy must fall back
+    # to in-place emission; the read-before-copy proof has to hold at every
+    # ring depth (the previous unconditional in-place schedule corrupted
+    # stages >= 3 by copying into a slot the dot still reads).
+    import torch
+    from buffer_lds_test_utils import _store_in_loop_gemm
+
+    if not torch.cuda.is_available():
+        pytest.skip("HCU device required")
+    arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    if arch not in ("gfx936", "gfx938"):
+        pytest.skip("gfx936/gfx938 schedule validation")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    torch.manual_seed(42)
+    k = 1024
+    a = torch.randn((64, k), device="cuda", dtype=torch.float16)
+    b = torch.randn((k, 64), device="cuda", dtype=torch.float16)
+    c = torch.empty((64, 64), device="cuda", dtype=torch.float16)
+    d = torch.empty((k, 64), device="cuda", dtype=torch.float16)
+    h = _store_in_loop_gemm[(1,)](
+        a, b, c, d, k, BK=64, use_async_copy=True, num_warps=4,
+        num_stages=num_stages, matrix_instr_nonkdim=16)
+    assert h.metadata.uses_bank_conflict_aware_lds_placement
+    acc = torch.zeros((64, 64), device="cuda", dtype=torch.float32)
+    for i in range(0, k, 64):
+        acc = acc + a[:, i:i + 64].float() @ b[i:i + 64, :].float()
+        torch.testing.assert_close(d[i:i + 64].float(), acc, atol=0.05, rtol=0.05)
+    torch.testing.assert_close(c.float(), acc, atol=0.05, rtol=0.05)
+
+@triton.jit
+def _store_in_loop_gemm_256_multi(a, b, c, d, m, n, k,
+                                  BM: tl.constexpr, BN: tl.constexpr,
+                                  BK: tl.constexpr):
+    # Multi-CTA 256x256 store-in-loop GEMM.  The snapshot offset is i64 so
+    # d can exceed 2**31 elements: with a 32-bit offset, bid * m * n wraps
+    # past INT32_MAX and the stores silently hit memory far from d.
+    pm = tl.program_id(0) // tl.cdiv(n, BN)
+    pn = tl.program_id(0) % tl.cdiv(n, BN)
+    rows = pm * BM + tl.arange(0, BM)
+    cols = pn * BN + tl.arange(0, BN)
+    ks = tl.arange(0, BK)
+    ap = a + rows[:, None] * k + ks[None, :]
+    bp = b + ks[:, None] * n + cols[None, :]
+    acc = tl.zeros((BM, BN), tl.float32)
+    for i in range(0, k, BK):
+        acc = tl.dot(tl.load(ap), tl.load(bp), acc)
+        tl.store(d + (i // BK).to(tl.int64) * m * n
+                 + rows[:, None].to(tl.int64) * n + cols[None, :],
+                 acc.to(d.dtype.element_ty))
+        ap += BK
+        bp += BK * n
+    tl.store(c + rows[:, None] * n + cols[None, :], acc.to(c.dtype.element_ty))
+
+
+def test_store_in_loop_gemm_256_large_d_gpu(monkeypatch):
+    # Regression: 256x256 tiles with a snapshot buffer d exceeding 2**31
+    # elements.  The in-loop store offset i * m * n overflows int32 at
+    # i >= 128 (m * n = 16.7M), wrapping the 32-bit buffer offset negative
+    # and corrupting memory around d (or faulting on unmapped pages).
+    # int64 offsets keep every snapshot in range.
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("HCU device required")
+    arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    if arch not in ("gfx936", "gfx938"):
+        pytest.skip("gfx936/gfx938 schedule validation")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    torch.manual_seed(42)
+    m = n = 4096
+    k = 2080  # 130 chunks -> d = 130 * 16.7M > 2**31 elements
+    a = torch.randn((m, k), device="cuda", dtype=torch.float16)
+    b = torch.randn((k, n), device="cuda", dtype=torch.float16)
+    c = torch.empty((m, n), device="cuda", dtype=torch.float16)
+    d = torch.empty((k // 16, m, n), device="cuda", dtype=torch.float16)
+    _store_in_loop_gemm_256_multi[(triton.cdiv(m, 256) * triton.cdiv(n, 256),)](
+        a, b, c, d, m, n, k, BM=256, BN=256, BK=16, use_async_copy=True,
+        num_warps=8, num_stages=2, matrix_instr_nonkdim=16)
+    assert d.numel() > 2**31
+    acc = torch.zeros((m, n), device="cuda", dtype=torch.float32)
+    for i in range(0, k, 16):
+        acc = acc + a[:, i:i + 16].float() @ b[i:i + 16, :].float()
+        torch.testing.assert_close(
+            d[i // 16].float(), acc, atol=0.05, rtol=0.05)
+    torch.testing.assert_close(c.float(), acc, atol=0.05, rtol=0.05)

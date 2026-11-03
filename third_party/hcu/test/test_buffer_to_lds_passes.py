@@ -488,6 +488,26 @@ def test_loop_producer_requires_invariant_descriptor(tmp_path, capfd, vary, stor
     assert "buffer-to-LDS wrap requires" in capfd.readouterr().err
 
 
+def test_loop_producer_failure_leaves_no_barrier(tmp_path):
+    # A rejected loop-producer rewrite must not leave the pre-copy barrier
+    # behind: the barrier is a side-effecting op that no later pass removes,
+    # and the driver re-applies patterns over a mutated block, so a leak
+    # would accumulate one barrier per attempt.
+    source = with_buffer_to_lds(loop_producer_ir("initial_pointer", False), True)
+    path = tmp_path / "input.mlir"
+    path.write_text(source)
+    context = ir.context()
+    ir.load_dialects(context)
+    hcu.load_dialects(context)
+    module = ir.parse_mlir_module(str(path), context)
+    manager = ir.pass_manager(context)
+    manager.enable_debug()
+    hcu.passes.ttgpuir.add_convert_buffer_lds_copies(manager)
+    with pytest.raises(RuntimeError):
+        manager.run(module, "buffer_to_lds_test")
+    assert "ttg.local_barrier" not in str(module)
+
+
 @pytest.mark.parametrize("store_after_loop", [False, True])
 @pytest.mark.parametrize("write_position", ["none", "epilogue", "sibling",
                                             "before_loop", "loop_prefix",
