@@ -554,7 +554,10 @@ class HIPBackend(BaseBackend):
             options_args.append("-mllvm=-misched-regpressure=false")
 
         if options.amdgpu_enable_max_ilp_scheduling_strategy:
-            options_args.append("-mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true")
+            if clang_major == "22":
+                options_args.append("-mllvm=-amdgpu-sched-strategy=max-ilp")
+            else:
+                options_args.append("-mllvm=-amdgpu-enable-max-ilp-scheduling-strategy=true")
 
         if (options.arch in ("gfx946", "gfx948") and
                 not options.hcu_use_gfx946_sched_model_v2):
