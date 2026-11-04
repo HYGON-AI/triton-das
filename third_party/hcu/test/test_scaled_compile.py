@@ -819,7 +819,7 @@ def gluon_scaled_kernel(A, B, SA, SB, C, A_FORMAT: gl.constexpr, B_FORMAT: gl.co
     load_layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
     IK: gl.constexpr = 64 if A_FORMAT == "e2m1" and B_FORMAT == "e2m1" else 32
     mma: gl.constexpr = gl.amd.AMDMFMALayout(
-        version=4, instr_shape=[16, 16, IK], transposed=True, warps_per_cta=[2, 2])
+        version=4, instr_shape=[16, 16, IK], mmac_layout=gl.amd.MmacLayout.LIT, warps_per_cta=[2, 2])
     r = gl.arange(0, 64, layout=gl.SliceLayout(1, load_layout))
     ak = gl.arange(0, AK, layout=gl.SliceLayout(0, load_layout))
     bk = gl.arange(0, BK, layout=gl.SliceLayout(0, load_layout))

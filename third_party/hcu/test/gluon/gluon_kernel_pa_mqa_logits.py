@@ -32,7 +32,7 @@ try:
     _: gl.constexpr = gl.amd.AMDMFMALayout(
         version=4,
         instr_shape=[16, 16],
-        transposed=False,
+        mmac_layout=gl.amd.MmacLayout.LIT_LTS,
         warps_per_cta=[1, 1],
         tiles_per_warp=[1, 1],
     )
@@ -125,14 +125,14 @@ def _gluon_deepgemm_fp8_paged_mqa_logits(
         mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
             version=4,
             instr_shape=[16, 16],
-            transposed=False,
+            mmac_layout=gl.amd.MmacLayout.LIT_LTS,
             warps_per_cta=[1, NumWarps],
         )
     else:
         mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
             version=4,
             instr_shape=[16, 16, 32],
-            transposed=False,
+            mmac_layout=gl.amd.MmacLayout.LIT_LTS,
             warps_per_cta=[1, NumWarps],
         )
     mfma_layout_a: gl.constexpr = gl.DotOperandLayout(
@@ -359,7 +359,7 @@ def _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle(
         mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
             version=4,
             instr_shape=[16, 16],
-            transposed=False,
+            mmac_layout=gl.amd.MmacLayout.LIT_LTS,
             warps_per_cta=[1, NumWarps],
             tiles_per_warp=[1, MFMAPerWarp],
         )
@@ -367,7 +367,7 @@ def _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle(
         mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
             version=4,
             instr_shape=[16, 16, 32],
-            transposed=False,
+            mmac_layout=gl.amd.MmacLayout.LIT_LTS,
             warps_per_cta=[1, NumWarps],
             tiles_per_warp=[1, MFMAPerWarp],
         )
@@ -1153,7 +1153,7 @@ def _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle_varctx(
         mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
             version=4,
             instr_shape=[16, 16],
-            transposed=False,
+            mmac_layout=gl.amd.MmacLayout.LIT_LTS,
             warps_per_cta=[1, NumWarps],
             tiles_per_warp=[1, MFMAPerWarp],
         )
@@ -1161,7 +1161,7 @@ def _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle_varctx(
         mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
             version=4,
             instr_shape=[16, 16, 32],
-            transposed=False,
+            mmac_layout=gl.amd.MmacLayout.LIT_LTS,
             warps_per_cta=[1, NumWarps],
             tiles_per_warp=[1, MFMAPerWarp],
         )

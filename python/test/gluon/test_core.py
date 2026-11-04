@@ -725,7 +725,7 @@ def test_amd_mfma(M, N, K, in_dtype, num_warps, cdna_version):
     blocked: ttgl.constexpr = ttgl.BlockedLayout(size_per_thread=[4, 4], threads_per_warp=[4, 16],
                                                  warps_per_cta=[num_warps, 1], order=[1, 0])
     mfma_layout: ttgl.constexpr = ttgl.amd.AMDMFMALayout(version=cdna_version, instr_shape=[nonkdim, nonkdim, kdim],
-                                                         transposed=True, warps_per_cta=[num_warps, 1])
+                                                         mmac_layout=ttgl.amd.MmacLayout.LIT, warps_per_cta=[num_warps, 1])
 
     kernel[1, 1](
         a, b, c,  #
@@ -758,7 +758,7 @@ def test_amd_mfma_scaled(M, N, K, a_type, b_type, has_scale, device='cuda'):
         K_A: tl.constexpr = K // DIV_FACTOR_A
         K_B: tl.constexpr = K // DIV_FACTOR_B
 
-        mfma_layout: ttgl.constexpr = ttgl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 128], transposed=True,
+        mfma_layout: ttgl.constexpr = ttgl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 128], mmac_layout=ttgl.amd.MmacLayout.LIT,
                                                              warps_per_cta=[2, 2])
 
         a_unpacked_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 16], [8, 8], [4, 1], [1, 0])

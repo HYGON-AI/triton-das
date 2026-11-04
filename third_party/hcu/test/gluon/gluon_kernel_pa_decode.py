@@ -273,7 +273,7 @@ def paged_attention_decode_v2_gluon_large_block_dot_kernel(
     qk_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, 4],
     )
     qk_lhs_layout: gl.constexpr = gl.DotOperandLayout(
@@ -359,7 +359,7 @@ def paged_attention_decode_v2_gluon_large_block_dot_kernel(
     pv_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, 4],
     )
     pv_lhs_layout: gl.constexpr = gl.DotOperandLayout(
@@ -995,7 +995,7 @@ def paged_attention_decode_sliding_window(
     qk_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, 4],
     )
     qk_lhs_operand_layout: gl.constexpr = gl.DotOperandLayout(
@@ -1109,7 +1109,7 @@ def paged_attention_decode_sliding_window(
     pv_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, 4],
     )
     pv_lhs_operand_layout: gl.constexpr = gl.DotOperandLayout(
@@ -1888,7 +1888,7 @@ def paged_attention_decode_v2_gluon_dot_kernel(
     qk_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, 4],
     )
     qk_lhs_operand_layout: gl.constexpr = gl.DotOperandLayout(
@@ -2002,7 +2002,7 @@ def paged_attention_decode_v2_gluon_dot_kernel(
     pv_mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=CDNA_VERSION,
         instr_shape=QK_PV_MFMA_INSTR_SHAPE,
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, 4],
     )
     pv_lhs_operand_layout: gl.constexpr = gl.DotOperandLayout(

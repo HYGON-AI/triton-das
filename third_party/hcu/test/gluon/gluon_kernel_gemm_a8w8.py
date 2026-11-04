@@ -73,7 +73,7 @@ try:
     _: gl.constexpr = gl.amd.AMDMFMALayout(
         version=4,
         instr_shape=[16, 16],
-        transposed=False,
+        mmac_layout=gl.amd.MmacLayout.LIT_LTS,
         warps_per_cta=[1, 1],
     )
     _USE_2D_MFMA_INSTR_SHAPE = tl.constexpr(True)
@@ -165,7 +165,7 @@ def _gemm_a8w8_kernel(
     mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=4,
         instr_shape=[16, 16] if _USE_2D_MFMA_INSTR_SHAPE else [16, 16, 32],
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[2, NUM_WARPS // 2],
     )
 
@@ -443,7 +443,7 @@ def _gemm_a8w8_preshuffled_kernel(
     mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
         version=4,
         instr_shape=[16, 16] if _USE_2D_MFMA_INSTR_SHAPE else [16, 16, 32],
-        transposed=True,
+        mmac_layout=gl.amd.MmacLayout.LIT,
         warps_per_cta=[1, NUM_WARPS],
     )
 

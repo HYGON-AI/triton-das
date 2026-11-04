@@ -123,7 +123,7 @@ def gemm_producer(A, B, smem_a, smem_b, M, N, K,
 def gemm_consumer(C, smem_a, smem_b, M, N, K, GROUP: gl.constexpr,
                   BM: gl.constexpr, BN: gl.constexpr, BK: gl.constexpr):
     mma: gl.constexpr = gl.amd.AMDMFMALayout(
-        version=3, instr_shape=[16, 16, 16], transposed=False, warps_per_cta=[2, 2])
+        version=3, instr_shape=[16, 16, 16], mmac_layout=gl.amd.MmacLayout.LIT_LTS, warps_per_cta=[2, 2])
     dot_a: gl.constexpr = gl.DotOperandLayout(0, mma, 4)
     dot_b: gl.constexpr = gl.DotOperandLayout(1, mma, 4)
     half_a = smem_a.slice(GROUP * (BM // 2), BM // 2, dim=0)
