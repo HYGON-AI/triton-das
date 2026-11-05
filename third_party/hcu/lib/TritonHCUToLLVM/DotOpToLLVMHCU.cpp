@@ -40,7 +40,8 @@ struct HCUDotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
                   ConversionPatternRewriter &rewriter) const override {
     auto D = op.getResult();
     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
-    if (!isa<mlir::triton::gpu::AMDMfmaEncodingAttr>(dEncoding))
+    if (!isa<mlir::triton::gpu::AMDMfmaEncodingAttr,
+             mlir::triton::gpu::HCUMmacInterleave2EncodingAttr>(dEncoding))
       return failure();
     return mlir::triton::HCU::convertMFMA(op, adaptor, getTypeConverter(),
                                           rewriter);

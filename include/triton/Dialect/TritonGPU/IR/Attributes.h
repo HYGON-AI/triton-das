@@ -11,4 +11,11 @@
 #define GET_ATTRDEF_CLASSES
 #include "triton/Dialect/TritonGPU/IR/AttrDefs.h.inc"
 
+namespace mlir::triton::gpu {
+// Query base MMAC configuration without discarding the tensor's full encoding.
+// Only layouts implementing the wrapper interface are traversed.
+AMDMfmaEncodingAttr getUnderlyingMmacEncoding(Attribute encoding);
+DotOperandEncodingAttr getUnderlyingDotOperandEncoding(Attribute encoding);
+} // namespace mlir::triton::gpu
+
 #endif // TRITON_DIALECT_TRITONGPU_IR_ATTRIBUTES_H_

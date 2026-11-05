@@ -59,6 +59,7 @@ using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
 using ::mlir::LLVM::AMD::shuffleXor;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
+using ::mlir::triton::gpu::HCUMmacInterleave2EncodingAttr;
 using ::mlir::triton::gpu::LinearEncodingAttr;
 using ::mlir::triton::gpu::MmacLayout;
 
@@ -363,7 +364,6 @@ struct DotOpMFMAConversionHelper {
     unsigned kBase = maybeMfmaIntrinsic->kBase;
 
     auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
-    auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
     int kWidth = aEncoding.getKWidth();
 
     intrinsicName = maybeMfmaIntrinsic->name;
@@ -1112,12 +1112,13 @@ LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
   };
 
   assert(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
-         isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()) &&
+         triton::gpu::getUnderlyingDotOperandEncoding(
+             rankedTType(op.getB()).getEncoding()) &&
          "Both A and B should be DotOperand layout.");
 
   auto cTensorTy = rankedTType(op.getC());
   auto dTensorTy = rankedTType(op.getD());
-  assert(isa<AMDMfmaEncodingAttr>(cTensorTy.getEncoding()) &&
+  assert(triton::gpu::getUnderlyingMmacEncoding(cTensorTy.getEncoding()) &&
          "Currently, we only support C with a mfma layout.");
 
   assert(cTensorTy.getShape()[0] == dTensorTy.getShape()[0] &&
@@ -1125,8 +1126,7 @@ LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
          "DotOp's C operand should pass the same number of values as D.");
 
   auto loc = op.getLoc();
-  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
-      cast<RankedTensorType>(op.getResult().getType()).getEncoding());
+  auto mfmaLayout = triton::gpu::getUnderlyingMmacEncoding(dTensorTy.getEncoding());
 
   DotOpMFMAConversionHelper helper(mfmaLayout, rewriter, typeConverter, loc);
 

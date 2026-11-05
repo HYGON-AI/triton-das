@@ -298,9 +298,17 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
   set(TRITON_BACKENDS_TUPLE "(${TRITON_BACKENDS_TUPLE})")
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
+  # Dialect interfaces use LLVM's no-RTTI ABI; keep this separate from pybind.
+  if(NOT MSVC)
+    set_source_files_properties(${PYTHON_SRC_PATH}/hcu_gluon_inliner.cc PROPERTIES COMPILE_OPTIONS "-fno-rtti")
+  else()
+    set_source_files_properties(${PYTHON_SRC_PATH}/hcu_gluon_inliner.cc PROPERTIES COMPILE_OPTIONS "/GR-")
+  endif()
   add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
                   ${PYTHON_SRC_PATH}/gluon_ir.cc
+                  ${PYTHON_SRC_PATH}/hcu_gluon_ir.cc
+                  ${PYTHON_SRC_PATH}/hcu_gluon_inliner.cc
                   ${PYTHON_SRC_PATH}/linear_layout.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc

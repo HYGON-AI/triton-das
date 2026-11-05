@@ -773,6 +773,8 @@ def MatrixStoreFromRegOp : TT_AMDGPU_Op<"matrix_store_from_reg", [AttrSizedOpera
     DefaultValuedAttr<TT_EvictionPolicyAttr, "triton::EvictionPolicy::NORMAL">:$evict
   );
 
+  let hasVerifier = 1;
+
   let assemblyFormat = [{
     $value `,` $base `,` `shape` `=` `[` $shape `]` `,` `strides` `=` `[` $strides `]` `,`
     `tensorShape` `=` $tensorShape `,` `indices` `=` `[` $indices `]`

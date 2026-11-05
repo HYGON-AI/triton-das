@@ -155,7 +155,7 @@ def wasp_gemm(A, B, C, M, N, K, BM: gl.constexpr, BN: gl.constexpr, BK: gl.const
     ], [4, 4, 4], [64, 128, 128])
 
 
-@pytest.mark.parametrize("mode", ["off", "explicit", "automatic"])
+@pytest.mark.parametrize("mode", ["off", "explicit", "source"])
 @pytest.mark.parametrize("shape", [(64, 32, 32), (93, 47, 81)])
 def test_gluon_wasp_gemm(tmp_path, mode, shape):
     # Second shape covers M/N/K tails, multiple CTAs and three LDS reuse rounds.
@@ -169,7 +169,7 @@ def test_gluon_wasp_gemm(tmp_path, mode, shape):
     options = {"num_warps": 4, "num_stages": 2, "wasp_partition_warps": (4, 4, 4),
                "wasp_wdra": mode != "off"}
     if mode == "explicit":
-        options["wasp_partition_regs"] = (64, 128, 132)  # sum=324, divisible by 12.
+        options["wasp_partition_regs"] = (64, 128, 128)  # Check the source declaration; normalize to (68,128,128).
     kernel = wasp_gemm[(triton.cdiv(m, 64), triton.cdiv(n, 32))](
         a_gpu, b_gpu, c_gpu, m, n, k, 64, 32, 32, **options)
     torch.testing.assert_close(c_gpu.cpu(), golden, rtol=1e-3, atol=1e-3)
@@ -206,7 +206,7 @@ def test_ordinary_gluon_add(tmp_path):
     print("Ordinary Gluon: compiled, executed, and matched CPU golden")
 
 
-@pytest.mark.parametrize("mode", ["off", "explicit", "automatic"])
+@pytest.mark.parametrize("mode", ["off", "explicit", "source"])
 @pytest.mark.parametrize("total", [8, 12, 16])
 def test_gluon_wasp_add(tmp_path, mode, total):
     groups = total // 4
@@ -245,7 +245,9 @@ def test_gluon_wasp_add(tmp_path, mode, total):
     start_ids = ", ".join(str(i) for i in range(0, total, 4))
     assert f"warpGroupStartIds = array<i32: {start_ids}>" in kernel.asm["ttgir"]
     assert ("@llvm.hcu.wdra.init" in kernel.asm["llir"]) == wdra
-    if mode == "explicit":
+    if wdra:
+        assert tuple(kernel.metadata.wasp_partition_regs_requested) == (64,) * groups
+        assert kernel.metadata.wasp_partition_regs_source == "warp_specialize"
         assert tuple(kernel.metadata.wasp_partition_regs) == (64,) * groups
     if wdra:
         feedback = wasp.read_partition_registers(kernel.asm["amdgcn"])
@@ -256,9 +258,9 @@ def test_gluon_wasp_add(tmp_path, mode, total):
                 feedback[i]["available_vgprs"] for i in range(groups))
             assert tuple(kernel.metadata.wasp_partition_regs_actual) == tuple(
                 feedback[i]["required_vgprs"] for i in range(groups))
-        elif mode == "automatic":
-            # Older backends retain the global no-spill fast path.
-            assert kernel.metadata.wasp_partition_regs is None
+        else:
+            # A source declaration remains authoritative without backend demand feedback.
+            assert tuple(kernel.metadata.wasp_partition_regs) == (64,) * groups
             assert not hasattr(kernel.metadata, "wasp_partition_regs_actual")
     for stage in ("ttgir", "llir", "amdgcn"):
         (tmp_path / f"wasp.{stage}").write_text(kernel.asm[stage])

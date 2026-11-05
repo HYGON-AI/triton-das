@@ -29,6 +29,30 @@ void PrintTo(const Attribute &attr, std::ostream *os) {
 namespace mlir::triton::gpu {
 namespace {
 
+TEST(LayoutEncodingWrapper, UnderlyingMmacConfiguration) {
+  MLIRContext ctx;
+  ctx.getOrLoadDialect<TritonGPUDialect>();
+  auto mmac = cast<AMDMfmaEncodingAttr>(parseAttribute(
+      "#ttg.amd_mfma<{version = 4, warpsPerCTA = [1, 4], "
+      "instrShape = [16, 16, 32], isTransposed = false, mmacLayout = 3, "
+      "tilesPerWarp = [4, 4]}>", &ctx));
+  auto wrapped = HCUMmacInterleave2EncodingAttr::get(&ctx, mmac);
+  auto wrapper = cast<LayoutEncodingWrapperInterface>(wrapped);
+  EXPECT_EQ(wrapper.getParentEncoding(), mmac);
+  EXPECT_EQ(getUnderlyingMmacEncoding(mmac), mmac);
+  EXPECT_EQ(getUnderlyingMmacEncoding(wrapped), mmac);
+  EXPECT_FALSE(getUnderlyingMmacEncoding({}));
+  EXPECT_FALSE(getUnderlyingMmacEncoding(StringAttr::get(&ctx, "unrelated")));
+  // Operand wrappers retain DotOperand semantics; a result query must not
+  // silently strip that distinction.
+  auto operand = DotOperandEncodingAttr::get(&ctx, 1, mmac, 8);
+  auto wrappedOperand = HCUMmacInterleave2EncodingAttr::get(&ctx, operand);
+  EXPECT_FALSE(getUnderlyingMmacEncoding(wrappedOperand));
+  EXPECT_EQ(getUnderlyingDotOperandEncoding(operand), operand);
+  EXPECT_EQ(getUnderlyingDotOperandEncoding(wrappedOperand), operand);
+  EXPECT_FALSE(getUnderlyingDotOperandEncoding(wrapped));
+}
+
 std::vector<DistributedEncodingTrait>
 createDistributedEncodings(MLIRContext &ctx) {
   // Assorted distributed encodings to run tests on

@@ -8,6 +8,14 @@ include "triton/Dialect/TritonGPU/IR/TritonGPUAttrBase.td"
 // Traits, Interfaces and shared Parameters
 //===----------------------------------------------------------------------===//
 
+// Wrappers preserve the parent's base configuration, not its element mapping.
+def LayoutEncodingWrapperInterface : AttrInterface<"LayoutEncodingWrapperInterface"> {
+  let cppNamespace = "::mlir::triton::gpu";
+  let methods = [InterfaceMethod<
+    "Get the wrapped encoding for base-configuration queries only.",
+    "Attribute", "getParentEncoding">];
+}
+
 def LayoutEncodingTrait : AttrInterface<"LayoutEncodingTrait"> {
   let cppNamespace = "::mlir::triton::gpu";
   let description = [{
@@ -913,6 +921,20 @@ def LinearEncodingAttr : DistributedEncoding<"LinearEncoding", "linear_encoding"
   let hasCustomAssemblyFormat = 1;
 }
 
+
+// HCU MLS interleave2 B and matching MMAC result register mappings.
+// Parent is the existing B DotOperand encoding or result AMDMfma encoding.
+def HCUMmacInterleave2EncodingAttr
+    : DistributedEncoding<"HCUMmacInterleave2Encoding", "hcu_mmac_interleave2_encoding",
+                          [LayoutEncodingWrapperInterface]> {
+  let mnemonic = "hcu_mmac_interleave2";
+  let parameters = (ins "Attribute":$parent);
+  let assemblyFormat = "`<` struct(params) `>`";
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = extraDistributedDeclaration # [{
+    Attribute getParentEncoding() const { return getParent(); }
+  }];
+}
 
 //===----------------------------------------------------------------------===//
 // Blocked Layout Encoding

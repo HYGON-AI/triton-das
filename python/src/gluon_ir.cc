@@ -1,6 +1,7 @@
 // Modified by Hygon Information Technology Co., Ltd., 2026.
 
 #include "ir.h"
+#include "hcu_gluon_ir.h"
 #include "pybind11/pybind11.h"
 #include <pybind11/stl.h>
 
@@ -225,6 +226,16 @@ py::object layoutToGluon(Attribute layout) {
         std::vector<unsigned>{mma.getVersionMajor(), mma.getVersionMinor()},
         toStdVector(mma.getWarpsPerCTA()), toStdVector(mma.getInstrShape()),
         cgaBases);
+  } else if (auto interleave = dyn_cast<ttg::HCUMmacInterleave2EncodingAttr>(layout)) {
+    return py::module_::import("triton.experimental.gluon.language.amd.hcu")
+        .attr("MmacInterleave2Layout")(layoutToGluon(interleave.getParent()));
+  } else if (auto mls = dyn_cast<ttg::HCUMlsSharedEncodingAttr>(layout)) {
+    return py::module_::import("triton.experimental.gluon.language.amd.hcu")
+        .attr("MlsSharedLayout")(mls.getOpIdx(), toStdVector(mls.getMlsTile()),
+                                 mls.getElemBitWidth(),
+                                 static_cast<unsigned>(mls.getElemBitTyKind()),
+                                 mls.getAlt2Kind(), mls.getVersion(),
+                                 toStdVector(mls.getOrder()));
   } else if (auto nvmma = dyn_cast<ttg::NVMMASharedEncodingAttr>(layout)) {
     auto ctaLayout = nvmma.getCTALayout();
     auto cgaBases = getCgaLayoutBases(ctaLayout);
@@ -881,6 +892,8 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, Value memDesc, int count) -> Value {
              return self.create<ttag::ArriveBarrierOp>(memDesc, count);
            });
+
+  init_hcu_gluon_ir(m.attr("GluonOpBuilder"));
 
   m.def(
       "compute_tmem_reg_layout",

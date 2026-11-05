@@ -853,3 +853,121 @@ def test_early_budget_plan(tmp_path, capfd, backend, waves, extent):
     assert f"hcu.wasp_partition_warps = array<i32: {', '.join(map(str, waves))}>" in str(mod)
     assert "hcu.wasp_topo" not in str(mod)
     assert ("hcu.wasp_split =" in str(mod)) == (kind != 0)
+
+
+# Explicit Gluon quotas are the source of truth; launch quotas are optional checks.
+def explicit_register_module(tmp_path, requests, waves=(4, 4, 4, 4)):
+    partitions = '\n'.join(f'partition{i}() num_warps({n}) {{ ttg.warp_return }}'
+                           for i, n in enumerate(waves))
+    regions = []
+    for regs in requests:
+        attr = (" attributes {requestedRegisters = array<i32: " +
+                ", ".join(map(str, regs)) + ">}") if regs is not None else ""
+        regions.append("ttg.warp_specialize()" + attr +
+                       " default { ttg.warp_yield }\n" + partitions + " : () -> ()")
+    path = tmp_path / "explicit-registers.mlir"
+    path.write_text('''module attributes {
+      "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32,
+      ttg.target = "hip:gfx946", "ttg.threads-per-warp" = 64 : i32
+    } { tt.func @test() {''' + '\n'.join(regions) + '''
+      tt.return
+    } }''')
+    return parse_module(path)
+
+
+@pytest.mark.parametrize("launch_regs", [None, (8, 8, 240, 240)])
+def test_gluon_declared_registers_win_before_and_after_partition_pass(tmp_path, launch_regs):
+    mod = explicit_register_module(tmp_path, [(8, 8, 240, 240)])
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options(
+        {"wasp_partition_warps": (4, 4, 4, 4), "wasp_partition_regs": launch_regs})
+    original_hash = opts.hash()
+    metadata = {}
+    wasp.configure_wasp(mod, metadata, opts)
+    assert metadata["wasp_partition_regs_requested"] == (8, 8, 240, 240)
+    assert metadata["wasp_partition_regs_source"] == "warp_specialize"
+    assert metadata["wasp_partition_regs"] == (8, 8, 240, 240)
+    pm = ir.pass_manager(mod.context)
+    hcu.passes.ttgpuir.add_optimize_partition_warps(pm, True)
+    pm.run(mod, "test_explicit_register_source")
+    wasp.configure_partitions(mod, metadata, opts)
+    assert "hcu.wasp_partition_regs = array<i32: 8, 8, 240, 240>" in str(mod)
+    assert opts.hash() == original_hash and opts.wasp_partition_regs == launch_regs
+
+
+@pytest.mark.parametrize("launch_regs", [(16, 8, 232, 240), (8, 8, 236, 244)])
+def test_gluon_launch_register_mismatch_rejected(tmp_path, launch_regs):
+    mod = explicit_register_module(tmp_path, [(8, 8, 240, 240)])
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options(
+        {"wasp_partition_warps": (4,) * 4, "wasp_partition_regs": launch_regs})
+    with pytest.raises(ValueError, match="requestedRegisters=.*do not match wasp_partition_regs"):
+        wasp.configure_wasp(mod, {}, opts)
+
+
+@pytest.mark.parametrize("requests", [
+    [(8, 8, 240, 240), (16, 8, 232, 240)], [(8, 8, 240, 240), None],
+])
+def test_gluon_regions_must_share_register_contract(tmp_path, requests):
+    mod = explicit_register_module(tmp_path, requests)
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options({"wasp_partition_warps": (4,) * 4})
+    with pytest.raises(ValueError, match="same requestedRegisters"):
+        wasp.configure_wasp(mod, {}, opts)
+
+
+def test_gluon_repeated_register_contract_is_valid(tmp_path):
+    mod = explicit_register_module(tmp_path, [(8, 8, 240, 240)] * 2)
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options({"wasp_partition_warps": (4,) * 4})
+    metadata = {}
+    wasp.configure_wasp(mod, metadata, opts)
+    assert metadata["wasp_partition_regs"] == (8, 8, 240, 240)
+
+
+@pytest.mark.parametrize("regs", [(7, 7, 239, 239), (256, 256, 256, 256), (0, 8, 240, 240)])
+def test_gluon_source_registers_obey_hardware_constraints(tmp_path, regs):
+    mod = explicit_register_module(tmp_path, [regs])
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options({"wasp_partition_warps": (4,) * 4})
+    metadata = {}
+    if regs == (7, 7, 239, 239):
+        wasp.configure_wasp(mod, metadata, opts)
+        assert metadata["wasp_partition_regs_requested"] == regs
+        assert metadata["wasp_partition_regs"] == (8, 8, 240, 240)
+    else:
+        with pytest.raises(ValueError):
+            wasp.configure_wasp(mod, metadata, opts)
+
+
+def test_gluon_without_request_keeps_launch_fallback(tmp_path):
+    mod = explicit_register_module(tmp_path, [None])
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options(
+        {"wasp_partition_warps": (4,) * 4, "wasp_partition_regs": (8, 8, 240, 240)})
+    metadata = {}
+    wasp.configure_wasp(mod, metadata, opts)
+    mod.set_attr("ttg.total-num-warps", ir.builder(mod.context).get_int32_attr(16))
+    wasp.configure_partitions(mod, metadata, opts)
+    assert metadata["wasp_partition_regs_source"] == "launch"
+    assert metadata["wasp_partition_regs"] == (8, 8, 240, 240)
+
+
+def test_automatic_wasp_ignores_generated_requested_registers(tmp_path):
+    mod = explicit_register_module(tmp_path, [(88, 88, 88, 88)])
+    builder = ir.builder(mod.context)
+    mod.set_attr("ttg.total-num-warps", builder.get_int32_attr(16))
+    mod.set_attr("hcu.wasp_partition_regs", builder.get_dense_i32_array_attr((32, 32, 224, 224)))
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options({"wasp_partition_warps": (4,) * 4})
+    # Normal TL lowering configured WASP before it created these regions.
+    metadata = {"wasp_enabled": True, "wasp_wdra": True}
+    wasp.configure_partitions(mod, metadata, opts)
+    assert metadata["wasp_partition_regs_source"] == "automatic"
+    assert metadata["wasp_partition_regs_requested"] is None
+    assert "hcu.wasp_partition_regs = array<i32: 32, 32, 224, 224>" in str(mod)
+
+
+def test_gluon_register_hints_do_not_enable_wdra(tmp_path):
+    mod = explicit_register_module(tmp_path, [(8, 8, 240, 240)])
+    opts = HIPBackend(GPUTarget("hcu", "gfx946", 64)).parse_options(
+        {"wasp_partition_warps": (4,) * 4, "wasp_wdra": False})
+    metadata = {}
+    wasp.configure_wasp(mod, metadata, opts)
+    mod.set_attr("ttg.total-num-warps", ir.builder(mod.context).get_int32_attr(16))
+    wasp.configure_partitions(mod, metadata, opts)
+    assert not metadata["wasp_wdra"]
+    assert "wasp_partition_regs" not in metadata

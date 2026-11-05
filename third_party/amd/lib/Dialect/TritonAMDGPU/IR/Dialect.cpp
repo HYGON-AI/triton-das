@@ -852,6 +852,20 @@ bool DotScaledOp::verifyOutputDims() {
   return c[0] == a[0] && c[1] == b[1];
 }
 
+LogicalResult MatrixStoreFromRegOp::verify() {
+  auto type = cast<RankedTensorType>(getValue().getType());
+  auto encoding = type.getEncoding();
+  // The interleave2 attribute verifies its parent MMAC layout. Instruction-
+  // specific store restrictions are checked by the target lowering.
+  if (auto interleave =
+          dyn_cast<triton::gpu::HCUMmacInterleave2EncodingAttr>(encoding))
+    encoding = interleave.getParent();
+  if (type.getRank() != 2 ||
+      !isa<triton::gpu::AMDMfmaEncodingAttr>(encoding))
+    return emitOpError("matrix store requires a rank-two MMAC result layout");
+  return success();
+}
+
 LogicalResult DotScaledOp::verify() {
   auto aTy = getA().getType();
   auto bTy = getB().getType();

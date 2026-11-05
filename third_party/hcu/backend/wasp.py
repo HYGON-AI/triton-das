@@ -33,6 +33,55 @@ def check_options(args):
         args["wasp_partition_regs"] = tuple(regs)
 
 
+def _explicit_partition_regs(mod):
+    """Read source requests, not the estimates on automatically created regions.
+
+    HCU WDRA currently has one module-wide quota tuple, so sequential explicit
+    regions must agree. A partially specified tuple is not an automatic plan.
+    """
+    requests = []
+
+    def visit(op):
+        if op.get_name() != "ttg.warp_specialize":
+            return
+        regs = op.get_dense_i32_array_attr("requestedRegisters")
+        if regs is not None:
+            waves = op.get_dense_i32_array_attr("partitionNumWarps")
+            if len(regs) != len(waves):
+                raise ValueError("warp_specialize requestedRegisters must match its partition count")
+            regs = tuple(regs)
+        requests.append(regs)
+
+    mod.walk(visit)
+    declared = [r for r in requests if r is not None]
+    if not declared:
+        return None
+    if any(r is None or r != declared[0] for r in requests):
+        raise ValueError("explicit warp_specialize regions must declare the same requestedRegisters")
+    return declared[0]
+
+
+def _configure_partition_regs(mod, metadata, options, source_regs=None):
+    requested = options.wasp_partition_regs
+    if source_regs is not None:
+        # Compare declarations before hardware normalization, so rounding does
+        # not hide inconsistent user requests. Launch values are only a check.
+        if requested is not None and tuple(requested) != source_regs:
+            raise ValueError(f"warp_specialize requestedRegisters={source_regs} do not match "
+                             f"wasp_partition_regs={tuple(requested)}")
+        requested = source_regs
+        source = "warp_specialize"
+    else:
+        source = "launch" if requested is not None else "automatic"
+    metadata["wasp_partition_regs_requested"] = requested
+    metadata["wasp_partition_regs_source"] = source
+    if requested is not None:
+        regs = normalize_regs(requested, options.arch)
+        metadata["wasp_partition_regs"] = regs
+        mod.set_attr("hcu.wasp_partition_regs", ir.builder(mod.context).get_dense_i32_array_attr(regs))
+    # Without a request, keep the C++ pass's automatic module allocation.
+
+
 def configure_wasp(mod, metadata, options):
     """Detect the IR request and select the execution topology once."""
     requested = False
@@ -72,6 +121,12 @@ def configure_wasp(mod, metadata, options):
         # that each frontend partition matches wasp_partition_warps.
         mod.set_attr("hcu.wasp_explicit_partitions", b.get_bool_attr(True))
     mod.set_attr("hcu.wasp_partition_warps", b.get_dense_i32_array_attr(options.wasp_partition_warps))
+    if explicit and metadata["wasp_wdra"]:
+        source_regs = _explicit_partition_regs(mod)
+        if source_regs is not None:
+            # Attach before OptimizePartitionWarps so its rough estimate cannot
+            # become the effective allocation for a source-declared partition.
+            _configure_partition_regs(mod, metadata, options, source_regs)
 
 
 def normalize_regs(regs, arch):
@@ -126,13 +181,9 @@ def configure_partitions(mod, metadata, options):
         raise ValueError(f"WASP launch waves {total} do not match requested topology")
     if not metadata["wasp_wdra"]:
         return
-    requested = options.wasp_partition_regs
-    metadata["wasp_partition_regs_requested"] = requested
-    if requested is not None:
-        regs = normalize_regs(requested, options.arch)
-        metadata["wasp_partition_regs"] = regs
-        mod.set_attr("hcu.wasp_partition_regs", ir.builder(mod.context).get_dense_i32_array_attr(regs))
-    # Automatic quotas are already on the module, written by the C++ pass.
+    explicit = mod.get_operation().get_bool_attr("hcu.wasp_explicit_partitions")
+    source_regs = _explicit_partition_regs(mod) if explicit else None
+    _configure_partition_regs(mod, metadata, options, source_regs)
 
 
 def read_partition_registers(gcn):

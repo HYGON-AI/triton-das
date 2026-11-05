@@ -1057,6 +1057,21 @@ DotOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   }
 }
 
+LinearLayout HCUMmacInterleave2EncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
+  auto layout = getParent();
+  auto ll = triton::gpu::toLinearLayout(shape, layout);
+  auto bases = ll.getBases();
+  auto names = llvm::to_vector(ll.getOutDimNames());
+  auto n = StringAttr::get(layout.getContext(), "dim1");
+  unsigned pos = llvm::find(names, n) - names.begin();
+  for (auto &entry : bases)
+    for (auto &basis : entry.second) {
+      int32_t value = basis[pos];
+      basis[pos] = (value & ~31) | ((value & 15) << 1) | ((value & 16) >> 4);
+    }
+  return triton::LinearLayout(bases, ll.getOutDims(), ll.isSurjective());
+}
+
 LinearLayout SliceEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   MLIRContext *ctx = getContext();
 

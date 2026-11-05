@@ -2785,6 +2785,47 @@ CTAEncodingAttr DotOperandEncodingAttr::getCTALayout() const {
   dims[kDim].second = 1;
   return CTAEncodingAttr::get(getContext(), LinearLayout(bases, dims, true));
 }
+static Attribute getBaseLayoutEncoding(Attribute encoding) {
+  while (auto wrapper =
+             dyn_cast_or_null<LayoutEncodingWrapperInterface>(encoding))
+    encoding = wrapper.getParentEncoding();
+  return encoding;
+}
+
+AMDMfmaEncodingAttr mlir::triton::gpu::getUnderlyingMmacEncoding(
+    Attribute encoding) {
+  return dyn_cast_or_null<AMDMfmaEncodingAttr>(getBaseLayoutEncoding(encoding));
+}
+
+DotOperandEncodingAttr mlir::triton::gpu::getUnderlyingDotOperandEncoding(
+    Attribute encoding) {
+  return dyn_cast_or_null<DotOperandEncodingAttr>(getBaseLayoutEncoding(encoding));
+}
+
+CTAEncodingAttr HCUMmacInterleave2EncodingAttr::getCTALayout() const {
+  return cast<LayoutEncodingTrait>(getParent()).getCTALayout();
+}
+
+SmallVector<unsigned> HCUMmacInterleave2EncodingAttr::getRepOrder() const {
+  return cast<DistributedEncodingTrait>(getParent()).getRepOrder();
+}
+
+LogicalResult HCUMmacInterleave2EncodingAttr::verify(
+    llvm::function_ref<InFlightDiagnostic()> emitError, Attribute parent) {
+  auto base = parent;
+  if (auto dot = dyn_cast<DotOperandEncodingAttr>(base)) {
+    if (dot.getOpIdx() != 1)
+      return emitError() << "interleave2 supports only operand B";
+    base = dot.getParent();
+  }
+  auto f = dyn_cast<AMDMfmaEncodingAttr>(base);
+  if (!f || f.getMmacLayout() != MmacLayout::TRANSPOSE ||
+      f.getIsTransposed() || f.getRank() != 2 ||
+      (f.getInstrShape()[1] * f.getTilesPerWarp()[1]) % 32)
+    return emitError() << "interleave2 requires rank-2 LTS with complete 32-column N groups";
+  return success();
+}
+
 LogicalResult DotOperandEncodingAttr::verify(
     ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
     unsigned opIdx, Attribute parent, unsigned kWidth, unsigned mlsScaledExt) {
@@ -3039,6 +3080,16 @@ struct TritonGPUInferLayoutInterface
   inferDotOpEncoding(Attribute operandEncoding, unsigned opIdx,
                      Attribute retEncoding,
                      std::optional<Location> location) const override {
+    if (auto interleave = dyn_cast<HCUMmacInterleave2EncodingAttr>(retEncoding)) {
+      retEncoding = interleave.getParent();
+      auto b = dyn_cast<HCUMmacInterleave2EncodingAttr>(operandEncoding);
+      if (opIdx == 1 && !b)
+        return emitOptionalError(location, "interleave2 result requires interleave2 B");
+      if (b)
+        operandEncoding = b.getParent();
+    } else if (isa<HCUMmacInterleave2EncodingAttr>(operandEncoding)) {
+      return emitOptionalError(location, "interleave2 B requires an interleave2 result");
+    }
     auto mmaRetEncoding = mlir::dyn_cast<NvidiaMmaEncodingAttr>(retEncoding);
     if (mmaRetEncoding && mmaRetEncoding.isHopper()) {
       auto dotOpEnc = mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding);
@@ -3064,6 +3115,31 @@ struct TritonGPUInferLayoutInterface
   LogicalResult
   verifyDotOpEncodingCompatibility(Operation *op, Attribute operandEncodingA,
                                    Attribute operandEncodingB) const override {
+    auto dot = cast<DotOp>(op);
+    auto resultEncoding = dot.getResult().getType().getEncoding();
+    bool hasInterleave = isa<HCUMmacInterleave2EncodingAttr>(resultEncoding) ||
+                         isa<HCUMmacInterleave2EncodingAttr>(operandEncodingA) ||
+                         isa<HCUMmacInterleave2EncodingAttr>(operandEncodingB);
+    if (hasInterleave) {
+      // Share operand/result pairing, opIdx and parent checks with inference.
+      // Verification must also work when the op was parsed from textual IR.
+      if (failed(inferDotOpEncoding(operandEncodingA, 0, resultEncoding,
+                                    op->getLoc())) ||
+          failed(inferDotOpEncoding(operandEncodingB, 1, resultEncoding,
+                                    op->getLoc())))
+        return failure();
+      auto resultLayout = cast<HCUMmacInterleave2EncodingAttr>(resultEncoding);
+      auto f = cast<AMDMfmaEncodingAttr>(resultLayout.getParent());
+      auto ct = dot.getC().getType();
+      auto shape = f.getInstrShape();
+      // This is a restriction of the current interleave2 lowering, not a
+      // general prohibition on redundant warp mappings in distributed layouts.
+      if (ct.getShape()[0] < shape[0] * f.getTilesPerWarp()[0] * f.getWarpsPerCTA()[0] ||
+          ct.getShape()[1] < shape[1] * f.getTilesPerWarp()[1] * f.getWarpsPerCTA()[1])
+        return op->emitOpError("interleave2 dot requires complete MMAC tiles per warp");
+      operandEncodingB =
+          cast<HCUMmacInterleave2EncodingAttr>(operandEncodingB).getParent();
+    }
     auto aEncoding =
         mlir::dyn_cast<triton::gpu::DotOperandEncodingAttr>(operandEncodingA);
     auto bEncoding =
@@ -3604,6 +3680,9 @@ struct TritonGPUVerifyTensorLayoutInterface
                        << rankedTy.getShape()
                        << " which is not a power of two.";
     }
+    if (isa<HCUMmacInterleave2EncodingAttr>(layout) &&
+        rankedTy.getShape()[1] != 1 && rankedTy.getShape()[1] < 32)
+      return makeErr() << "interleave2 requires N >= 32 (or a broadcast extent of 1)";
     auto ll = toLinearLayout(rankedTy);
     ModuleOp module = op->getParentOfType<ModuleOp>();
 

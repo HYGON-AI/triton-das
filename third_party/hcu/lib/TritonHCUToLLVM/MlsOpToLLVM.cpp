@@ -16,7 +16,6 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Transforms/DialectConversion.h"
-#include "nvidia/backend/include/cuda.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
@@ -800,15 +799,15 @@ struct MLSMatrixStoreFromRegOpConversion
     auto ctx = rewriter.getContext();
     auto *typeConverter = getTypeConverter();
 
-    auto mfmaEnc = dyn_cast<AMDMfmaEncodingAttr>(valueTy.getEncoding());
-    if (!(valueTy.getElementType().isF16() || valueTy.getElementType().isBF16()) || !mfmaEnc ||
+    auto mfmaEnc = getUnderlyingMmacEncoding(valueTy.getEncoding());
+    if (valueTy.getElementType().getIntOrFloatBitWidth() != 16 || !mfmaEnc ||
         mfmaEnc.getElementBitWidth() != 32 ||
         mfmaEnc.getMmacLayout() != MmacLayout::TRANSPOSE ||
         storeEncoding.getInterleaveKind() !=
             static_cast<unsigned>(MlsInterleaveKind::Interleave2)) {
       return rewriter.notifyMatchFailure(
           opToErase,
-          "matrix_store_from_reg requires fp16/bf16 MMAC C layout 3 with interleave 2");
+          "matrix_store_from_reg requires a 16-bit MMAC C layout 3 with interleave 2");
     }
 
     auto storeTile = storeEncoding.getStoreTile();
@@ -869,6 +868,10 @@ struct MLSMatrixStoreFromRegOpConversion
     SmallVector<int64_t> storeShape(valueTy.getShape().begin(),
                                     valueTy.getShape().end());
     auto mfmaWarps = mfmaEnc.getWarpsPerCTA();
+    bool explicitMapping = isa<HCUMmacInterleave2EncodingAttr>(valueTy.getEncoding());
+    // FIXME: derive warp ownership and redundant-wave handling from the actual
+    // layout. The existing address calculation assumes distinct regions for
+    // all declared warps; fix redundant-wave layouts in a separate change.
     assert(mfmaWarps.size() >= 2);
     assert(storeShape[0] % mfmaWarps[0] == 0 &&
            storeShape[1] % mfmaWarps[1] == 0);
@@ -895,8 +898,9 @@ struct MLSMatrixStoreFromRegOpConversion
     // exchanging address bits afterwards.  This also handles the degenerate
     // 32x32 case where groupWidth == storeShape[1] (there is no local group to
     // exchange with the warp coordinate).
-    unsigned storeNGroupWidth =
-        interleaveFactor * msInsnAttr.instrShape[1];
+    unsigned storeNGroupWidth = explicitMapping
+        ? mfmaEnc.getInstrShape()[1] * mfmaEnc.getTilesPerWarp()[1]
+        : interleaveFactor * msInsnAttr.instrShape[1];
     unsigned numStoreNWarps = mfmaWarps[1];
     Value warpCol = b.mul(
         multiDimWarpId[1], b.i32_val(static_cast<int32_t>(storeNGroupWidth)));
@@ -1004,7 +1008,39 @@ struct MLSMatrixStoreFromRegOpConversion
         storeLayout.getAlt2Kind(), storeLayout.getVersion(),
         storeLayout.getOrder(), ctaLayout);
 
-    if (!useMatrixLoadStoreOffsetsWithMlOffs) {
+    // Grouped descriptor traversal can be column-major, whereas explicit
+    // register tiles are consumed in row-major order. Use a matching native
+    // instruction traversal when grouping would change that order or when
+    // both edge extents need independent filtering.
+    bool rowMajorGroups = storeShape[0] / msInsnAttr.instrShape[0] <=
+                          storeShape[1] / msInsnAttr.instrShape[1];
+    if (explicitMapping && (needBoundaryCheck || !rowMajorGroups)) {
+      for (unsigned row = 0; row < storeShape[0]; row += msInsnAttr.instrShape[0]) {
+        for (unsigned col = 0; col < storeShape[1]; col += msInsnAttr.instrShape[1]) {
+          Value offset = loadHelper.dot64(loc, rewriter,
+              {b.i32_val(row), b.i32_val(col)}, llStrides);
+          Value totalOffset = b.add(ldBlkOff, offset);
+          Value ptr = b.gep(ptr_ty(ctx, 1), i16_ty, llBasePtr, totalOffset);
+          auto padding = [&](unsigned dim, unsigned position) -> Value {
+            if (!boundaryCheckInfo[dim])
+              return b.i32_val(0);
+            Value end = b.add(llBlockPos[dim],
+                             b.i32_val(position + msInsnAttr.instrShape[dim]));
+            Value excess = b.sub(end, llShape[dim]);
+            return b.select(b.icmp_sgt(excess, b.i32_val(0)),
+                            b.select(b.icmp_sgt(excess, b.i32_val(msInsnAttr.instrShape[dim])),
+                                     b.i32_val(msInsnAttr.instrShape[dim]), excess),
+                            b.i32_val(0));
+          };
+          Value rsrcDesc = loadHelper.createRsrcDesc(
+              loc, rewriter, mlsInsn->getMlsVersion(), ptr,
+              b.trunc(i32_ty, llStrides[0]), storeLayout.getAlt2Kind(),
+              padding(1, col), padding(0, row));
+          if (failed(queueOne(rsrcDesc, true, 0, false)))
+            return failure();
+        }
+      }
+    } else if (!useMatrixLoadStoreOffsetsWithMlOffs) {
       SmallVector<std::pair<Value, Value>> ldInBlkOffCoordMappings;
       auto ldstInBlkMappings = loadHelper.computeMatrixLoadStoreOffsets(
           loc, rewriter, *mlsInsn, storeLayout, traversalAttr, sharedLayout,
@@ -1373,9 +1409,9 @@ public:
     Attribute srcLayout = srcTy.getEncoding();
     Attribute dstLayout = dstTy.getEncoding();
     if (isa<triton::gpu::HCUMlsSharedEncodingAttr>(srcLayout)) {
-      if (isa<DotOperandEncodingAttr>(dstLayout) &&
-          isa<AMDMfmaEncodingAttr>(
-              cast<DotOperandEncodingAttr>(dstLayout).getParent())) {
+      auto operandLayout = getUnderlyingDotOperandEncoding(dstLayout);
+      if (operandLayout &&
+          isa<AMDMfmaEncodingAttr>(operandLayout.getParent())) {
         return lowerMLSSharedToDotOperand(op, adaptor, getTypeConverter(),
                                         rewriter);
       } else {
@@ -1401,9 +1437,8 @@ private:
     Value src = op.getSrc();
     Value dst = op.getResult();
     auto dstTensorTy = cast<RankedTensorType>(dst.getType());
-    auto srcTensorTy = cast<MemDescType>(src.getType());
     auto dotOperandLayout =
-        cast<DotOperandEncodingAttr>(dstTensorTy.getEncoding());
+        getUnderlyingDotOperandEncoding(dstTensorTy.getEncoding());
 
     auto llvmElemTy = typeConverter->convertType(
         cast<MemDescType>(src.getType()).getElementType());
