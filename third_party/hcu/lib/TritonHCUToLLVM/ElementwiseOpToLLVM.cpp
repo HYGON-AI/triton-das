@@ -25,6 +25,79 @@ using ConverterT = std::function<SmallVector<Value>(
     Location, ConversionPatternRewriter &, const SmallVector<Value> &)>;
 
 namespace {
+struct PackedScaleFmaConversion
+    : ConvertOpToLLVMPattern<triton::amdgpu::HCUPackedScaleFmaOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::HCUPackedScaleFmaOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto dot = unpackLLElements(loc, adaptor.getDot(), rewriter);
+    auto scale = unpackLLElements(loc, adaptor.getAScale(), rewriter);
+    auto accumulator =
+        unpackLLElements(loc, adaptor.getAccumulator(), rewriter);
+    if (dot.empty() || dot.size() % 2 || dot.size() > 64)
+      return op.emitOpError(
+          "requires an even number of FP32 elements per thread, at most 64");
+    unsigned count = dot.size() / 2;
+    auto pair = [&](Value low, Value high) -> Value {
+      Value v = b.undef(vec_ty(rewriter.getF32Type(), 2));
+      v = b.insert_element(v, low, b.i32_val(0));
+      if (high)
+        v = b.insert_element(v, high, b.i32_val(1));
+      return LLVM::BitcastOp::create(rewriter, loc, rewriter.getI64Type(), v);
+    };
+    // The unused high B-scale lane is never selected by the native instruction.
+    Value bScale = pair(adaptor.getBScale(), {});
+    SmallVector<Value> inputs;
+    for (unsigned i = 0; i < count; ++i)
+      inputs.push_back(pair(scale[2 * i], scale[2 * i + 1]));
+    inputs.append(count, bScale);
+    for (unsigned i = 0; i < count; ++i)
+      inputs.push_back(pair(accumulator[2 * i], accumulator[2 * i + 1]));
+    for (unsigned i = 0; i < count; ++i)
+      inputs.push_back(pair(dot[2 * i], dot[2 * i + 1]));
+
+    std::string code, constraints;
+    for (unsigned i = 0; i < 2 * count; ++i)
+      constraints += i ? ",=&v" : "=&v";
+    for (unsigned i = 0; i < 2 * count; ++i)
+      constraints += ",v";
+    for (unsigned i = 0; i < 2 * count; ++i)
+      constraints += "," + std::to_string(i);
+    // Tie product registers to dot, and result registers to accumulator.
+    for (unsigned i = 0; i < count; ++i)
+      code += "v_pk_mul_f32 $" + std::to_string(count + i) + ", $" +
+              std::to_string(count + i) + ", $" +
+              std::to_string(2 * count + i) + "\n\t";
+    for (unsigned i = 0; i < count; ++i)
+      code += "v_pk_fma_f32 $" + std::to_string(i) + ", $" +
+              std::to_string(count + i) + ", $" +
+              std::to_string(3 * count + i) + ", $" + std::to_string(i) +
+              " op_sel_hi:[1,0,1]\n\t";
+    SmallVector<Type> types(2 * count, rewriter.getI64Type());
+    Value packed = LLVM::InlineAsmOp::create(
+                       rewriter, loc, LLVM::LLVMStructType::getLiteral(op.getContext(), types), inputs, code,
+                       constraints, false, false, LLVM::TailCallKind::None,
+                       LLVM::AsmDialectAttr::get(op.getContext(),
+                                                 LLVM::AsmDialect::AD_ATT),
+                       ArrayAttr())
+                       ->getResult(0);
+    SmallVector<Value> values;
+    for (unsigned i = 0; i < count; ++i) {
+      Value v = LLVM::BitcastOp::create(rewriter, loc,
+                                        vec_ty(rewriter.getF32Type(), 2),
+                                        b.extract_val(packed, i));
+      values.push_back(b.extract_element(v, b.i32_val(0)));
+      values.push_back(b.extract_element(v, b.i32_val(1)));
+    }
+    rewriter.replaceOp(op, packLLElements(loc, getTypeConverter(), values,
+                                          rewriter, op.getResult().getType()));
+    return success();
+  }
+};
+
 // ---------------------------------------------------------------------------
 // HCU
 
@@ -2952,6 +3025,8 @@ void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns, bool ftz,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, ModuleAllocation &allocation,
     const AMD::TargetInfo &targetInfo, PatternBenefit benefit) {
+  patterns.add<PackedScaleFmaConversion>(
+      typeConverter, PatternBenefit(benefit.getBenefit() + 1));
 
   // fmin (return NaN if either op is NaN)
   patterns.add<mlir::triton::gpu::ElementwiseOpConversion<

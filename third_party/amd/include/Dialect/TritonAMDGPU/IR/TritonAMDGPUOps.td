@@ -1154,4 +1154,23 @@ def AsyncCopyMbarrierArriveOp : TT_AMDGPU_Op<"async_copy_mbarrier_arrive"> {
   let hasVerifier = 1;
 }
 
+// HCU operations exposed by the explicit Gluon programming model.
+def HCUPackedScaleFmaOp : TT_AMDGPU_Op<"hcu_packed_scale_fma", [Pure,
+    TypesMatchWith<"A scale matches dot", "dot", "aScale", "$_self">,
+    TypesMatchWith<"accumulator matches dot", "dot", "accumulator", "$_self">,
+    TypesMatchWith<"result matches dot", "dot", "result", "$_self">]> {
+  let summary = "In-place packed FP32 block-scale multiply and accumulate";
+  let description = [{
+    Compute fma(dot * aScale, bScale, accumulator) with a separately rounded
+    FP32 multiply and a native packed FP32 FMA. bScale is a scalar per thread;
+    the other operands have identical tensor types/layouts. Lowering groups
+    independent multiplies before the dependent FMAs and ties destinations
+    to the dot/accumulator operands to bound register liveness.
+  }];
+  let arguments = (ins RankedTensorOf<[F32]>:$dot, RankedTensorOf<[F32]>:$aScale, F32:$bScale,
+                       RankedTensorOf<[F32]>:$accumulator);
+  let results = (outs RankedTensorOf<[F32]>:$result);
+  let assemblyFormat = "$dot `,` $aScale `,` $bScale `,` $accumulator attr-dict `:` type($dot)";
+}
+
 #endif

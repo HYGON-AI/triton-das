@@ -96,11 +96,13 @@ unsigned getVectorSize(Value ptr, Value offset,
 Type scaleDotElemTypeToMLIRType(MLIRContext *ctx, triton::ScaleDotElemType t);
 
 // Returns true if we can perform coalesced write from the source encoding to
-// the destination encoding for a given vec size.
+// the destination encoding for a given vec size. redundantLaneMask may only
+// contain lane bits disabled by the caller's redundant-thread predicate.
 bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
                                       const LinearLayout &srcToSharedLayout,
                                       unsigned threadsPerWarp,
-                                      unsigned vecSize);
+                                      unsigned vecSize,
+                                      unsigned redundantLaneMask = 0);
 
 // Returns true if the swizzling pattern does only swizzle the shared memory
 // offsets of a warp and does not exchange destination elements across warps

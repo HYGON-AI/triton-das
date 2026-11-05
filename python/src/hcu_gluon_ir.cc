@@ -106,6 +106,14 @@ void init_hcu_gluon_ir(py::handle builder) {
                  f.getWarpsPerCTA());
              op->setAttr(ttag::MlsStoreEncodingAttr::getMnemonic(), attr);
            });
+  bind("create_hcu_packed_fp32_scale_fma",
+           [](TritonOpBuilder &self, Value dot, Value aScale, Value bScale,
+              Value accumulator) -> Value {
+             return self
+                 .create<ttag::HCUPackedScaleFmaOp>(dot.getType(), dot, aScale,
+                                                    bScale, accumulator)
+                 .getResult();
+           });
   bind("create_hcu_sched_barrier",
            [](TritonOpBuilder &self, int32_t mask) {
              enableHcuGluonInlining(self.getContext());

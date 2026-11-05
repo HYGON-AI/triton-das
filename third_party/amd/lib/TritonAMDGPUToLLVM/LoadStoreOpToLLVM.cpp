@@ -331,10 +331,18 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     }
     LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
 
+    // Buffer loads predicate redundant threads below. Ignore only lane bits
+    // whose source mapping is redundant; active lanes must still write to the
+    // implicit contiguous LDS addresses required by the instruction.
+    unsigned redundantLaneMask = 0;
+    if (isa<triton::amdgpu::BufferLoadToLocalOp>(op))
+      redundantLaneMask =
+          srcLayout.getFreeVariableMasks()[rewriter.getStringAttr("lane")];
     unsigned threadsPerWarp = lookupThreadsPerWarp(rewriter);
     if (!requiresSrcPtrSwizzling &&
         !LLVM::AMD::canCoalesceWriteIntoSharedMemory(
-            rewriter, srcToSharedLayout, threadsPerWarp, vectorSize)) {
+            rewriter, srcToSharedLayout, threadsPerWarp, vectorSize,
+            redundantLaneMask)) {
       LDBG(*op << " does not write coalesced into LDS and is not swizzled");
       return failure();
     }

@@ -12,6 +12,7 @@ from triton.experimental.gluon.language.amd.hcu import (
     matrix_load,
     MmacInterleave2Layout,
     MlsSharedLayout,
+    packed_scale_fma,
     get_mmac_instruction,
     get_wave_id,
     set_priority,
@@ -33,10 +34,70 @@ def require_hcu():
         pytest.skip("requires gfx946")
 
 
-
 def test_mls_layout_identity():
     assert MlsSharedLayout(0, (64, 128)) != MlsSharedLayout(0, (64, 128), alt=1)
 
+
+@g.jit
+def packed_kernel(X, S, C, B, Y, ALIAS: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([2], [64], [4], [0])
+    i = gl.arange(0, 512, layout=layout)
+    x = gl.load(X + i)
+    s = x if ALIAS else gl.load(S + i)
+    c = x if ALIAS else gl.load(C + i)
+    b = gl.load(B)
+    y = packed_scale_fma(x, s, b, c)
+    gl.store(Y + i, y)
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_packed_scale_fma(alias):
+    require_hcu()
+    # Dyadic inputs make the separately rounded multiply and fused add exact.
+    x = ((torch.arange(512) % 17 - 8).float() / 8).contiguous()
+    s = torch.full_like(x, 0.25)
+    c = torch.full_like(x, -0.5)
+    b = torch.tensor([0.5])
+    y = torch.empty_like(x, device="cuda")
+    compiled = packed_kernel[(1,)](
+        *(t.cuda() for t in (x, s, c, b)), y, ALIAS=alias, num_warps=4
+    )
+    expected = (x * (x if alias else s)) * b + (x if alias else c)
+    torch.testing.assert_close(y.cpu(), expected, atol=0, rtol=0)
+    assert "v_pk_mul_f32" in compiled.asm["amdgcn"]
+    assert "v_pk_fma_f32" in compiled.asm["amdgcn"]
+
+
+@g.jit
+def narrow_copy_kernel(X, Y):
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
+    i = gl.arange(0, 64, layout=layout)
+    smem = gl.allocate_shared_memory(
+        gl.float32, (2, 64), gl.SwizzledSharedLayout(1, 1, 1, [0])
+    )
+    smem.index(0).store(gl.full((64,), -123.0, gl.float32, layout))
+    smem.index(1).store(gl.full((64,), -456.0, gl.float32, layout))
+    # Two-element destination needs redundant lanes predicated off. Guard the
+    # adjacent allocation and verify both rows remain intact.
+    pair = gl.allocate_shared_memory(
+        gl.float32, (2,), gl.SwizzledSharedLayout(1, 1, 1, [0])
+    )
+    async_copy.buffer_load_to_shared(pair, X, gl.arange(0, 2, layout=layout))
+    async_copy.wait_group(0)
+    raw = smem.index(1).load(layout)
+    gl.store(Y + i, raw)
+    gl.store(Y + 64 + i, smem.index(0).load(layout))
+    j = gl.arange(0, 2, layout=layout)
+    gl.store(Y + 128 + j, pair.load(layout))
+
+
+def test_narrow_copy_preserves_adjacent_shared_slices():
+    require_hcu()
+    x = torch.tensor([1.25, -3.5])
+    y = torch.empty(130, device="cuda")
+    narrow_copy_kernel[(1,)](x.cuda(), y, num_warps=4)
+    expected = torch.cat((torch.full((64,), -456.0), torch.full((64,), -123.0), x))
+    torch.testing.assert_close(y.cpu(), expected, atol=0, rtol=0)
 
 
 @g.jit
@@ -79,7 +140,6 @@ def matrix_store_kernel(
     )
 
 
-
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("M,N,WM", [(64, 256, 1)])
 def test_matrix_store_raw_bits(dtype, M, N, WM):
@@ -103,7 +163,6 @@ def test_matrix_store_raw_bits(dtype, M, N, WM):
     assert "_b8" not in c.asm["amdgcn"]
 
 
-
 @pytest.mark.parametrize("tile,version", [((16, 32), 2), ((32, 32), 2), ((32, 32), 3)])
 def test_matrix_store_configuration(tile, version):
     require_hcu()
@@ -117,6 +176,55 @@ def test_matrix_store_configuration(tile, version):
     torch.testing.assert_close(actual[32:-32], x, atol=0, rtol=0)
     assert (actual[:32] == -320).all() and (actual[-32:] == -320).all()
 
+
+@g.jit
+def dot_store_kernel(A, B, C, STORE: gl.constexpr):
+    F: gl.constexpr = gl.amd.AMDMFMALayout(
+        version=4,
+        instr_shape=[16, 16, 32],
+        mmac_layout=MmacLayout.LTS,
+        warps_per_cta=[1, 4],
+        tiles_per_warp=[4, 2],
+    )
+    L: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    m = gl.arange(0, 64, layout=gl.SliceLayout(1, L))
+    k = gl.arange(0, 32, layout=gl.SliceLayout(0, L))
+    kk = gl.arange(0, 32, layout=gl.SliceLayout(1, L))
+    n = gl.arange(0, 128, layout=gl.SliceLayout(0, L))
+    a = gl.load(A + m[:, None] * 32 + k[None, :])
+    b = gl.load(B + kk[:, None] * 128 + n[None, :])
+    a = gl.convert_layout(a, gl.DotOperandLayout(0, F, 8))
+    b = gl.convert_layout(b, gl.DotOperandLayout(1, F, 8))
+    c = gl.amd.cdna4.mfma(a, b, gl.full((64, 128), 0, gl.float32, F))
+    if STORE:
+        matrix_store(
+            C,
+            c.to(gl.bfloat16),
+            (64, 128),
+            (128, 1),
+            (0, 0),
+            tile=(16, 32),
+        )
+    else:
+        mm = gl.arange(0, 64, layout=gl.SliceLayout(1, F))
+        nn = gl.arange(0, 128, layout=gl.SliceLayout(0, F))
+        gl.store(C + mm[:, None] * 128 + nn[None, :], c.to(gl.bfloat16))
+
+
+@pytest.mark.parametrize("matrix_output", [False, True])
+def test_dot_store(matrix_output):
+    require_hcu()
+    torch.manual_seed(1)
+    a = (torch.randn(64, 32) * 0.5).to(torch.float8_e4m3fn)
+    b = (torch.randn(32, 128) * 0.5).to(torch.float8_e4m3fn)
+    ref = (a.float() @ b.float()).bfloat16()
+    out = torch.empty_like(ref, device="cuda")
+    if matrix_output:
+        with pytest.raises(triton.CompilationError, match="explicit interleave2 result layout"):
+            dot_store_kernel[(1,)](a.cuda(), b.cuda(), out, STORE=True, num_warps=4)
+        return
+    dot_store_kernel[(1,)](a.cuda(), b.cuda(), out, STORE=False, num_warps=4)
+    torch.testing.assert_close(out.cpu(), ref, atol=0, rtol=0)
 
 
 @g.jit
@@ -146,8 +254,7 @@ def mls_b_roundtrip_kernel(X, Y, ALT: gl.constexpr, BOUNDARY_CHECK: gl.constexpr
     gl.store(Y + k[:, None] * 256 + n[None, :], value)
 
 
-
-@pytest.mark.parametrize("alt", [0])
+@pytest.mark.parametrize("alt", [0, 1])
 def test_mls_b_to_ordinary_store(alt):
     require_hcu()
     torch.manual_seed(13)
@@ -156,6 +263,138 @@ def test_mls_b_to_ordinary_store(alt):
     mls_b_roundtrip_kernel[(1,)](x.cuda(), y, ALT=alt, num_warps=4)
     assert torch.equal(y.cpu().view(torch.uint8), x.T.contiguous().view(torch.uint8))
 
+
+@builtin
+def check_interleave_layout_roundtrip(value, _semantic=None):
+    restored = _semantic.builder.get_gluon_layout_from_tensor(value.handle)
+    assert restored == value.type.layout
+    roundtrip = gl.distributed_type(value.dtype, value.shape, restored).to_ir(_semantic.builder)
+    assert str(roundtrip) == str(value.type.to_ir(_semantic.builder))
+    return value
+
+
+@g.jit
+def native_mmac_store_kernel(A, B, C, MATRIX: gl.constexpr, BAD: gl.constexpr = 0):
+    instruction: gl.constexpr = get_mmac_instruction(A.dtype.element_ty, B.dtype.element_ty, gl.float32, 128)
+    f: gl.constexpr = gl.amd.AMDMFMALayout(
+        version=4, instr_shape=instruction[0], mmac_layout=MmacLayout.LTS,
+        warps_per_cta=[1, 4], tiles_per_warp=[4, 4],
+    )
+    bits: gl.constexpr = B.dtype.element_ty.primitive_bitwidth
+    sb: gl.constexpr = MlsSharedLayout(1, (64, 64) if bits == 16 else (128, 64),
+                                     bits=bits, alt=1, version=2 if bits == 16 else 3, order=(0, 1))
+    rf: gl.constexpr = MmacInterleave2Layout(f)
+    shared = gl.allocate_shared_memory(B.dtype.element_ty, (128, 256), sb)
+    matrix_load(shared, B, (128, 256), (1, 128), (0, 0))
+    gl.inline_asm_elementwise(
+        "s_waitcnt lgkmcnt(0)\n\ts_barrier\n\ts_mov_b32 $0, 0",
+        constraints="=s,~{memory}", args=[], dtype=gl.int32, is_pure=False, pack=1,
+    )
+    l: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    m = gl.arange(0, 64, layout=gl.SliceLayout(1, l))
+    k = gl.arange(0, 128, layout=gl.SliceLayout(0, l))
+    a = gl.convert_layout(gl.load(A + m[:, None] * 128 + k[None, :]), gl.DotOperandLayout(0, f, instruction[1]))
+    b = async_copy.load_shared_relaxed(shared, MmacInterleave2Layout(gl.DotOperandLayout(1, f, instruction[1])))
+    b = check_interleave_layout_roundtrip(b)
+    acc = check_interleave_layout_roundtrip(gl.full((64, 256), 0, gl.float32, rf))
+    if BAD == 1:
+        selected_b = gl.convert_layout(b, gl.DotOperandLayout(1, f, instruction[1]))
+    else:
+        selected_b = b
+    if BAD == 2:
+        selected_acc = gl.full((64, 256), 0, gl.float32, f)
+    else:
+        selected_acc = acc
+    c = gl.amd.cdna4.mfma(a, selected_b, selected_acc).to(gl.bfloat16)
+    if MATRIX:
+        matrix_store(C, c, (64, 256), (256, 1), (0, 0))
+    else:
+        mm = gl.arange(0, 64, layout=gl.SliceLayout(1, rf))
+        nn = gl.arange(0, 256, layout=gl.SliceLayout(0, rf))
+        gl.store(C + mm[:, None] * 256 + nn[None, :], c)
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2, torch.float16, torch.bfloat16])
+def test_native_mmac_logical_store(matrix,dtype):
+    require_hcu()
+    torch.manual_seed(37)
+    a = (torch.randint(-8, 9, (64, 128)).float() / 8).to(dtype)
+    b = (torch.randint(-8, 9, (256, 128)).float() / 8).to(dtype)
+    out = torch.empty((64, 256), device="cuda", dtype=torch.bfloat16)
+    native_mmac_store_kernel[(1,)](a.cuda(), b.cuda(), out, MATRIX=matrix, num_warps=4)
+    torch.testing.assert_close(out.cpu(), (a.float() @ b.float().T).bfloat16(), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("operand", [0, 1])
+def test_interleave_layout_identity_and_invalid_parent(operand):
+    f = gl.amd.AMDMFMALayout(
+        version=4, instr_shape=[16, 16, 32], mmac_layout=MmacLayout.LTS,
+        warps_per_cta=[1, 4], tiles_per_warp=[4, 4],
+    )
+    result = MmacInterleave2Layout(f)
+    if operand == 0:
+        with pytest.raises(ValueError, match="only B"):
+            MmacInterleave2Layout(gl.DotOperandLayout(0, f, 8))
+    else:
+        b = MmacInterleave2Layout(gl.DotOperandLayout(1, f, 8))
+        assert result != b and result.mangle() != b.mangle()
+        assert len({result, b}) == 2
+    with pytest.raises(ValueError, match="LTS"):
+        MmacInterleave2Layout(gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0]))
+
+
+@pytest.mark.parametrize("bad", [1, 2])
+def test_interleave_dot_rejects_mismatched_layouts(bad, capfd):
+    require_hcu()
+    from triton.compiler.errors import CompilationError
+    a = torch.empty((64, 128), device="cuda", dtype=torch.float8_e4m3fn)
+    b = torch.empty((256, 128), device="cuda", dtype=torch.float8_e4m3fn)
+    out = torch.empty((64, 256), device="cuda", dtype=torch.bfloat16)
+    with pytest.raises((CompilationError, RuntimeError)) as error:
+        native_mmac_store_kernel.warmup(a, b, out, MATRIX=True, BAD=bad, grid=(1,), num_warps=4)
+    diagnostics = capfd.readouterr()
+    assert "interleave2" in str(error.value) + diagnostics.err + diagnostics.out
+
+
+@g.jit
+def interleave2_global_dot_kernel(A, B, C, MATRIX: gl.constexpr):
+    instruction: gl.constexpr = get_mmac_instruction(A.dtype.element_ty, B.dtype.element_ty, gl.float32, 128)
+    f: gl.constexpr = gl.amd.AMDMFMALayout(
+        version=4, instr_shape=instruction[0], mmac_layout=MmacLayout.LTS,
+        warps_per_cta=[1, 4], tiles_per_warp=[4, 4],
+    )
+    result_layout: gl.constexpr = MmacInterleave2Layout(f)
+    b_layout: gl.constexpr = MmacInterleave2Layout(gl.DotOperandLayout(1, f, instruction[1]))
+    ordinary: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    m = gl.arange(0, 64, layout=gl.SliceLayout(1, ordinary))
+    ka = gl.arange(0, 128, layout=gl.SliceLayout(0, ordinary))
+    a = gl.convert_layout(gl.load(A + m[:, None] * 128 + ka[None, :]), gl.DotOperandLayout(0, f, instruction[1]))
+    kb = gl.arange(0, 128, layout=gl.SliceLayout(1, b_layout))
+    n = gl.arange(0, 256, layout=gl.SliceLayout(0, b_layout))
+    b = gl.load(B + n[None, :] * 128 + kb[:, None])
+    acc = gl.full((64, 256), 0, gl.float32, result_layout)
+    c = gl.amd.cdna4.mfma(a, b, acc).to(gl.bfloat16)
+    if MATRIX:
+        matrix_store(C, c, (64, 256), (256, 1), (0, 0))
+    else:
+        mm = gl.arange(0, 64, layout=gl.SliceLayout(1, result_layout))
+        nn = gl.arange(0, 256, layout=gl.SliceLayout(0, result_layout))
+        gl.store(C + mm[:, None] * 256 + nn[None, :], c)
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("ad,bd", [(torch.float8_e4m3fn,torch.float8_e4m3fn),
+    (torch.float8_e5m2,torch.float8_e5m2), (torch.float8_e4m3fn,torch.float8_e5m2),
+    (torch.float16,torch.float16),(torch.bfloat16,torch.bfloat16),(torch.float32,torch.float32)])
+def test_interleave2_global_load_dot_store(matrix,ad,bd):
+    require_hcu()
+    torch.manual_seed(43)
+    a = (torch.randint(-8, 9, (64, 128)).float() / 8).to(ad)
+    b = (torch.randint(-8, 9, (256, 128)).float() / 8).to(bd)
+    out = torch.empty((64, 256), device="cuda", dtype=torch.bfloat16)
+    interleave2_global_dot_kernel[(1,)](a.cuda(), b.cuda(), out, MATRIX=matrix, num_warps=4)
+    torch.testing.assert_close(out.cpu(), (a.float() @ b.float().T).bfloat16(), atol=0, rtol=0)
 
 
 @g.jit
@@ -166,11 +405,9 @@ def barrier_api_helper(COUNT: gl.constexpr):
     abarrier_invalidate(0)
 
 
-
 @g.jit
 def barrier_api_kernel(COUNT: gl.constexpr):
     barrier_api_helper(COUNT)
-
 
 
 def test_barrier_api_compile():
@@ -182,7 +419,6 @@ def test_barrier_api_compile():
     for count in (1, 3):
         assert re.search(r"@llvm\.hcu\.s\.abarrier\.arrive\(i32 0, i32 " + str(count) + r"\)", llir)
     assert "@llvm.hcu.s.abarrier.inv" in llir
-
 
 
 @pytest.mark.parametrize("operation", ["load", "store"])
@@ -207,7 +443,6 @@ def test_matrix_boundary_forwarding(operation, boundary):
         assert "boundaryCheck" not in lines[0] or "boundaryCheck = []" in lines[0]
 
 
-
 def test_matrix_store_boundary_numeric():
     require_hcu()
     x = (torch.arange(64 * 256).reshape(64, 256).float() % 127).to(torch.bfloat16)
@@ -217,7 +452,6 @@ def test_matrix_store_boundary_numeric():
     got = out.cpu()
     torch.testing.assert_close(got[:61 * 249].reshape(61, 249), x[:61, :249], atol=0, rtol=0)
     assert (got[61 * 249:] == -999).all()
-
 
 
 def test_matrix_load_boundary_numeric():
@@ -231,12 +465,10 @@ def test_matrix_load_boundary_numeric():
     torch.testing.assert_close(out.cpu().float(), expected, atol=0, rtol=0)
 
 
-
 @g.jit
 def ebarrier_api_helper(id, COUNT: gl.constexpr):
     ebarrier_arrive(id, COUNT if COUNT else 4)
     ebarrier_sync(id + 1, COUNT)
-
 
 
 @g.jit
@@ -249,7 +481,6 @@ def ebarrier_api_kernel(X, Y, ID: gl.constexpr, COUNT: gl.constexpr,
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
     i = gl.arange(0, 256, layout=layout)
     gl.store(Y + i, gl.load(X + i) + 1)
-
 
 
 @pytest.mark.parametrize("count", [0, 4, 8, 16])
@@ -268,7 +499,6 @@ def test_ebarrier_api_compile(count, dynamic):
     assert "tt.call" not in compiled.asm["ttgir"]
 
 
-
 @pytest.mark.parametrize("id,count", [(-1, 4), (16, 4), (True, 4),
                                       (0, -1), (0, True), (0, 2**31)])
 def test_ebarrier_invalid_arguments(id, count):
@@ -279,7 +509,6 @@ def test_ebarrier_invalid_arguments(id, count):
         ebarrier_api_kernel.warmup(x, x, ID=id, COUNT=count, grid=(1,), num_warps=4)
 
 
-
 def test_ebarrier_api_runtime():
     require_hcu()
     x = torch.arange(256, dtype=torch.float32)
@@ -288,11 +517,9 @@ def test_ebarrier_api_runtime():
     torch.testing.assert_close(y.cpu(), x + 1, atol=0, rtol=0)
 
 
-
 @g.jit
 def ebarrier_zero_arrive_kernel():
     ebarrier_arrive(3, 0)
-
 
 
 def test_ebarrier_zero_arrive_rejected():

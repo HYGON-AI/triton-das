@@ -252,8 +252,6 @@ def abarrier_arrive(id, count=1, _semantic=None):
     )
 
 
-
-
 @builtin
 def matrix_store(
     base, value, shape, strides, indices, tile=(32, 32),
@@ -347,3 +345,24 @@ def sched_group_barrier(mask, count, sync=0, _semantic=None):
         int(_unwrap_if_constexpr(count)),
         int(_unwrap_if_constexpr(sync)),
     )
+
+
+@builtin
+def packed_scale_fma(dot, a_scale, b_scale, accumulator, _semantic=None):
+    """Compute fma(dot * a_scale, b_scale, accumulator) in packed FP32 pairs.
+
+    b_scale is scalar within each thread. The multiply rounds before the fused
+    multiply-add. Each thread must own an even number (at most 64) of elements.
+    """
+    dot, a_scale, accumulator = _semantic.broadcast_tensors(dot, a_scale, accumulator)
+    b_scale = _semantic.to_tensor(b_scale)
+    if any(x.dtype != gl.float32 for x in (dot, a_scale, b_scale, accumulator)):
+        raise ValueError("packed_scale_fma requires FP32 operands")
+    if b_scale.type.is_block():
+        raise ValueError("b_scale must be a scalar per thread")
+    if dot.type != a_scale.type or dot.type != accumulator.type:
+        raise ValueError("dot, a_scale and accumulator must have the same layout")
+    handle = _semantic.builder.create_hcu_packed_fp32_scale_fma(
+        dot.handle, a_scale.handle, b_scale.handle, accumulator.handle
+    )
+    return gl.tensor(handle, dot.type)

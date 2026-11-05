@@ -594,7 +594,8 @@ Type scaleDotElemTypeToMLIRType(MLIRContext *ctx, triton::ScaleDotElemType t) {
 bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
                                       const LinearLayout &srcToSharedLayout,
                                       unsigned threadsPerWarp,
-                                      unsigned vecSize) {
+                                      unsigned vecSize,
+                                      unsigned redundantLaneMask) {
   auto contig = srcToSharedLayout.getNumConsecutiveInOut();
   if (vecSize != srcToSharedLayout.getNumConsecutiveInOut()) {
     LDBG("Load vectorization ("
@@ -606,6 +607,10 @@ bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
   StringAttr kLane = rewriter.getStringAttr("lane");
   for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
     auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
+    // EXEC disables these redundant lanes. Requiring their zero basis to
+    // equal a nonzero lane stride rejects otherwise legal sub-wave copies.
+    if (basis == 0 && (redundantLaneMask & (1u << inLane)))
+      continue;
     unsigned expected = contig * (1 << inLane);
     if (basis != expected) {
       LDBG("detected uncoalesced layout from blocked to shared in async copy "
