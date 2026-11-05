@@ -202,10 +202,14 @@ function build_llvm() {
     return 1
   fi
   # Use default value for function arguments
-  repo=${1:-"ssh://git@10.65.42.70:8022/buhui/llvm-project.git"}
+  repo="${1:-}"
+  if [[ -z "${repo}" ]]; then
+    echo "Error: llvm repo URL is required as argument 1"
+    return 1
+  fi
   package_server=${2:-"10.65.42.71"}
   package_user=${3:-"sw-builder"}
-  password=${4:-"swadmin"}
+  password=${4:-""}
   pushd ${SRC_HOME}
   package_path="/public/opendas/ArchivedFile/Jenkins/CompileDep/triton"
   hash=`grep -m 1 -v '^$' cmake/llvm-hash.txt`
@@ -218,6 +222,13 @@ function build_llvm() {
   check_exist=$?
   set -e
   if [[ $check_exist -ne 0 ]]; then
+    # Reuse a previous local build instead of rebuilding from source.
+    if [[ -d "${SRC_HOME}/llvm-project/${package_name}/lib/cmake/llvm" ]]; then
+      echo "Using existing local LLVM: ${SRC_HOME}/llvm-project/${package_name}"
+      export LLVM_BUILD_DIR="${SRC_HOME}/llvm-project/${package_name}"
+      popd
+      return 0
+    fi
     # git repo already exist
     if [ -d "llvm-project" ] && [ -d "llvm-project/.git" ]; then
       cd llvm-project
@@ -246,27 +257,48 @@ function build_llvm() {
     ninja -j${MAX_JOBS}
     ninja install -j${MAX_JOBS}
     cd ..
-    tar -zcf ${package_name}.tar.gz ${package_name}
-    export RSYNC_PWD="${password}"
-    expect -c """
-      set timeout 14400
-      spawn rsync -avP ${package_name}.tar.gz ${package_user}@${package_server}:${package_path}/
-      expect {
-        \"*yes/no*\" {
-          send \"yes\n\"
-            expect \"*assword:\" {
+    export LLVM_BUILD_DIR="${SRC_HOME}/llvm-project/${package_name}"
+    use_ssh_key=0
+    if [[ -z "${password}" ]] && ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
+        "${package_user}@${package_server}" true >/dev/null 2>&1; then
+      use_ssh_key=1
+    fi
+    if [[ -z "${password}" && ${use_ssh_key} -eq 0 && -t 0 ]]; then
+      read -r -p "File server user [${package_user}]: " input_user || true
+      package_user="${input_user:-${package_user}}"
+      read -r -s -p "Password for ${package_user}@${package_server} (empty to skip upload): " password || true
+      echo
+    fi
+    if [[ -n "${password}" ]]; then
+      tar -zcf "${package_name}.tar.gz" "${package_name}"
+      export RSYNC_PWD="${password}"
+      expect -c """
+        set timeout 14400
+        spawn rsync -avP ${package_name}.tar.gz ${package_user}@${package_server}:${package_path}/
+        expect {
+          \"*yes/no*\" {
+            send \"yes\n\"
+              expect \"*assword:\" {
+              send \"\$env(RSYNC_PWD)\n\"
+              expect eof
+            }
+          }
+          \"*assword:\" {
             send \"\$env(RSYNC_PWD)\n\"
             expect eof
           }
+          eof
         }
-        \"*assword:\" {
-          send \"\$env(RSYNC_PWD)\n\"
-          expect eof
-        }
-        eof
-      }
-      wait
-    """
+        wait
+      """
+    elif [[ ${use_ssh_key} -eq 1 ]]; then
+      echo "Uploading LLVM to ${package_user}@${package_server}:${package_path} with SSH key"
+      tar -zcf "${package_name}.tar.gz" "${package_name}"
+      rsync -avP -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+        "${package_name}.tar.gz" "${package_user}@${package_server}:${package_path}/"
+    else
+      echo "No file server password provided, skip uploading LLVM; use local build: ${LLVM_BUILD_DIR}"
+    fi
   fi
   popd
 }

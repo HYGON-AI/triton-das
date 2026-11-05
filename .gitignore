@@ -1,6 +1,8 @@
 # Triton builds
 build/
 build-*/
+# Checked-in skill docs whose name matches build-*/
+!.agents/skills/build-hcu-wheel/
 
 llvm-project/
 llvm-project-*/

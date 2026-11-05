@@ -25,14 +25,11 @@ run_lit 1
 ```bash
 run_pytest
 ```
-4. If you want to build wheel, use this command:
+4. If you want to build wheel, run the build script from the repo root (requires python + DTK + torch + AICC):
 ```bash
-source gen_triton_wheel.sh
+bash scripts/hcu/build_hcu_wheel.sh
 ```
-you can specify the version and llvm-project build path, such as:
-```bash
-source gen_triton_wheel.sh --version 2.1.0 --llvm_build_dir path_to_llvm_build
-```
+The wheel is manylinux-repaired by default; pass `--no-manylinux` to skip it. See `bash scripts/hcu/build_hcu_wheel.sh --help` for all options.
 
 
 # Performance report
