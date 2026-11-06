@@ -163,8 +163,19 @@ static void elideTrivialCaptures(LLVM::LLVMFuncOp func,
     llvm::BitVector toErase(wsOp.getNumOperands());
     for (auto [i, capture] : llvm::enumerate(wsOp.getExplicitCaptures())) {
       subgraph.clear();
-      if (failed(findTrivialSubcomputation(func, capture, subgraph)))
+      if (failed(findTrivialSubcomputation(func, capture, subgraph))) {
+        auto partitions = wsOp.getPartitionRegions();
+        if (llvm::any_of(llvm::drop_begin(partitions), [&](Region *region) {
+              return !region->getArgument(i).use_empty();
+            }))
+          continue;
+        // Only partition 0 reaches the preamble and branches directly into its
+        // region. Keep its non-rematerializable captures in registers instead
+        // of passing them back to the same waves through shared memory.
+        partitions.front()->getArgument(i).replaceAllUsesWith(capture);
+        toErase.set(i);
         continue;
+      }
       toErase.set(i);
       subgraph = topologicalSort(subgraph);
 
