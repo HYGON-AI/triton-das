@@ -1963,8 +1963,12 @@ public:
     auto srcElTy = srcTy.getElementType();
     auto dstElTy = dstTy.getElementType();
     if (isFloat(srcElTy) && isFloat(dstElTy)) {
-      auto rmode =
-          RoundingModeAttr::get(rewriter.getContext(), RoundingMode::RTNE);
+      // Widening conversions are exact and do not require a rounding mode.
+      RoundingModeAttr rmode;
+      if (srcElTy.getIntOrFloatBitWidth() > dstElTy.getIntOrFloatBitWidth()) {
+        rmode =
+            RoundingModeAttr::get(rewriter.getContext(), RoundingMode::RTNE);
+      }
       return rewriter.create<FpToFpOp>(loc, dstTy, v, rmode);
     }
     if (!isFloat(srcElTy) && isFloat(dstElTy))
