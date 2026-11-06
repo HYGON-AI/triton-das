@@ -517,12 +517,7 @@ class HIPBackend(BaseBackend):
             raise ValueError(f"Unknown arch: {options.arch}")
 
         if options.arch != "gfx928":
-            # s_barrier not include s_waitcnt vmcnt(0), if not use this, compiler will auto insert s_waitcnt vmcnt(0) with s_barrier
-            # The deployed PMD/gem5 clang (1464499b74) predates this flag and rejects
-            # it as an unknown argument, aborting the amdgcn stage. Skip it on PMD;
-            # the s_barrier waitcnt behavior is not modeled by PMD anyway.
-            if not os.environ.get("PMD_PATH"):
-                options_args.append("-mllvm=-amdgpu-disable-backoff-barrier=false")
+            options_args.append("-mllvm=-amdgpu-disable-backoff-barrier=false")
 
 
         version_args = {
