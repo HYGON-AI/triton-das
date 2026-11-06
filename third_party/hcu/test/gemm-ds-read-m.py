@@ -27,6 +27,20 @@ import triton
 import triton.language as tl
 from triton._internal_testing import is_hip
 
+_FP8_MMAC_ARCHES = {"gfx938", "gfx92a", "gfx946", "gfx948"}
+
+
+def _is_hip_fp8_mmac_target():
+    if not is_hip():
+        return False
+    target = triton.runtime.driver.active.get_current_target()
+    return target is not None and target.arch in _FP8_MMAC_ARCHES
+
+
+def _skip_fp8_without_mmac(dtype):
+    if dtype in (torch.float8_e5m2, torch.float8_e4m3fn) and not _is_hip_fp8_mmac_target():
+        pytest.skip("target lacks native FP8 MMAC support")
+
 DS_READ_M_RE = re.compile(
     r"ds_read_m32x16_b16|ds_read_m32x32_b8|llvm\.hcu\.ds\.read\.m",
     re.IGNORECASE,
@@ -375,6 +389,7 @@ DS_READ_M_BLOCK_K_CASES = [
 @pytest.mark.skipif(not is_hip(), reason="ds_read_m gemm test is HIP/HCU-specific")
 @pytest.mark.parametrize("dtype,n,num_warps", DS_READ_M_CASES)
 def test_ds_read_m_gemm(dtype, n, num_warps):
+    _skip_fp8_without_mmac(dtype)
     torch.manual_seed(0)
     # Single tile: M=16, K=32 (b16/b8 instr K coverage).
     run_case(dtype, block_m=16, block_n=n, block_k=32, num_warps=num_warps)
@@ -383,6 +398,7 @@ def test_ds_read_m_gemm(dtype, n, num_warps):
 @pytest.mark.skipif(not is_hip(), reason="ds_read_m gemm test is HIP/HCU-specific")
 @pytest.mark.parametrize("dtype,block_m,block_n,block_k,num_warps", DS_READ_M_BLOCK_K_CASES)
 def test_ds_read_m_block_k(dtype, block_m, block_n, block_k, num_warps):
+    _skip_fp8_without_mmac(dtype)
     torch.manual_seed(0)
     run_case(dtype, block_m, block_n, block_k, num_warps, multi_tile=True)
 
