@@ -227,6 +227,45 @@ bool hasReduceInChainDots(Operation *dotOp) {
   }
   return false;
 }
+
+// choosedElemsTile is the CTA MLS tile. tilesPerWarp is the slice one warp
+// keeps in registers. A reduction pins every warp on M, so folding the whole
+// MLS non-K tile into tilesPerWarp makes each warp recompute every row.
+// A GEMM that also splits N must keep that factor: chooseMlsInstruction
+// requires the shrunk non-K size to be a real MLS tile, and gfx938 fp16 has
+// no 16-row instruction for a 32-row tile.
+void shrinkMlsTilesToWarpSplit(
+    SmallVector<unsigned> &tilesPerWarp, ArrayRef<unsigned> warpsPerTile,
+    ArrayRef<int64_t> shape, unsigned mIndex, unsigned instM,
+    ArrayRef<std::pair<unsigned, unsigned>> mlsElemsTiles) {
+  if (instM == 0 || mIndex >= tilesPerWarp.size() ||
+      mIndex >= warpsPerTile.size() || mIndex >= shape.size())
+    return;
+  for (unsigned i = 0; i < warpsPerTile.size(); ++i)
+    if (i != mIndex && warpsPerTile[i] != 1)
+      return;
+  unsigned warpsM = warpsPerTile[mIndex];
+  unsigned tilesM = tilesPerWarp[mIndex];
+  if (warpsM <= 1 || tilesM <= 1)
+    return;
+  int64_t denom = static_cast<int64_t>(warpsM) * instM;
+  if (shape[mIndex] % denom != 0)
+    return;
+  int64_t covered = denom * tilesM;
+  if (covered <= shape[mIndex])
+    return;
+  unsigned newTiles =
+      std::max<unsigned>(1, static_cast<unsigned>(shape[mIndex] / denom));
+  unsigned newNonK = newTiles * instM;
+  bool hasTile = false;
+  for (auto tile : mlsElemsTiles)
+    if (tile.first == newNonK)
+      hasTile = true;
+  if (!hasTile)
+    return;
+  tilesPerWarp[mIndex] = newTiles;
+}
+
 bool hasTransInDefChain(tt::DotOpInterface dotOp, unsigned opIdx) {
   SmallVector<Value> worklist{dotOp->getOperand(opIdx)};
   DenseSet<Value> seen;
@@ -1146,6 +1185,11 @@ public:
       tilesPerWarp[mIndex] = tileM/instM;
       tilesPerWarp[nIndex] = tileN/instN;
       warpsPerTile = warpsPerTileMFMA(dotOp, retShape, numWarps, {tileM, tileN});
+      ArrayRef<std::pair<unsigned, unsigned>> mlsTiles;
+      if (aMatInfo.has_value())
+        mlsTiles = aMatInfo->elemsTileCands;
+      shrinkMlsTilesToWarpSplit(tilesPerWarp, warpsPerTile, retShape, mIndex,
+                                instM, mlsTiles);
     }
 
     // ds_read_m on buffer-load B (not MLS): tileN=32 panel, same split as
@@ -1702,6 +1746,11 @@ public:
       tilesPerWarp[nIndex] = tileN/instN;
       warpsPerTile = warpsPerTileMFMA(dotOp, oldShape, numWarps,
                                       {tileM, tileN});
+      ArrayRef<std::pair<unsigned, unsigned>> mlsTiles;
+      if (aMatInfo.has_value())
+        mlsTiles = aMatInfo->elemsTileCands;
+      shrinkMlsTilesToWarpSplit(tilesPerWarp, warpsPerTile, oldShape, mIndex,
+                                instM, mlsTiles);
     }
     auto effectiveMmacLayout = resolveMmacLayout(
         mmacLayout, /*logicalIsTransposed=*/true,

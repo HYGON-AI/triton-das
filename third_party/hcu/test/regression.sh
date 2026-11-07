@@ -25,6 +25,7 @@ base_pytest_cases=(
   "${hcu_file_path}/mls-dot-scaled-test.py::test_mls_f8f6f4_scaled_values"
   "${hcu_file_path}/mls-dot-scaled-test.py::test_mls_fp4_atbt"
   "${hcu_file_path}/test_mls_async_pipeline.py"
+  "${hcu_file_path}/test_mls_tiles_per_warp.py"
   "${hcu_file_path}/test_asyncmark_waitcnt.py"
   "${hcu_file_path}/gemm-ds-read-m.py"
   "${hcu_file_path}/test_elementwise_fma.py"
