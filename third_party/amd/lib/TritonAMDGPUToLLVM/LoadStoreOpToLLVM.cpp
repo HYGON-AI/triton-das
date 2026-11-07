@@ -555,25 +555,17 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       // computation can be safely hoisted to the function entry block. WASP
       // partitions are isolated regions, so their value must stay local.
       auto insertPt = rewriter.saveInsertionPoint();
-      Operation *parentOp = insertPt.getBlock()->getParentOp();
-      bool inWarpSpecialize = false;
-      for (Operation *op = parentOp; op && !isa<LLVM::LLVMFuncOp>(op);
-           op = op->getParentOp())
-        inWarpSpecialize |= isa<WarpSpecializeOp>(op);
-
-      if (!inWarpSpecialize) {
-        while (!isa<LLVM::LLVMFuncOp>(parentOp))
-          parentOp = parentOp->getParentOp();
-        auto funcOp = cast<LLVM::LLVMFuncOp>(parentOp);
-        rewriter.setInsertionPointToStart(&funcOp.getBody().front());
-      }
+      Region *scope = insertPt.getBlock()->getParent();
+      while (!isa<LLVM::LLVMFuncOp, WarpSpecializeOp,
+                  WarpSpecializePartitionsOp>(scope->getParentOp()))
+        scope = scope->getParentOp()->getParentRegion();
+      rewriter.setInsertionPointToStart(&scope->front());
 
       std::tie(laneId, warpId) = getLaneAndWarpId(rewriter, loc);
       auto call = LLVM::createLLVMIntrinsicCallOp(
           rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty}, {warpId});
       warpId = call.getResult(0);
-      if (!inWarpSpecialize)
-        rewriter.restoreInsertionPoint(insertPt);
+      rewriter.restoreInsertionPoint(insertPt);
     } else {
       std::tie(laneId, warpId) = getLaneAndWarpId(rewriter, loc);
     }
@@ -1001,16 +993,11 @@ struct BufferLoadToLocalOpConversion
     Value wrapWaveId = warpId;
     if (sharedEncoding) {
       OpBuilder::InsertionGuard guard(rewriter);
-      if (op->getParentOfType<WarpSpecializeOp>()) {
-        Block *partitionBlock = op->getBlock();
-        while (!isa<WarpSpecializePartitionsOp>(
-            partitionBlock->getParentOp()))
-          partitionBlock = partitionBlock->getParentOp()->getBlock();
-        rewriter.setInsertionPointToStart(partitionBlock);
-      } else {
-        auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
-        rewriter.setInsertionPointToStart(&func.getBody().front());
-      }
+      Region *scope = rewriter.getInsertionBlock()->getParent();
+      while (!isa<LLVM::LLVMFuncOp, WarpSpecializeOp,
+                  WarpSpecializePartitionsOp>(scope->getParentOp()))
+        scope = scope->getParentOp()->getParentRegion();
+      rewriter.setInsertionPointToStart(&scope->front());
       auto scopedWarpId = getLaneAndWarpId(rewriter, loc).second;
       wrapWaveId =
           LLVM::createLLVMIntrinsicCallOp(

@@ -639,3 +639,55 @@ def test_hcu_wait_priority_runtime():
     y = torch.empty(256, device="cuda", dtype=torch.int32)
     wait_priority_kernel[(1,)](y, PRIORITY=3, COUNT=0, num_warps=4)
     torch.testing.assert_close(y.cpu(), torch.arange(256, dtype=torch.int32), atol=0, rtol=0)
+
+
+@g.jit
+def matrix_load_loop(A, C, tiles):
+    storage = gl.allocate_shared_memory(gl.float16, [256, 64], MlsSharedLayout(0, (64, 64), 16, order=(1, 0)))
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 16], MmacLayout.LIT, [4, 1], tiles_per_warp=[4, 1])
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    rows = gl.arange(0, 256, gl.SliceLayout(1, regs))
+    cols = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    for tile in range(tiles):
+        matrix_load(storage, A + tile * 16384, (256, 64), (64, 1), (0, 0), (4, 1))
+        async_copy.commit_group()
+        async_copy.wait_group()
+        values = storage.load(gl.DotOperandLayout(0, mma, 4))
+        values = gl.convert_layout(values, regs)
+        gl.store(C + tile * 16384 + rows[:, None] * 64 + cols[None, :], values)
+        # Finish reads before the next iteration overwrites the same allocation.
+        gl.thread_barrier()
+
+
+@g.jit
+def matrix_load_loop_kernel(A, C, tiles, PARTITIONED: gl.constexpr):
+    if PARTITIONED:
+        gl.warp_specialize(
+            [(wave_id_empty, ()), (matrix_load_loop, (A, C, tiles)),
+             (matrix_load_loop, (A, C + tiles * 16384, tiles))], [4, 4], [64, 64])
+    else:
+        matrix_load_loop(A, C, tiles)
+
+
+@pytest.mark.parametrize("partitioned", [False, True])
+def test_hcu_pipeline_matrix_load_loop(partitioned):
+    import re
+
+    require_hcu()
+    tiles = 3  # Runtime trip count keeps the producer loop in LLVM IR.
+    data = ((torch.arange(tiles * 16384, device="cpu") % 251) - 125).half()
+    expected = data.repeat(2 if partitioned else 1)
+    output = torch.full_like(expected, float("nan")).cuda()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    if partitioned:
+        options.update(wasp_partition_warps=(4, 4), wasp_wdra=False, num_stages=2)
+    compiled = matrix_load_loop_kernel[(1,)](data.cuda(), output, tiles, partitioned, **options)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+    blocks = re.split(r"(?m)^[a-zA-Z0-9_.]+:.*$", compiled.asm["llir"])
+    wave_id_blocks = [block for block in blocks if "call i32 @llvm.amdgcn.readfirstlane" in block]
+    assert len(wave_id_blocks) == (2 if partitioned else 1)
+    # In this straight-line loop, the induction phi marks the loop body.
+    # Wave IDs must stay in the function/partition entry, outside that body.
+    assert all(" = phi " not in block for block in wave_id_blocks)
+
+

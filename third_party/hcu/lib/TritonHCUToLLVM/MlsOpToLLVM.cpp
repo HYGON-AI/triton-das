@@ -75,21 +75,12 @@ Value getLinearWarpId(Location loc, RewriterBase &rewriter,
 
   auto insertPt = rewriter.saveInsertionPoint();
 
-  // Hoist warp-id to the LLVM func entry when possible. Do not hoist across
-  // IsolatedFromAbove (ttg.warp_specialize partitions): entry SSA is invisible
-  // inside those regions, which breaks MLS+WASP lowering.
-  LLVM::LLVMFuncOp funcOp = nullptr;
-  for (Operation *op = insertPt.getBlock()->getParentOp(); op;
-       op = op->getParentOp()) {
-    if (op->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
-      funcOp = nullptr;
-      break;
-    }
-    if ((funcOp = dyn_cast<LLVM::LLVMFuncOp>(op)))
-      break;
-  }
-  if (funcOp)
-    rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+  // Keep partition-local IDs inside their WASP region, but outside its loops.
+  Region *scope = insertPt.getBlock()->getParent();
+  while (!isa<LLVM::LLVMFuncOp, WarpSpecializeOp,
+              WarpSpecializePartitionsOp>(scope->getParentOp()))
+    scope = scope->getParentOp()->getParentRegion();
+  rewriter.setInsertionPointToStart(&scope->front());
 
   auto entryBuilder = TritonLLVMOpBuilder(loc, rewriter);
   Value threadId = getThreadId(rewriter, loc);

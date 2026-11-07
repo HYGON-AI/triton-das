@@ -336,9 +336,6 @@ Value getThreadId(OpBuilder &rewriter, Location loc) {
 
   TritonLLVMOpBuilder b(loc, rewriter);
 
-  // Mixed HCU partitions are packed in Load-first order, so a group's start
-  // need not align to its size: (1,4,4) starts at waves (0,1,5).
-  // Compute the local ID before masking; aligned starts need no subtraction.
   if (auto startId = getWarpGroupStartThreadId(rewriter.getInsertionBlock());
       startId && *startId % upperBound)
     tid = b.sub(tid, b.i32_val(*startId));
