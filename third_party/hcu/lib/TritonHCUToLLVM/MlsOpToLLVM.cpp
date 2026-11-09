@@ -1650,7 +1650,7 @@ private:
                               b.add(warpIdInBatch, b.i32_val(batchIdx * warpsPerBatch)));
       for (int mlsNonK = 0; mlsNonK < mlsNumRepNonK; ++mlsNonK) {
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
-          auto loadOffset = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
+          auto [loadOffset, tileOffset] = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
           loadOffset = b.add(loadOffset, batchOffset);
           for (int loadIdx = 0; loadIdx < dsLoadsPerK; ++loadIdx) {
             unsigned loadNonKIdx = loadIdx / dsRepPerWarpK;
@@ -1668,6 +1668,12 @@ private:
                          b.i32_val(elemByteWidth));
               gepElems = b.add(loadOffset, adjElems);
             }
+            // Encode static tile displacements in the instruction when they fit.
+            uint64_t byteOffset = tileOffset * elemByteWidth + localByteOff;
+            if (byteOffset > 0xffff) {
+              gepElems = b.add(gepElems, b.i32_val(tileOffset));
+              byteOffset = localByteOff;
+            }
             Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, gepElems);
 
             auto dsInsnResTy = getDsReadMatrixInsnResType(loc, rewriter, tensorTy,
@@ -1676,7 +1682,7 @@ private:
             Value loadedValue = generateDsReadMatrixOp(loc, rewriter, dsInsnAttr.insn,
                                                        dsInsnResTy,
                                                        loadAddress,
-                                                       localByteOff,
+                                                       byteOffset,
                                                        dsInsnAttr.flags);
             auto unpackedValues = unpackDsReadMatrixInsnRes(loc, rewriter, tensorTy,
                                                             dsInsnAttr,
@@ -1911,7 +1917,7 @@ private:
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
           int mfmaTileKIdx = mlsKIdx * (mlsTile[kDimIdx2D] / mfmaTileK);
 
-          auto loadOffset = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
+          auto [loadOffset, tileOffset] = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
           loadOffset = b.add(loadOffset, batchOffset);
           for (int loadIdx = 0; loadIdx < dsLoadsPerK; ++loadIdx) {
             unsigned loadNonKIdx = loadIdx / dsRepPerWarpK;
@@ -1929,6 +1935,12 @@ private:
                          b.i32_val(elemByteWidth));
               gepElems = b.add(loadOffset, adjElems);
             }
+            // Encode static tile displacements in the instruction when they fit.
+            uint64_t byteOffset = tileOffset * elemByteWidth + localByteOff;
+            if (byteOffset > 0xffff) {
+              gepElems = b.add(gepElems, b.i32_val(tileOffset));
+              byteOffset = localByteOff;
+            }
             Value loadAddress = b.gep(smemPtrTy, elemTy, smemBase, gepElems);
 
             auto dsInsnResTy = getDsReadMatrixInsnResType(loc, rewriter, tensorTy,
@@ -1937,7 +1949,7 @@ private:
             Value loadedValue = generateDsReadMatrixOp(loc, rewriter, dsInsnAttr.insn,
                                               dsInsnResTy,
                                                        loadAddress,
-                                                       localByteOff,
+                                                       byteOffset,
                                                        dsInsnAttr.flags);
             auto unpackedValues = unpackDsReadMatrixInsnRes(loc, rewriter, tensorTy,
                                                             dsInsnAttr, mlsInsn->getElemBitWidth(),
@@ -1974,7 +1986,8 @@ private:
     return result;
   }
 
-  llvm::SmallVector<Value>
+  // Separate the common runtime offset from static tile repetitions, in elements.
+  SmallVector<std::pair<Value, uint64_t>>
   computeDsReadMatrixOffsets(ConversionPatternRewriter &rewriter, Location loc,
                              const HCUMlsSharedEncodingAttr &sharedLayout,
                              const DsReadMatrixInsnAttr &dsInsnAttr,
@@ -2037,7 +2050,7 @@ private:
           b.udiv(offs[offBase + kDimIdx], b.i32_val(tileK));
     }
 
-    llvm::SmallVector<Value> offsets(numBlocks * numMlsTilesPerBlock);
+    SmallVector<std::pair<Value, uint64_t>> offsets(numBlocks * numMlsTilesPerBlock);
     bool nonKSlicedView = matrixStorePath &&
         viewShape[nonKDimIdx] < parentShape[nonKDimIdx];
     bool warpWithinNonKTile =
@@ -2050,11 +2063,11 @@ private:
         // A within-tile WDRA subslice uses the parent tile plus a caller-side
         // dsByteOffsets half.  Unsliced operands (notably B) retain the
         // [block][warp] ownership matched by the direct non-contiguous store.
-        Value mlsNonKOff = nonKSlicedView && warpWithinNonKTile
-            ? b.add(b.i32_val(block), subsliceNonKTileOff)
-            : b.add(b.add(b.i32_val(blockNonKOffset), warpNonKId),
-                    subsliceNonKTileOff);
-        Value mlsKOff = b.add(b.i32_val(mlsTileIdx), subsliceKTileOff);
+        bool withinTile = nonKSlicedView && warpWithinNonKTile;
+        Value mlsNonKOff = withinTile
+            ? subsliceNonKTileOff
+            : b.add(warpNonKId, subsliceNonKTileOff);
+        Value mlsKOff = subsliceKTileOff;
 
         std::array<Value, 2> mlsCoords =
             opIdx == 0 ? std::array<Value, 2>{mlsNonKOff, mlsKOff}
@@ -2063,7 +2076,17 @@ private:
         Value mlsOff = b.mul(linearize(rewriter, loc, mlsCoords,
                                         flattenedMlsShape, sharedLayout.getOrder()),
                             b.i32_val(product(sharedLayout.getMlsTile())/divFactor));
-        offsets[block * blockSize + mlsTileIdx] = mlsOff;
+        // Keep static repetitions separate for the instruction's byte offset.
+        unsigned staticNonKOff = withinTile ? block : blockNonKOffset;
+        unsigned staticKOff = mlsTileIdx;
+        std::array<unsigned, 2> staticCoords =
+            opIdx == 0 ? std::array<unsigned, 2>{staticNonKOff, staticKOff}
+                       : std::array<unsigned, 2>{staticKOff, staticNonKOff};
+        uint64_t tileOffset =
+            LLVM::linearize(staticCoords, flattenedMlsShape,
+                            sharedLayout.getOrder()) *
+            (product(sharedLayout.getMlsTile()) / divFactor);
+        offsets[block * blockSize + mlsTileIdx] = {mlsOff, tileOffset};
       }
     }
 
