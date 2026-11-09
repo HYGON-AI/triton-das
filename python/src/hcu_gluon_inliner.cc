@@ -8,7 +8,8 @@ struct HcuGluonInlinerInterface : DialectInlinerInterface {
   bool isLegalToInline(Operation *op, Region *, bool, IRMapping &) const final {
     return isa<ROCDL::HCUEbarrierArriveOp, ROCDL::HCUEbarrierSyncOp,
                ROCDL::HCUAbarrierInitOp, ROCDL::HCUAbarrierInvOp,
-               ROCDL::HCUAbarrierTryWaitOp, ROCDL::HCUAbarrierSeqOp,
+               ROCDL::HCUAbarrierTryWaitOp, ROCDL::HCUAbarrierTestWaitOp,
+               ROCDL::HCUAbarrierSeqOp,
                ROCDL::HCUAbarrierArriveOp, ROCDL::SchedBarrier,
                ROCDL::SchedGroupBarrier, ROCDL::SetPrioOp>(op);
   }

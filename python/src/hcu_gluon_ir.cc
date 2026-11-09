@@ -135,9 +135,14 @@ void init_hcu_gluon_ir(py::handle builder) {
          self.create<ROCDL::HCUEbarrierSyncOp>(id, count);
        });
   bind("create_hcu_abarrier_try_wait",
-           [](TritonOpBuilder &self, Value id, Value phase) {
+           [](TritonOpBuilder &self, Value id, Value phase) -> Value {
              enableHcuGluonInlining(self.getContext());
-             self.create<ROCDL::HCUAbarrierTryWaitOp>(id, phase);
+             return self.create<ROCDL::HCUAbarrierTryWaitOp>(id, phase).getResult();
+           });
+  bind("create_hcu_abarrier_test_wait",
+           [](TritonOpBuilder &self, Value id, Value phase) -> Value {
+             enableHcuGluonInlining(self.getContext());
+             return self.create<ROCDL::HCUAbarrierTestWaitOp>(id, phase).getResult();
            });
   bind("create_hcu_abarrier_seq",
            [](TritonOpBuilder &self, Value id) {

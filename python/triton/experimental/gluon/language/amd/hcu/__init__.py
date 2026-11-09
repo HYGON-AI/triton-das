@@ -225,12 +225,32 @@ def abarrier_invalidate(id, _semantic=None):
 
 
 @builtin
-def abarrier_wait(id, phase, _semantic=None):
-    """Wait for the specified phase of an initialized native abarrier."""
-    _semantic.builder.create_hcu_abarrier_try_wait(
+def abarrier_try_wait(id, phase, _semantic=None):
+    """Wait on a barrier phase using the native suspending try-wait instruction.
+
+    Return the native int32 completion status. The wave may suspend while the
+    requested phase is pending. Barrier ID and phase must be wave-uniform scalar
+    values; use abarrier_test_wait for a nonblocking completion probe.
+    """
+    handle = _semantic.builder.create_hcu_abarrier_try_wait(
         _semantic.cast(_semantic.to_tensor(id), gl.int32).handle,
         _semantic.cast(_semantic.to_tensor(phase), gl.int32).handle,
     )
+    return gl.tensor(handle, gl.int32)
+
+
+@builtin
+def abarrier_test_wait(id, phase, _semantic=None):
+    """Test an initialized barrier phase without suspending the wave.
+
+    Return the native int32 completion status: zero means pending, nonzero means
+    complete. Barrier ID and phase must be wave-uniform scalar values.
+    """
+    handle = _semantic.builder.create_hcu_abarrier_test_wait(
+        _semantic.cast(_semantic.to_tensor(id), gl.int32).handle,
+        _semantic.cast(_semantic.to_tensor(phase), gl.int32).handle,
+    )
+    return gl.tensor(handle, gl.int32)
 
 
 @builtin
