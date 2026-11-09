@@ -33,9 +33,16 @@ consecutiveLdsPhases(unsigned waveSize, unsigned lanesPerPhase) {
   return result;
 }
 
-// Wave64/32-bank DS_READ_B128 profile from CK's LDS bank-conflict reference.
+// Wave64 DS_READ_B128 phases: the 32-bank profile follows CK; the 64-bank
+// HCU profile pairs low-half group i with high-half group i^2.
 // Not a default for arbitrary architectures or matrix-read instructions.
-inline std::vector<std::vector<unsigned>> readB128PhasesWave64() {
+inline std::vector<std::vector<unsigned>>
+readB128PhasesWave64(unsigned banks = 32) {
+  if (banks == 64)
+    return {{0, 1, 2, 3, 20, 21, 22, 23, 40, 41, 42, 43, 60, 61, 62, 63},
+            {4, 5, 6, 7, 16, 17, 18, 19, 44, 45, 46, 47, 56, 57, 58, 59},
+            {8, 9, 10, 11, 28, 29, 30, 31, 32, 33, 34, 35, 52, 53, 54, 55},
+            {12, 13, 14, 15, 24, 25, 26, 27, 36, 37, 38, 39, 48, 49, 50, 51}};
   return {{0, 1, 2, 3, 20, 21, 22, 23},     {4, 5, 6, 7, 16, 17, 18, 19},
           {8, 9, 10, 11, 28, 29, 30, 31},   {12, 13, 14, 15, 24, 25, 26, 27},
           {32, 33, 34, 35, 52, 53, 54, 55}, {36, 37, 38, 39, 48, 49, 50, 51},
@@ -75,12 +82,19 @@ contiguousMmacReads(unsigned nonK, unsigned k, unsigned elementBytes,
 // HCU b16 matrix read source-address phases. Keep this target-specific table
 // separate from the ordinary B128 table: the destination register permutation
 // is not the memory issue grouping.
-inline std::vector<std::vector<unsigned>> matrixB16PhasesWave64() {
+inline std::vector<std::vector<unsigned>>
+matrixB16PhasesWave64(unsigned banks = 32) {
   std::vector<std::vector<unsigned>> phases;
   for (unsigned shift : {0u, 2u, 8u, 10u, 32u, 34u, 40u, 42u}) {
+    if (banks == 64 && shift >= 32)
+      break;
     phases.emplace_back();
     for (unsigned lane : {0u, 4u, 1u, 5u, 18u, 22u, 19u, 23u})
       phases.back().push_back(lane ^ shift);
+    // XOR 40 selects the high-half group paired with this low-half group.
+    if (banks == 64)
+      for (unsigned i = 0; i < 8; ++i)
+        phases.back().push_back(phases.back()[i] ^ 40);
   }
   return phases;
 }
@@ -107,34 +121,42 @@ inline std::vector<LdsReadAccess> matrixB16Reads(unsigned k, unsigned nonK) {
   return matrixB16Reads(k, nonK, matrixB16PhasesWave64());
 }
 
-inline std::vector<std::vector<unsigned>> matrixB8PhasesWave64() {
+inline std::vector<std::vector<unsigned>>
+matrixB8PhasesWave64(unsigned banks = 32) {
   std::vector<std::vector<unsigned>> phases;
   for (unsigned shift : {0u, 1u, 8u, 9u, 32u, 33u, 40u, 41u}) {
+    if (banks == 64 && shift >= 32)
+      break;
     phases.emplace_back();
     for (unsigned lane : {0u, 2u, 4u, 6u, 17u, 19u, 21u, 23u})
       phases.back().push_back(lane ^ shift);
+    // XOR 40 selects the high-half group paired with this low-half group.
+    if (banks == 64)
+      for (unsigned i = 0; i < 8; ++i)
+        phases.back().push_back(phases.back()[i] ^ 40);
   }
   return phases;
 }
 
 // Routing and bank arbitration are separate target properties. Pair-collision
 // probes on gfx936 and gfx938 validate these lane groups for ordinary b16/b8;
-// gfx92a/gfx946 share that profile. Other variants remain gfx936-only or
-// unmodelled. No phase issue ORDER is implied. b4 is deliberately absent: its
-// measured conflict-cycle increment differs, so a lane partition alone is not
-// yet a sufficient cost model.
+// gfx92a retains that profile; gfx946/gfx948 combine groups for 64 banks.
+// Other variants remain gfx936-only or unmodelled. No phase issue ORDER is
+// implied. b4 is absent because its conflict-cycle increment differs; lane
+// partitions alone are not a sufficient cost model.
 inline std::optional<std::vector<std::vector<unsigned>>>
 matrixReadBankPhases(std::string_view arch, MatrixReadOpcode opcode) {
   if (!hasLegacyMatrixReadProfile(arch, opcode))
     return std::nullopt;
+  unsigned banks = arch == "gfx946" || arch == "gfx948" ? 64 : 32;
   switch (opcode) {
   case MatrixReadOpcode::M32x16B16:
-    return matrixB16PhasesWave64();
+    return matrixB16PhasesWave64(banks);
   case MatrixReadOpcode::M32x32B8:
   case MatrixReadOpcode::M32x16B16Alt:
-    return matrixB8PhasesWave64();
+    return matrixB8PhasesWave64(banks);
   case MatrixReadOpcode::M32x8B32:
-    return readB128PhasesWave64();
+    return readB128PhasesWave64(banks);
   default:
     return std::nullopt;
   }
@@ -183,17 +205,20 @@ inline std::vector<LdsReadAccess> matrixB8Reads(unsigned k, unsigned nonK) {
 // The phase table is an instruction/target property, not a tile-size policy.
 // Sub-dword reads use a whole-wave phase. Distinct bytes/halfwords of the
 // same bank word are handled as a broadcast by the conflict scorer.
-inline std::vector<std::vector<unsigned>> scalarReadPhases(unsigned bytes) {
+inline std::vector<std::vector<unsigned>>
+scalarReadPhases(unsigned bytes, unsigned banks = 32) {
+  if (banks != 32 && banks != 64)
+    return {};
   switch (bytes) {
   case 1:
   case 2:
     return consecutiveLdsPhases(64, 64);
   case 4:
-    return consecutiveLdsPhases(64, 32);
+    return consecutiveLdsPhases(64, banks);
   case 8:
-    return consecutiveLdsPhases(64, 16);
+    return consecutiveLdsPhases(64, banks / 2);
   case 16:
-    return readB128PhasesWave64();
+    return readB128PhasesWave64(banks);
   default:
     return {};
   }

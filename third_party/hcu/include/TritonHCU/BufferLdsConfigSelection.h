@@ -211,7 +211,7 @@ inline std::optional<BufferLdsConfig> selectMmacBufferLdsConfig(
   if (kContiguous) {
     unsigned readBytes =
         legacyContiguousReadBytes(elementBytes, kWidth, copyBytes);
-    auto phases = scalarReadPhases(readBytes);
+    auto phases = scalarReadPhases(readBytes, hw.banks);
     if (phases.empty())
       return std::nullopt;
     reads = contiguousMmacReads(rows, columns, elementBytes, instructionNonK,
@@ -224,7 +224,7 @@ inline std::optional<BufferLdsConfig> selectMmacBufferLdsConfig(
                 ? matrixB16Reads(rows, columns, *phases)
                 : matrixB8Reads(rows, columns, *phases);
   } else {
-    auto phases = scalarReadPhases(elementBytes);
+    auto phases = scalarReadPhases(elementBytes, hw.banks);
     unsigned instructionK =
         instructionNonK ? hw.waveSize / instructionNonK * kWidth : 0;
     if (phases.empty() || !instructionK || rows % instructionK ||

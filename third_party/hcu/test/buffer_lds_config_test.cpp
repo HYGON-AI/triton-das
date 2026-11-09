@@ -15,7 +15,7 @@ mmacReads(unsigned rows, unsigned columns, unsigned elementBytes,
   if (kContiguous)
     return contiguousMmacReads(
         rows, columns, elementBytes, instructionNonK, kWidth, hw.waveSize,
-        scalarReadPhases(std::min(kWidth * elementBytes, copyBytes)),
+        scalarReadPhases(std::min(kWidth * elementBytes, copyBytes), hw.banks),
         copyBytes);
   if (matrixRead && columns % 32 == 0 && instructionNonK == 16 &&
       elementBytes == 2 && kWidth == 4) {
@@ -32,7 +32,7 @@ mmacReads(unsigned rows, unsigned columns, unsigned elementBytes,
   std::vector<LdsReadAccess> reads;
   unsigned instructionK =
       instructionNonK ? hw.waveSize / instructionNonK * kWidth : 0;
-  auto phases = scalarReadPhases(elementBytes);
+  auto phases = scalarReadPhases(elementBytes, hw.banks);
   if (!instructionK || rows % instructionK || columns % instructionNonK)
     return reads;
   for (unsigned kt = 0; kt < rows; kt += instructionK)
@@ -164,7 +164,7 @@ int main() {
 
     assert(sb->ldsOffsetBits == 17 && sb->ldsOffsetMask() == 0x1ffff);
     assert(sb->wrapFieldOffset == 24 && sb->lds.capacityBytes == 128 * 1024);
-    assert(sb->lds.phaseBytes == 128 && sb->lds.banks == 64);
+    assert(sb->lds.phaseBytes == 256 && sb->lds.banks == 64);
     assert(sb->encodeWrapBytes(4) == 1);
     assert(sb->encodeWrapBytes(63 * 4) == 63);
     assert(!sb->encodeWrapBytes(64 * 4));

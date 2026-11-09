@@ -129,14 +129,13 @@ getBufferLdsTargetProfile(std::string_view arch) {
         /*wrapFieldBits=*/5,
         BufferLdsWrapEncoding::SplitCoarse4DwordFineDword};
   // gfx946 has 128 KiB LDS; gfx948 has 160 KiB. Both have 64 physical
-  // 4-byte banks. A hardware phase remains 128 bytes (32 bank accesses),
-  // rather than widening to all 64 banks. LDS byte addresses need 17 bits
-  // on gfx946 and 18 on gfx948;
+  // 4-byte banks. A read phase covers 256 bytes (64 bank words).
+  // LDS byte addresses need 17 bits on gfx946 and 18 on gfx948;
   // M0[29:24] is a linear 0..63 dword wrap offset.
   if (arch == "gfx946" || arch == "gfx948")
     return BufferLdsTargetProfile{
         {/*banks=*/64, /*bankBytes=*/4, /*waveSize=*/64,
-         /*phaseBytes=*/128,
+         /*phaseBytes=*/256,
          /*capacityBytes=*/(arch == "gfx948" ? 160u : 128u) * 1024},
         {/*granuleBytes=*/4, /*maxBytes=*/63 * 4},
         /*ldsOffsetBits=*/arch == "gfx948" ? 18u : 17u,
