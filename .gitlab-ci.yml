@@ -30,7 +30,6 @@ quality-gate:
     - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
     - quality-pr-scan --base origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} --head ${CI_COMMIT_SHA}
 
-# 版本对应关系: dtk26.10 -> AICC 2.0.0
 build:triton-wheel:
   stage: build
   timeout: 3h
@@ -45,17 +44,16 @@ build:triton-wheel:
   before_script:
     # 加载 DTK 环境（镜像内已预装 DTK）
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
-    # 从镜像 tag 推导 DTK 版本，决定 AICC 大版本（dtk26.10 -> 2.0.0）
+    # 从镜像 tag 推导 DTK 版本，用于 pip 源和 CIUpload 参数
     - export DTK_VERSION="${DTK_IMAGE_TAG%%-*}"
     - test -n "${DTK_VERSION}" || (echo "Cannot parse DTK version from ${DTK_IMAGE_TAG}" && exit 1)
-    - case "${DTK_VERSION}" in 26.10) export AICC_MAJOR=2.0.0;; *) echo "No AICC major mapped for DTK ${DTK_VERSION}" && exit 1;; esac
     # 按镜像内 DTK 版本切换 pip 源，确保 torch 等包从对应 dtk 版本的索引下载
     - test -n "${PYPI_URL}" || (echo "PYPI_URL is not set for this pipeline (check CI/CD Variables; protected variables are not available to unprotected branches)" && exit 1)
     - export PIP_INDEX_URL="${PYPI_URL%/}/nightly/dtk$(echo ${DTK_VERSION} | tr -d '.')/+simple/"
     - export PIP_TRUSTED_HOST=$(echo "${PIP_INDEX_URL}" | sed -E 's#^[A-Za-z]+://##; s#[:/].*$##')
-    # 安装 AICC
+    # 安装 AICC（安装脚本会自动检测 DTK 环境，无需指定版本）
     - wget ${RESOURCE_SERVER_URL}/ai_cc/Nightly/hcu_llvm_installer.sh
-    - bash hcu_llvm_installer.sh --major ${AICC_MAJOR}
+    - bash hcu_llvm_installer.sh
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'
@@ -117,24 +115,27 @@ publish:
         DTK_IMAGE_TAG: ["26.10-rockylinux8.6-py3.12"]
       - TRITON_VERSION: ["3.6.0"]
         TORCH_VERSION: ["2.10.0"]
-        DTK_IMAGE_TAG: ["26.10-rockylinux8.6-py3.12"]
+        DTK_IMAGE_TAG:
+          - "26.04-rockylinux8.6-py3.10"
+          - "26.10-rockylinux8.6-py3.12"
       - TRITON_VERSION: ["3.6.0"]
         TORCH_VERSION: ["2.11.0"]
-        DTK_IMAGE_TAG: ["26.10-rockylinux8.6-py3.12"]
+        DTK_IMAGE_TAG:
+          - "26.04-rockylinux8.6-py3.10"
+          - "26.10-rockylinux8.6-py3.12"
   before_script:
     # 加载 DTK 环境（镜像内已预装 DTK）
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
-    # 从镜像 tag 推导 DTK 版本，决定 AICC 大版本（dtk26.10 -> 2.0.0）
+    # 从镜像 tag 推导 DTK 版本，用于 pip 源和 CIUpload 参数
     - export DTK_VERSION="${DTK_IMAGE_TAG%%-*}"
     - test -n "${DTK_VERSION}" || (echo "Cannot parse DTK version from ${DTK_IMAGE_TAG}" && exit 1)
-    - case "${DTK_VERSION}" in 26.10) export AICC_MAJOR=2.0.0;; *) echo "No AICC major mapped for DTK ${DTK_VERSION}" && exit 1;; esac
     # 按镜像内 DTK 版本切换 pip 源，确保 torch 等包从对应 dtk 版本的索引下载
     - test -n "${PYPI_URL}" || (echo "PYPI_URL is not set for this pipeline (check CI/CD Variables; protected variables are not available to unprotected branches)" && exit 1)
     - export PIP_INDEX_URL="${PYPI_URL%/}/nightly/dtk$(echo ${DTK_VERSION} | tr -d '.')/+simple/"
     - export PIP_TRUSTED_HOST=$(echo "${PIP_INDEX_URL}" | sed -E 's#^[A-Za-z]+://##; s#[:/].*$##')
-    # 安装 AICC
+    # 安装 AICC（安装脚本会自动检测 DTK 环境，无需指定版本）
     - wget ${RESOURCE_SERVER_URL}/ai_cc/Nightly/hcu_llvm_installer.sh
-    - bash hcu_llvm_installer.sh --major ${AICC_MAJOR}
+    - bash hcu_llvm_installer.sh
     # git 免密配置 (GIT_ASKPASS 方式，不修改 remote URL)
     - |
       cat > /tmp/git-askpass.sh << 'SCRIPT'

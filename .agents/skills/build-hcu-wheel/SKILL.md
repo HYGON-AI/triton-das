@@ -22,7 +22,7 @@ description: 在 HCU 环境构建 Triton-HCU wheel。当用户要求编译/打�
 
 3. torch 已安装：`python3 -c "import torch; print(torch.__version__)"`。
 
-4. AICC（aillvm）已安装：默认位于 `$ROCM_PATH/aillvm`，可用 `hcu_llvm_installer.sh --major <版本>` 安装。
+4. AICC（aillvm）已安装：默认位于 `$ROCM_PATH/aillvm`，可用 `hcu_llvm_installer.sh` 自动检测环境安装。
 
 5. 默认执行 manylinux 修复；`auditwheel` 缺失时脚本会自动 `pip install`，无需手动安装（也可用 `--no-manylinux` 跳过）。
 
@@ -80,7 +80,7 @@ bash scripts/hcu/build_hcu_wheel.sh --no-manylinux
 | `torch is not installed` | `pip install torch`（版本需与 DTK 匹配） |
 | `DTK not found` / `hipcc is missing` | 安装 DTK 或设置 `ROCM_PATH` |
 | `hipcc is not in PATH` | `source /opt/dtk/env.sh` |
-| `AICC (aillvm) not found` | `bash hcu_llvm_installer.sh --major <版本>` |
+| `AICC (aillvm) not found` | `bash hcu_llvm_installer.sh` |
 | `failed to install auditwheel` / `patchelf` | 检查 pip 源/网络，或加 `--no-manylinux` 跳过修复 |
 | `patchelf 0.12 found, requires >= 0.14.5` | 脚本会自动升级 patchelf；仍报错时确认 PATH 中 `patchelf` 指向 pip 安装的新版本 |
 | `pybind11 is still missing` / `Cython is still missing` | 检查 pip 源/网络，或手动 `pip install -r python/requirements.txt` |

@@ -93,7 +93,7 @@ function check_dtk() {
 function check_aicc() {
   local rocm_path="$1"
   local aillvm_path="${rocm_path}/aillvm"
-  [[ -d "${aillvm_path}" ]] || die "AICC (aillvm) not found at '${aillvm_path}'. Install it with: bash hcu_llvm_installer.sh --major <version>"
+  [[ -d "${aillvm_path}" ]] || die "AICC (aillvm) not found at '${aillvm_path}'. Install it with: bash hcu_llvm_installer.sh"
   local clang=""
   for candidate in clang-22 clang-18 clang; do
     if [[ -x "${aillvm_path}/bin/${candidate}" ]]; then
