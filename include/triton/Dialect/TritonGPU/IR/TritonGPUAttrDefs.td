@@ -412,6 +412,10 @@ def HCUBufferLdsSharedEncodingAttr
     groups of `wavesPerRowGroup` waves; zero means one group containing every
     producer wave. Grouping controls which waves round-robin adjacent logical
     row chunks when a tile has more waves than one useful interleave group.
+    `rowBitSwap` is zero for identity, or a power-of-two mask selecting the
+    lower of two adjacent logical row bits to exchange before interleaving.
+    For example, 4 exchanges r2/r3; producer ownership applies its inverse
+    (the same exchange). The linear component must describe this permutation.
     `transferMajor` selects the physical slot order
     `[transfer][wave][lane]`; otherwise it is `[wave][transfer][lane]`.
 
@@ -535,7 +539,8 @@ def HCUBufferLdsSharedEncodingAttr
       "unsigned":$rowsPerChunk, "unsigned":$wrapCount,
       "unsigned":$wrapStepBytes,
       DefaultValuedParameter<"unsigned", "0">:$wavesPerRowGroup,
-      DefaultValuedParameter<"bool", "false">:$transferMajor);
+      DefaultValuedParameter<"bool", "false">:$transferMajor,
+      DefaultValuedParameter<"unsigned", "0">:$rowBitSwap);
   let assemblyFormat = "`<` `{` struct(params) `}` `>`";
   let genVerifyDecl = 1;
   let extraClassDeclaration = [{

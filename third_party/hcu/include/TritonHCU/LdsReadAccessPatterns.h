@@ -34,15 +34,15 @@ consecutiveLdsPhases(unsigned waveSize, unsigned lanesPerPhase) {
 }
 
 // Wave64 DS_READ_B128 phases: the 32-bank profile follows CK; the 64-bank
-// HCU profile pairs low-half group i with high-half group i^2.
+// HCU profile uses four independently verified 16-lane groups.
 // Not a default for arbitrary architectures or matrix-read instructions.
 inline std::vector<std::vector<unsigned>>
 readB128PhasesWave64(unsigned banks = 32) {
   if (banks == 64)
-    return {{0, 1, 2, 3, 20, 21, 22, 23, 40, 41, 42, 43, 60, 61, 62, 63},
-            {4, 5, 6, 7, 16, 17, 18, 19, 44, 45, 46, 47, 56, 57, 58, 59},
-            {8, 9, 10, 11, 28, 29, 30, 31, 32, 33, 34, 35, 52, 53, 54, 55},
-            {12, 13, 14, 15, 24, 25, 26, 27, 36, 37, 38, 39, 48, 49, 50, 51}};
+    return {{0, 1, 2, 3, 8, 9, 10, 11, 20, 21, 22, 23, 28, 29, 30, 31},
+            {32, 33, 34, 35, 40, 41, 42, 43, 52, 53, 54, 55, 60, 61, 62, 63},
+            {4, 5, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19, 24, 25, 26, 27},
+            {36, 37, 38, 39, 44, 45, 46, 47, 48, 49, 50, 51, 56, 57, 58, 59}};
   return {{0, 1, 2, 3, 20, 21, 22, 23},     {4, 5, 6, 7, 16, 17, 18, 19},
           {8, 9, 10, 11, 28, 29, 30, 31},   {12, 13, 14, 15, 24, 25, 26, 27},
           {32, 33, 34, 35, 52, 53, 54, 55}, {36, 37, 38, 39, 48, 49, 50, 51},
@@ -84,17 +84,16 @@ contiguousMmacReads(unsigned nonK, unsigned k, unsigned elementBytes,
 // is not the memory issue grouping.
 inline std::vector<std::vector<unsigned>>
 matrixB16PhasesWave64(unsigned banks = 32) {
+  if (banks == 64)
+    return {{0, 1, 4, 5, 8, 9, 12, 13, 18, 19, 22, 23, 26, 27, 30, 31},
+            {32, 33, 36, 37, 40, 41, 44, 45, 50, 51, 54, 55, 58, 59, 62, 63},
+            {2, 3, 6, 7, 10, 11, 14, 15, 16, 17, 20, 21, 24, 25, 28, 29},
+            {34, 35, 38, 39, 42, 43, 46, 47, 48, 49, 52, 53, 56, 57, 60, 61}};
   std::vector<std::vector<unsigned>> phases;
   for (unsigned shift : {0u, 2u, 8u, 10u, 32u, 34u, 40u, 42u}) {
-    if (banks == 64 && shift >= 32)
-      break;
     phases.emplace_back();
     for (unsigned lane : {0u, 4u, 1u, 5u, 18u, 22u, 19u, 23u})
       phases.back().push_back(lane ^ shift);
-    // XOR 40 selects the high-half group paired with this low-half group.
-    if (banks == 64)
-      for (unsigned i = 0; i < 8; ++i)
-        phases.back().push_back(phases.back()[i] ^ 40);
   }
   return phases;
 }
@@ -123,17 +122,16 @@ inline std::vector<LdsReadAccess> matrixB16Reads(unsigned k, unsigned nonK) {
 
 inline std::vector<std::vector<unsigned>>
 matrixB8PhasesWave64(unsigned banks = 32) {
+  if (banks == 64)
+    return {{0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30},
+            {32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62},
+            {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31},
+            {33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63}};
   std::vector<std::vector<unsigned>> phases;
   for (unsigned shift : {0u, 1u, 8u, 9u, 32u, 33u, 40u, 41u}) {
-    if (banks == 64 && shift >= 32)
-      break;
     phases.emplace_back();
     for (unsigned lane : {0u, 2u, 4u, 6u, 17u, 19u, 21u, 23u})
       phases.back().push_back(lane ^ shift);
-    // XOR 40 selects the high-half group paired with this low-half group.
-    if (banks == 64)
-      for (unsigned i = 0; i < 8; ++i)
-        phases.back().push_back(phases.back()[i] ^ 40);
   }
   return phases;
 }

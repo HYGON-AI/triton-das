@@ -96,7 +96,11 @@ def test_view_cannot_discard_wrapped_layout(tmp_path, capfd, view):
     with pytest.raises(RuntimeError):
         run_pass(tmp_path, source, passes.common.add_canonicalizer)
     if view == "memdesc_trans":
-        assert "transpose of HCU buffer-to-LDS placement is unsupported" in capfd.readouterr().err
+        # A transpose is legal only when its inferred encoding still carries
+        # the producer placement and M0 rotation; the plain result is invalid.
+        diagnostic = capfd.readouterr().err
+        assert "ttg.memdesc_trans" in diagnostic and "inferred type(s)" in diagnostic
+        assert "hcu_buffer_lds_shared" in diagnostic and "swizzled_shared" in diagnostic
 
 
 def test_partial_tile_placement_rejected(tmp_path, capfd):

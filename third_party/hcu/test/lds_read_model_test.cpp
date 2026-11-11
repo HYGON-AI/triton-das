@@ -34,6 +34,11 @@ static unsigned physicalByteOracle(const BufferLdsConfig &copyConfig,
   unsigned group = copyConfig.wavesPerRowGroup;
   unsigned row = logical / copyConfig.rowBytes,
            col = logical % copyConfig.rowBytes;
+  if (copyConfig.rowBitSwap) {
+    unsigned low = row & copyConfig.rowBitSwap;
+    unsigned high = row & (2 * copyConfig.rowBitSwap);
+    row = (row & ~(3 * copyConfig.rowBitSwap)) | (low * 2) | (high / 2);
+  }
   unsigned groupRows = copyConfig.rows / copyConfig.waves * group;
   unsigned wave = row / groupRows * group +
                   (row % groupRows / copyConfig.rowsPerChunk) % group;
@@ -131,18 +136,18 @@ int main() {
   assert(scalarReadPhases(8, 64) == consecutiveLdsPhases(64, 32));
   auto b128 = scalarReadPhases(16, 64);
   assert(b128.size() == 4);
-  assert((b128[0] == std::vector<unsigned>{0, 1, 2, 3, 20, 21, 22, 23, 40, 41,
-                                           42, 43, 60, 61, 62, 63}));
+  assert((b128[0] == std::vector<unsigned>{0, 1, 2, 3, 8, 9, 10, 11, 20, 21, 22,
+                                           23, 28, 29, 30, 31}));
   const std::vector<std::vector<unsigned>> b16Phases = {
-      {0, 4, 1, 5, 18, 22, 19, 23, 40, 44, 41, 45, 58, 62, 59, 63},
-      {2, 6, 3, 7, 16, 20, 17, 21, 42, 46, 43, 47, 56, 60, 57, 61},
-      {8, 12, 9, 13, 26, 30, 27, 31, 32, 36, 33, 37, 50, 54, 51, 55},
-      {10, 14, 11, 15, 24, 28, 25, 29, 34, 38, 35, 39, 48, 52, 49, 53}};
+      {0, 1, 4, 5, 8, 9, 12, 13, 18, 19, 22, 23, 26, 27, 30, 31},
+      {32, 33, 36, 37, 40, 41, 44, 45, 50, 51, 54, 55, 58, 59, 62, 63},
+      {2, 3, 6, 7, 10, 11, 14, 15, 16, 17, 20, 21, 24, 25, 28, 29},
+      {34, 35, 38, 39, 42, 43, 46, 47, 48, 49, 52, 53, 56, 57, 60, 61}};
   const std::vector<std::vector<unsigned>> b8Phases = {
-      {0, 2, 4, 6, 17, 19, 21, 23, 40, 42, 44, 46, 57, 59, 61, 63},
-      {1, 3, 5, 7, 16, 18, 20, 22, 41, 43, 45, 47, 56, 58, 60, 62},
-      {8, 10, 12, 14, 25, 27, 29, 31, 32, 34, 36, 38, 49, 51, 53, 55},
-      {9, 11, 13, 15, 24, 26, 28, 30, 33, 35, 37, 39, 48, 50, 52, 54}};
+      {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30},
+      {32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62},
+      {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31},
+      {33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63}};
   for (std::string_view arch : {"gfx946", "gfx948"}) {
     assert(matrixReadBankPhases(arch, MatrixReadOpcode::M32x16B16) ==
            b16Phases);
@@ -418,36 +423,40 @@ int main() {
       auto sbBest = std::make_pair(UINT_MAX, UINT64_MAX);
       std::set<std::pair<unsigned, uint64_t>> observedCosts;
       unsigned validConfigs = 0;
-      for (unsigned group = 1; group <= 4; group *= 2)
-        for (unsigned chunk = 1; chunk <= rows / 4; chunk *= 2)
-          for (unsigned count = 1; count <= 4; count *= 2) {
-            unsigned limit =
-                count == 1
-                    ? 0
-                    : std::min(sb->wrap.maxBytes / (count - 1),
-                               64 * width - 1);
-            for (unsigned step = count == 1 ? 0 : sb->wrap.granuleBytes;
-                 step <= limit; step += sb->wrap.granuleBytes) {
-              BufferLdsConfig candidate{rows, columns * 2, 4, width, 64,
-                                        chunk, count, step};
-              candidate.wavesPerRowGroup = group;
-              auto expected =
-                  bufferLdsBankConflictOracle(candidate, sbReads, sbBanks);
-              BufferLdsConfig scored = candidate;
-              bool accepted =
-                  evaluateBufferLdsBankConflicts(scored, sb->lds, sbReads);
-              assert(accepted == bool(expected));
-              if (!expected)
-                continue;
-              ++validConfigs;
-              auto expectedCost =
-                  std::make_pair(expected->worstWay, expected->phaseService);
-              assert(std::make_pair(scored.worstReadWay,
-                                    scored.readPhaseCost) == expectedCost);
-              observedCosts.insert(expectedCost);
-              sbBest = std::min(sbBest, expectedCost);
+      std::vector<unsigned> swaps{0};
+      for (unsigned bit = 1; bit < rows / 2; bit *= 2)
+        swaps.push_back(bit);
+      for (unsigned swap : swaps)
+        for (unsigned group = 1; group <= 4; group *= 2)
+          for (unsigned chunk = 1; chunk <= rows / 4; chunk *= 2)
+            for (unsigned count = 1; count <= 4; count *= 2) {
+              unsigned limit = count == 1
+                                   ? 0
+                                   : std::min(sb->wrap.maxBytes / (count - 1),
+                                              64 * width - 1);
+              for (unsigned step = count == 1 ? 0 : sb->wrap.granuleBytes;
+                   step <= limit; step += sb->wrap.granuleBytes) {
+                BufferLdsConfig candidate{rows, columns * 2, 4,     width,
+                                          64,   chunk,       count, step};
+                candidate.wavesPerRowGroup = group;
+                candidate.rowBitSwap = swap;
+                auto expected =
+                    bufferLdsBankConflictOracle(candidate, sbReads, sbBanks);
+                BufferLdsConfig scored = candidate;
+                bool accepted =
+                    evaluateBufferLdsBankConflicts(scored, sb->lds, sbReads);
+                assert(accepted == bool(expected));
+                if (!expected)
+                  continue;
+                ++validConfigs;
+                auto expectedCost =
+                    std::make_pair(expected->worstWay, expected->phaseService);
+                assert(std::make_pair(scored.worstReadWay,
+                                      scored.readPhaseCost) == expectedCost);
+                observedCosts.insert(expectedCost);
+                sbBest = std::min(sbBest, expectedCost);
+              }
             }
-          }
       assert(validConfigs > 10 && observedCosts.size() > 1);
       auto sbSelected = selectMmacBufferLdsConfig(
           rows, columns, 2, 4, width, kContiguous, 16, 4, sb->lds,

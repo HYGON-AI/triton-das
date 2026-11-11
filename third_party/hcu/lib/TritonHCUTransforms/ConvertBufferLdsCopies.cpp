@@ -158,6 +158,8 @@ static Value rootSharedAlloc(Value value) {
     Value source;
     if (auto view = dyn_cast<ttg::MemDescIndexOp>(definingOp))
       source = view.getSrc();
+    else if (auto trans = dyn_cast<ttg::MemDescTransOp>(definingOp))
+      source = trans.getSrc();
     else if (auto reshape = dyn_cast<ttg::MemDescReshapeOp>(definingOp))
       source = reshape.getSrc();
     else if (auto slice = dyn_cast<ttg::MemDescSubsliceOp>(definingOp))

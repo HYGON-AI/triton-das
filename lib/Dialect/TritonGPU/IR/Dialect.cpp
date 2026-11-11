@@ -1950,7 +1950,8 @@ LogicalResult HCUBufferLdsSharedEncodingAttr::verify(
     SharedLinearEncodingAttr linearComponent, unsigned elementBytes,
     unsigned contiguousDim, unsigned rows, unsigned rowBytes, unsigned waves,
     unsigned copyBytesPerLane, unsigned rowsPerChunk, unsigned wrapCount,
-    unsigned wrapStepBytes, unsigned wavesPerRowGroup, bool transferMajor) {
+    unsigned wrapStepBytes, unsigned wavesPerRowGroup, bool transferMajor,
+    unsigned rowBitSwap) {
   auto pow2 = [](unsigned n) { return n && llvm::isPowerOf2_32(n); };
   if (elementBytes != 1 && elementBytes != 2)
     return emitError()
@@ -1963,6 +1964,9 @@ LogicalResult HCUBufferLdsSharedEncodingAttr::verify(
   if (!pow2(rows) || !pow2(rowBytes) || !pow2(waves) || !pow2(rowsPerChunk))
     return emitError() << "HCU buffer-to-LDS rows, row bytes, waves, and row "
                           "chunk must be powers of two";
+  if (rowBitSwap && (!pow2(rowBitSwap) || rowBitSwap >= rows / 2))
+    return emitError()
+           << "HCU buffer-to-LDS row bit swap must select two row bits";
   // wrapCount is the period, in producer waves, of the LDS rotation pattern.
   // The exact M0 field range and granularity are target properties and are
   // checked against BufferLdsTargetProfile during lowering.
@@ -2031,6 +2035,8 @@ LogicalResult HCUBufferLdsSharedEncodingAttr::verify(
                    (localRow / rowsPerChunk * groupWaves + wave % groupWaves) *
                        rowsPerChunk +
                    localRow % rowsPerChunk;
+    unsigned bits = ((row >> 1) ^ row) & rowBitSwap;
+    row ^= bits ^ (bits << 1);
     unsigned column =
         static_cast<unsigned>((local % rowBytes) / elementBytes);
     return std::pair<unsigned, unsigned>{row, column};
@@ -3037,9 +3043,25 @@ struct TritonGPUInferLayoutInterface
       return success();
     }
     // Generic case
-    if (isa<HCUBufferLdsSharedEncodingAttr>(operandEncoding))
-      return emitOptionalError(
-          loc, "transpose of HCU buffer-to-LDS placement is unsupported");
+    // Relabel logical coordinates while preserving the complete physical
+    // producer/M0 contract. A plain SharedLinearEncoding would lose the
+    // non-linear wrap rotation and silently misaddress consumer reads.
+    if (auto enc = dyn_cast<HCUBufferLdsSharedEncodingAttr>(operandEncoding)) {
+      if (failed(checkRank(2)))
+        return failure();
+      auto linear = enc.getLinearComponent();
+      auto transposed = transposeLinearLayout(linear.getLinearLayout(), order);
+      auto component = SharedLinearEncodingAttr::get(ctx, std::move(transposed),
+                                                     linear.getAlignment());
+      resultEncoding = HCUBufferLdsSharedEncodingAttr::get(
+          ctx, component, enc.getElementBytes(),
+          invOrderUnsigned[enc.getContiguousDim()], enc.getRows(),
+          enc.getRowBytes(), enc.getWaves(), enc.getCopyBytesPerLane(),
+          enc.getRowsPerChunk(), enc.getWrapCount(), enc.getWrapStepBytes(),
+          enc.getWavesPerRowGroup(), enc.getTransferMajor(),
+          enc.getRowBitSwap());
+      return success();
+    }
     auto padded = dyn_cast<PaddedSharedEncodingAttr>(operandEncoding);
 
     auto ll = padded ? padded.getLinearComponent()

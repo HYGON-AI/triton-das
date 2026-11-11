@@ -29,7 +29,7 @@ inline auto bufferLdsConfigCost(const BufferLdsConfig &copyConfig,
       copyConfig.worstReadWay, copyConfig.readPhaseCost,
       copyConfig.globalSectorCost,
       copyConfig.tileBytes() / copyConfig.bytesPerWaveTransfer(),
-      distance(copyConfig.rowsPerChunk, preferredChunk),
+      copyConfig.rowBitSwap, distance(copyConfig.rowsPerChunk, preferredChunk),
       distance(copyConfig.rowGroupWaves(), preferredGroup),
       distance(copyConfig.wrapCount, preferredWrap), copyConfig.wrapCount,
       copyConfig.wrapStepBytes,
@@ -47,7 +47,10 @@ evaluateBufferLdsBankConflicts(BufferLdsConfig &copyConfig,
       !copyConfig.copyBytesPerLane || copyConfig.waveSize != hw.waveSize ||
       !isBufferLdsPowerOfTwo(copyConfig.rowGroupWaves()) ||
       copyConfig.rowGroupWaves() > copyConfig.waves ||
-      !copyConfig.totalBytesPerWave())
+      !copyConfig.totalBytesPerWave() ||
+      (copyConfig.rowBitSwap &&
+       (!isBufferLdsPowerOfTwo(copyConfig.rowBitSwap) ||
+        copyConfig.rowBitSwap >= copyConfig.rows / 2)))
     return false;
   copyConfig.worstReadWay = 0;
   copyConfig.readPhaseCost = 0;
@@ -129,46 +132,54 @@ selectBufferLdsConfig(unsigned rows, unsigned rowBytes, unsigned waves,
   auto cost = [&hw](const BufferLdsConfig &candidateConfig) {
     return bufferLdsConfigCost(candidateConfig, hw);
   };
-  for (unsigned group = 1; group <= waves; group *= 2) {
-    for (unsigned chunk = 1; chunk <= rows / waves; chunk *= 2) {
-      BufferLdsConfig candidateConfig{
-          rows, rowBytes, waves, copyBytesPerLane, hw.waveSize, chunk, 1, 0};
-      candidateConfig.wavesPerRowGroup = group;
-      // Count 32B global sectors for each wave instruction. Each lane's vector
-      // stays in one logical row, hence no hidden uncoalesced gather within it.
-      for (unsigned base = 0; base < candidateConfig.tileBytes();
-           base += candidateConfig.bytesPerWaveTransfer()) {
-        std::vector<uint64_t> sectors;
-        for (unsigned byte = 0; byte < candidateConfig.bytesPerWaveTransfer();
-             byte += copyBytesPerLane) {
-          unsigned logical = candidateConfig.logicalByte(base + byte);
-          uint64_t global =
-              (logical / rowBytes) * globalRowStrideBytes + logical % rowBytes;
-          sectors.push_back(global / 32);
-          sectors.push_back((global + copyBytesPerLane - 1) / 32);
+  std::vector<unsigned> rowSwaps{0};
+  if (hw.banks == 64)
+    for (unsigned bit = 1; bit < rows / 2; bit *= 2)
+      rowSwaps.push_back(bit);
+  for (unsigned rowSwap : rowSwaps) {
+    for (unsigned group = 1; group <= waves; group *= 2) {
+      for (unsigned chunk = 1; chunk <= rows / waves; chunk *= 2) {
+        BufferLdsConfig candidateConfig{
+            rows, rowBytes, waves, copyBytesPerLane, hw.waveSize, chunk, 1, 0};
+        candidateConfig.wavesPerRowGroup = group;
+        candidateConfig.rowBitSwap = rowSwap;
+        // Count 32B global sectors for each wave instruction. Each lane's
+        // vector stays in one logical row, hence no hidden uncoalesced gather
+        // within it.
+        for (unsigned base = 0; base < candidateConfig.tileBytes();
+             base += candidateConfig.bytesPerWaveTransfer()) {
+          std::vector<uint64_t> sectors;
+          for (unsigned byte = 0; byte < candidateConfig.bytesPerWaveTransfer();
+               byte += copyBytesPerLane) {
+            unsigned logical = candidateConfig.logicalByte(base + byte);
+            uint64_t global = (logical / rowBytes) * globalRowStrideBytes +
+                              logical % rowBytes;
+            sectors.push_back(global / 32);
+            sectors.push_back((global + copyBytesPerLane - 1) / 32);
+          }
+          std::sort(sectors.begin(), sectors.end());
+          candidateConfig.globalSectorCost +=
+              std::unique(sectors.begin(), sectors.end()) - sectors.begin();
         }
-        std::sort(sectors.begin(), sectors.end());
-        candidateConfig.globalSectorCost +=
-            std::unique(sectors.begin(), sectors.end()) - sectors.begin();
-      }
-      for (unsigned count = 1; count <= waves; count *= 2) {
-        candidateConfig.wrapCount = count;
-        unsigned limit =
-            count == 1 ? 0
-                       : std::min(wrap.maxBytes / (count - 1),
-                                  candidateConfig.bytesPerWaveTransfer() - 1);
-        for (unsigned step = count == 1 ? 0 : wrap.granuleBytes; step <= limit;
-             step += wrap.granuleBytes) {
-          candidateConfig.wrapStepBytes = step;
-          // Generic async copies use wave-major placement. A schedule that
-          // requires independently addressable transfer slices may explicitly
-          // convert the selected configuration to transfer-major placement
-          // afterwards.
-          candidateConfig.transferMajor = false;
-          if (evaluateBufferLdsBankConflicts(candidateConfig, hw, reads) &&
-              (!selectedConfig ||
-               cost(candidateConfig) < cost(*selectedConfig)))
-            selectedConfig = candidateConfig;
+        for (unsigned count = 1; count <= waves; count *= 2) {
+          candidateConfig.wrapCount = count;
+          unsigned limit =
+              count == 1 ? 0
+                         : std::min(wrap.maxBytes / (count - 1),
+                                    candidateConfig.bytesPerWaveTransfer() - 1);
+          for (unsigned step = count == 1 ? 0 : wrap.granuleBytes;
+               step <= limit; step += wrap.granuleBytes) {
+            candidateConfig.wrapStepBytes = step;
+            // Generic async copies use wave-major placement. A schedule that
+            // requires independently addressable transfer slices may explicitly
+            // convert the selected configuration to transfer-major placement
+            // afterwards.
+            candidateConfig.transferMajor = false;
+            if (evaluateBufferLdsBankConflicts(candidateConfig, hw, reads) &&
+                (!selectedConfig ||
+                 cost(candidateConfig) < cost(*selectedConfig)))
+              selectedConfig = candidateConfig;
+          }
         }
       }
     }

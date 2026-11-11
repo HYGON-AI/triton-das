@@ -159,6 +159,14 @@ struct BufferLdsConfig {
   // This is a physical-layout contract for schedules that consume transfer
   // slices independently; it is not a bank-conflict planning variable.
   bool transferMajor = false;
+  // Zero keeps row order. Otherwise swap the row bit selected by this
+  // power-of-two mask with its next higher bit (4 swaps r2/r3).
+  // This involution is shared by producer ownership and consumer addresses.
+  unsigned rowBitSwap = 0;
+  unsigned permuteRow(unsigned row) const {
+    unsigned bits = ((row >> 1) ^ row) & rowBitSwap;
+    return row ^ bits ^ (bits << 1);
+  }
   unsigned rowGroupWaves() const {
     return wavesPerRowGroup ? wavesPerRowGroup : waves;
   }
@@ -184,7 +192,7 @@ struct BufferLdsConfig {
   }
 
   unsigned unwrappedByte(unsigned logicalByte) const {
-    unsigned row = logicalByte / rowBytes;
+    unsigned row = permuteRow(logicalByte / rowBytes);
     unsigned col = logicalByte % rowBytes;
     unsigned groupWaves = rowGroupWaves();
     unsigned groupRows = rows / waves * groupWaves;
@@ -215,7 +223,7 @@ struct BufferLdsConfig {
         wave / groupWaves * (rows / waves * groupWaves) +
         (row / rowsPerChunk * groupWaves + wave % groupWaves) * rowsPerChunk +
         row % rowsPerChunk;
-    return logicalRow * rowBytes + local % rowBytes;
+    return permuteRow(logicalRow) * rowBytes + local % rowBytes;
   }
   unsigned physicalByte(unsigned logical) const {
     unsigned offset = unwrappedByte(logical);
@@ -237,7 +245,10 @@ struct BufferLdsConfig {
 
 inline bool isBufferLdsConfigEncodable(const BufferLdsConfig &copyConfig,
                                        const BufferLdsTargetProfile &profile) {
-  if (copyConfig.waveSize != profile.lds.waveSize || !copyConfig.wrapCount ||
+  if ((copyConfig.rowBitSwap &&
+       ((copyConfig.rowBitSwap & (copyConfig.rowBitSwap - 1)) ||
+        copyConfig.rowBitSwap >= copyConfig.rows / 2)) ||
+      copyConfig.waveSize != profile.lds.waveSize || !copyConfig.wrapCount ||
       uint64_t(copyConfig.rows) * copyConfig.rowBytes >
           profile.lds.capacityBytes)
     return false;

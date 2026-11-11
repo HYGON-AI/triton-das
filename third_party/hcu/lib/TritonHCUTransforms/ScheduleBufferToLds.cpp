@@ -1360,6 +1360,9 @@ static Value ringRoot(Value value) {
     Value source;
     if (auto view = dyn_cast<ttg::MemDescIndexOp>(value.getDefiningOp()))
       source = view.getSrc();
+    else if (auto trans =
+                 dyn_cast<ttg::MemDescTransOp>(value.getDefiningOp()))
+      source = trans.getSrc();
     else if (auto reshape =
                  dyn_cast<ttg::MemDescReshapeOp>(value.getDefiningOp()))
       source = reshape.getSrc();
@@ -1421,6 +1424,8 @@ static void collectSlotAllocs(Value value, DenseSet<Value> &allocs) {
       Value source;
       if (auto view = dyn_cast<ttg::MemDescIndexOp>(def))
         source = view.getSrc();
+      else if (auto trans = dyn_cast<ttg::MemDescTransOp>(def))
+        source = trans.getSrc();
       else if (auto reshape = dyn_cast<ttg::MemDescReshapeOp>(def))
         source = reshape.getSrc();
       else if (auto slice = dyn_cast<ttg::MemDescSubsliceOp>(def))

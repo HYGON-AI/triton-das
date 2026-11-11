@@ -76,26 +76,32 @@ static void proveMinimumBankConflict(unsigned rows, unsigned columns,
         mmacReads(rows, columns, elementBytes, kContiguous, instructionNonK,
                   kWidth, matrixRead, hw, width, arch);
     assert(!reads.empty());
-    for (unsigned group = 1; group <= waves; group *= 2) {
-      for (unsigned chunk = 1; chunk <= rows / waves; chunk *= 2)
-        for (unsigned count = 1; count <= waves; count *= 2) {
-          unsigned limit = count == 1 ? 0
-                                      : std::min(wrap.maxBytes / (count - 1),
-                                                 hw.waveSize * width - 1);
-          for (unsigned step = count == 1 ? 0 : wrap.granuleBytes;
-               step <= limit; step += wrap.granuleBytes) {
-            BufferLdsConfig candidate{rows,        columns * elementBytes,
-                                      waves,       width,
-                                      hw.waveSize, chunk,
-                                      count,       step};
-            candidate.wavesPerRowGroup = group;
-            if (!evaluateBufferLdsBankConflicts(candidate, hw, reads))
-              continue;
-            best = std::min(best, std::make_pair(candidate.worstReadWay,
-                                                 candidate.readPhaseCost));
+    std::vector<unsigned> swaps{0};
+    if (hw.banks == 64)
+      for (unsigned bit = 1; bit < rows / 2; bit *= 2)
+        swaps.push_back(bit);
+    for (unsigned swap : swaps)
+      for (unsigned group = 1; group <= waves; group *= 2) {
+        for (unsigned chunk = 1; chunk <= rows / waves; chunk *= 2)
+          for (unsigned count = 1; count <= waves; count *= 2) {
+            unsigned limit = count == 1 ? 0
+                                        : std::min(wrap.maxBytes / (count - 1),
+                                                   hw.waveSize * width - 1);
+            for (unsigned step = count == 1 ? 0 : wrap.granuleBytes;
+                 step <= limit; step += wrap.granuleBytes) {
+              BufferLdsConfig candidate{rows,        columns * elementBytes,
+                                        waves,       width,
+                                        hw.waveSize, chunk,
+                                        count,       step};
+              candidate.wavesPerRowGroup = group;
+              candidate.rowBitSwap = swap;
+              if (!evaluateBufferLdsBankConflicts(candidate, hw, reads))
+                continue;
+              best = std::min(best, std::make_pair(candidate.worstReadWay,
+                                                   candidate.readPhaseCost));
+            }
           }
-        }
-    }
+      }
   }
   assert(std::make_pair(selected->worstReadWay, selected->readPhaseCost) ==
          best);
@@ -114,6 +120,38 @@ static void proveMinimumBankConflict(unsigned rows, unsigned columns,
 }
 
 int main() {
+  // gfx946 B128: changing logical row ownership, not the buffer instruction,
+  // separates rows 0/8 that share a service group. Every byte is preserved.
+  {
+    auto hw = getBufferLdsTargetProfile("gfx946");
+    auto reads = contiguousMmacReads(128, 128, 1, 16, 16, 64,
+                                     scalarReadPhases(16, 64), 16);
+    BufferLdsConfig cfg{128, 128, 4, 16, 64, 2, 4, 32};
+    cfg.wavesPerRowGroup = 4;
+    assert(evaluateBufferLdsBankConflicts(cfg, hw->lds, reads));
+    assert(cfg.worstReadWay == 2 && cfg.readPhaseCost == 128);
+    cfg.rowBitSwap = 4;
+    assert(evaluateBufferLdsBankConflicts(cfg, hw->lds, reads));
+    assert(cfg.worstReadWay == 1 && cfg.readPhaseCost == 64);
+    for (bool transferMajor : {false, true}) {
+      cfg.transferMajor = transferMajor;
+      std::set<unsigned> addresses;
+      for (unsigned byte = 0; byte < cfg.tileBytes(); ++byte) {
+        assert(cfg.logicalByte(cfg.unwrappedByte(byte)) == byte);
+        addresses.insert(cfg.physicalByte(byte));
+      }
+      assert(addresses.size() == cfg.tileBytes());
+      assert(*addresses.begin() == 0 &&
+             *addresses.rbegin() == cfg.tileBytes() - 1);
+      for (unsigned byte = 0; byte < cfg.tileBytes(); byte += 16)
+        assert(cfg.isPhysicalRangeContiguous(byte, 16));
+    }
+    for (unsigned invalid : {3u, 64u}) {
+      cfg.rowBitSwap = invalid;
+      assert(!evaluateBufferLdsBankConflicts(cfg, hw->lds, reads));
+    }
+  }
+
   // Target profiles keep the byte-level placement policy independent from
   // each generation's M0 bit layout.
   {

@@ -4,6 +4,7 @@ Covers:
   - fp16 / bf16 / int8 / fp8, BN in {32,64,128}, various num_warps
   - BK=32/64 multi-tile (BK independent of the old BK==32 gate)
   - panel-major staging, f32 b32 flat staging, and multi-slot pipeline allocation
+  - 64-bank B8/B16 panel mapping with BK=32/64/128 and 1/2/3 stages
   - row-col B keeps the generic K-major staging fallback
   - final ISA must contain ds_read_m when the case is expected to hit the fast path
 
@@ -474,6 +475,36 @@ def test_ds_read_m_f32_b32_multi_warp():
              expect_panel=False, expect_flat=True)
     run_case(torch.float32, 32, 64, 16, 4, input_precision="tf32",
              expect_panel=False, expect_flat=True)
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn,
+                                  torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("bk,stages", [(32, 1), (64, 2), (128, 3)])
+def test_ds_read_m_64bank_panel(dtype, bk, stages):
+    if not torch.cuda.is_available():
+        pytest.skip("requires a 64-bank HCU target")
+    target = triton.runtime.driver.active.get_current_target()
+    if target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
+        pytest.skip("requires a 64-bank HCU target")
+    torch.manual_seed(21)
+    m, n, k = 64, 128, bk * 3
+    a = torch.randint(-2, 3, (m, k)).to(dtype)
+    b = torch.randint(-2, 3, (k, n)).to(dtype)
+    c = torch.empty((m, n), device="cuda", dtype=torch.float32)
+    ad, bd = a.cuda(), b.cuda()
+    integer = dtype == torch.int8
+    kernel = matmul_kernel[(1,)](
+        ad, bd, c, m, n, k, k, 1, n, 1, n, 1,
+        BLOCK_M=m, BLOCK_N=n, BLOCK_K=bk,
+        ACC_DTYPE=tl.int32 if integer else tl.float32,
+        DOT_OUT_DTYPE=tl.int32 if integer else tl.float32,
+        STORE_DTYPE=tl.float32, num_warps=4, num_stages=stages)
+    torch.testing.assert_close(c.cpu(), a.float() @ b.float(), rtol=0, atol=0)
+    assert "ds_read_m32x" in kernel.asm["amdgcn"]
+    assert "shared_linear" in kernel.asm["ttgir"]
+    if a.element_size() == 1:
+        # In the 64-bank layout, physical K bit3 owns logical N bit4.
+        assert "[8, 16]" in kernel.asm["ttgir"]
 
 
 def main():

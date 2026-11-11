@@ -343,3 +343,38 @@ def test_shaobo_async_copy_matrix_read(monkeypatch, dtype, bm, bn, bk, waves):
     assert "llvm.amdgcn.raw.ptr.buffer.load.async.lds" in compiled.asm["llir"]
     assert re.search(r"buffer_load_\w+.*\blds\b", compiled.asm["amdgcn"])
     assert "ds_read_m32x16_b16" in compiled.asm["amdgcn"]
+
+
+@pytest.mark.parametrize("stages,pingpong", [(2, False), (3, False), (4, True)])
+def test_64bank_row_bit_swap_pipeline(monkeypatch, stages, pingpong):
+    """Nonzero row permutations survive async copies and repeated slot reuse."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires a 64-bank HCU target")
+    target = triton.runtime.driver.active.get_current_target()
+    if target.backend != "hip" or target.arch not in ("gfx946", "gfx948"):
+        pytest.skip("requires a 64-bank HCU target")
+    monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
+    # Sixteen-byte reads at this geometry select nonzero A/B row swaps.
+    m = n = bk = 128
+    k = bk * 7
+    rng = torch.Generator().manual_seed(946)
+    # Small integers are represented exactly by FP8 and their FP32 dot sum.
+    a = torch.randint(-2, 3, (m, k), generator=rng).to(torch.float8_e4m3fn)
+    b = torch.randint(-2, 3, (n, k), generator=rng).to(torch.float8_e4m3fn)
+    expected = a.float() @ b.float().T
+    c = torch.full((m, n), float("nan"), device="cuda", dtype=torch.float32)
+    compiled = direct_gemm[(1,)](
+        a.cuda(), b.cuda().T, c, m, n, k, BM=m, BN=n, BK=bk,
+        B_COLUMN_MAJOR=True, AFFINE_COORDS=True,
+        num_warps=4, num_stages=stages, kpack=2,
+        use_async_copy=True, use_block_pingpong=pingpong,
+        matrix_instr_nonkdim=16, optimize_epilogue=False)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0)
+    text = compiled.asm["ttgir"]
+    swaps = [int(value) for value in re.findall(r"rowBitSwap = (\d+)", text)]
+    assert swaps and any(swaps), "test must select a nonzero rowBitSwap"
+    assert compiled.metadata.use_async_copy
+    assert "llvm.amdgcn.raw.ptr.buffer.load.async.lds" in compiled.asm["llir"]
+    assert ("hcu.block_pingpong.applied" in text) is pingpong
+    if not pingpong:
+        assert re.search(rf"local_alloc : \(\) -> !ttg.memdesc<{stages - 1}x128x128x", text)

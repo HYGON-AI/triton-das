@@ -1,11 +1,12 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
+#include "TritonAMDGPUTransforms/Passes.h"
+#include "TritonHCU/BufferLdsConfig.h"
 #include "TritonHCU/DsReadMLayout.h"
 #include "TritonHCU/MlsGroup.h"
-#include "TritonHCU/WaspSplitPlan.h"
-#include "TritonAMDGPUTransforms/Passes.h"
 #include "TritonHCU/Passes.h"
 #include "TritonHCU/Utility.h"
+#include "TritonHCU/WaspSplitPlan.h"
 using namespace ::mlir::triton::HCU;
 #include "TritonAMDGPUTransforms/WmmaGroup.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -1383,9 +1384,12 @@ public:
         // shared-to-dot chain stays independent of BlockPingpong scheduling.
         Attribute stagingEncoding;
         if (dsReadMStagingPlan->panelMajor) {
+          auto arch = getAMDArch(dotOp->getParentOfType<ModuleOp>());
+          auto profile = arch ? getBufferLdsTargetProfile(*arch) : std::nullopt;
           stagingEncoding = getDsReadMPanelEncoding(
               ctx, dsReadMStagingPlan->blockK, dsReadMStagingPlan->blockN,
-              dsReadMStagingPlan->elementBitWidth);
+              dsReadMStagingPlan->elementBitWidth,
+              profile ? profile->lds.banks : 32);
         } else {
           stagingEncoding = getDsReadMFlatEncoding(
               ctx, *dsReadMSpec, dsReadMStagingPlan->blockN, CTALayout);

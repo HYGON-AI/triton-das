@@ -34,6 +34,7 @@ struct DsReadMPlan {
   int64_t ldsBk;
   int64_t ldsBn;
   int64_t maxPhase;
+  unsigned perPhase;
   bool panelMajor;
   unsigned warpsN;
   unsigned nPanels;
@@ -77,6 +78,7 @@ bool hasExpectedSharedLayout(SwizzledSharedEncodingAttr sharedEnc,
 struct DsReadMPanelViewPlan {
   int64_t ldsBk;
   int64_t ldsBn;
+  unsigned perPhase;
 };
 
 // Prove from the memdesc type that a local_load view is a translation within
@@ -96,13 +98,13 @@ buildDsReadMPanelViewPlan(MemDescType viewTy,
     return std::nullopt;
 
   ArrayRef<int64_t> panelShape = allocShape.take_back(2);
-  if (!isDsReadMPanelEncoding(panelEncoding, panelShape[0], panelShape[1],
-                              spec.elementBitWidth) ||
-      viewShape[1] != panelShape[1] || viewShape[0] > panelShape[0] ||
-      viewShape[0] % spec.kPerTile != 0)
+  auto perPhase = getDsReadMPanelPerPhase(panelEncoding, panelShape[0],
+                                          panelShape[1], spec.elementBitWidth);
+  if (!perPhase || viewShape[1] != panelShape[1] ||
+      viewShape[0] > panelShape[0] || viewShape[0] % spec.kPerTile != 0)
     return std::nullopt;
 
-  return DsReadMPanelViewPlan{panelShape[0], 32};
+  return DsReadMPanelViewPlan{panelShape[0], 32, *perPhase};
 }
 
 std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
@@ -172,11 +174,14 @@ std::optional<DsReadMPlan> canUseDsReadM(LocalLoadOp op) {
       tilesPerWarp[nonKDim] != 2 || warpsN == 0 || bn % (warpsN * 32))
     return std::nullopt;
 
-  return DsReadMPlan{dsReadMKind(*spec), bk, bn,
+  return DsReadMPlan{dsReadMKind(*spec),
+                     bk,
+                     bn,
                      panelMajor ? panelViewPlan->ldsBk : bk,
                      panelMajor ? panelViewPlan->ldsBn : bn,
                      panelMajor ? spec->panelMaxPhase
                                 : getDsReadMFlatMaxPhase(*spec, bn),
+                     panelMajor ? panelViewPlan->perPhase : spec->perPhase,
                      panelMajor,
                      warpsN,
                      static_cast<unsigned>(bn / (warpsN * 32)),
@@ -428,7 +433,7 @@ emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
     // Panel-major physical addressing:
     //   k_addr = lane >> 1
     //   c       = lane & 1
-    //   phase   = k_addr & 1
+    //   phase   = (k_addr / perPhase) & 1; perPhase=1 (32 banks), 8 (64)
     //   panel   = nPanel * warpsN + warpNonK
     //   physical_k = k_addr ^ (panel & 3)
     //   vaddr_elem = warpNonK * BK * 32 + physical_k * 32
@@ -440,7 +445,7 @@ emitB8Reads(Location loc, RewriterBase &rewriter, TritonLLVMOpBuilder &b,
     // later K32 tiles and N32 panel groups through the byte-unit immediate:
     //   offset_bytes = kTile * 32 * 32 + nPanel * warpsN * BK * 32
     Value kAddr = b.lshr(laneId, b.i32_val(1));
-    Value phase = b.and_(kAddr, b.i32_val(1));
+    Value phase = b.and_(b.udiv(kAddr, b.i32_val(plan.perPhase)), b.i32_val(1));
     Value nGroup = b.xor_(colInPair, phase);
 
     for (unsigned nPanel = 0; nPanel < plan.nPanels; ++nPanel) {

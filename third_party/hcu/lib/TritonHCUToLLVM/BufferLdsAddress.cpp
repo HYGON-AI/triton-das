@@ -22,6 +22,11 @@ Value emitWrap(TritonLLVMOpBuilder &b, const BufferLdsConfig &copyConfig,
 Value emitBufferLdsByteOffset(TritonLLVMOpBuilder &b,
                               const BufferLdsConfig &copyConfig, Value row,
                               Value col, unsigned elementBytes) {
+  if (copyConfig.rowBitSwap) {
+    Value bits = b.and_(b.xor_(b.lshr(row, b.i32_val(1)), row),
+                        b.i32_val(copyConfig.rowBitSwap));
+    row = b.xor_(row, b.xor_(bits, b.shl(bits, b.i32_val(1))));
+  }
   unsigned groupWaves = copyConfig.rowGroupWaves();
   unsigned groupRows = copyConfig.rows / copyConfig.waves * groupWaves;
   Value group = b.udiv(row, b.i32_val(groupRows));

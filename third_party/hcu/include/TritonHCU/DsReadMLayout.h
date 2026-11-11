@@ -86,25 +86,35 @@ inline bool isDsReadMPanelShape(int64_t blockK, int64_t blockN,
          llvm::isPowerOf2_64(blockK) && llvm::isPowerOf2_64(blockN);
 }
 
+// B8's 64-bank phase contains sixteen lanes with the same lane bit 0.
+// K bits [2:0] already select bank bits [5:3]; use K bit 3 for the
+// otherwise missing bank bit 2 (the N16 group). Reusing K bit 0, as on
+// 32 banks, maps two distinct words to each bank. B16 needs no change.
+inline unsigned getDsReadMPanelPerPhase(const DsReadMLayoutSpec &spec,
+                                        unsigned ldsBanks) {
+  return spec.elementBitWidth == 8 && ldsBanks == 64 ? 8 : spec.perPhase;
+}
+
 // Logical B remains [BK, BN].  Physically, LDS is ordered as
 // [BN/32 panels][BK rows][32 columns].  Each N32 panel therefore has the row
 // stride expected by ds_read_m.  The K basis carries the XOR used by the
 // matching matrix-read address formula:
 //   b16: vec=8,  perPhase=2, maxPhase=2
-//   b8:  vec=16, perPhase=1, maxPhase=2
+//   b8:  vec=16, perPhase=1 (32 banks) or 8 (64 banks), maxPhase=2
 // Limiting b8 to two phases is intentional: its N XOR must stay inside one
 // physical N32 panel.  Its panel bases additionally XOR panel-id bits [1:0]
 // into K bits [1:0], rotating N-contiguous vector stores across all 32 LDS
 // banks without padding; the matching read address reverses this skew.
-// On 64-bank gfx946, each 128B phase issues only 32 four-byte bank accesses,
-// so covering 32 distinct banks is already conflict-free (1-way).
+// A 64-bank B8 phase services 16 lanes (256 bytes), rather than the 8 lanes
+// of a 32-bank phase. Its N XOR uses getDsReadMPanelPerPhase accordingly.
 inline gpu::SharedLinearEncodingAttr
 getDsReadMPanelEncoding(MLIRContext *context, int64_t blockK, int64_t blockN,
-                        unsigned elementBitWidth) {
+                        unsigned elementBitWidth, unsigned ldsBanks = 32) {
   auto spec = getDsReadMLayoutSpec(elementBitWidth);
   assert(spec && isDsReadMPanelShape(blockK, blockN, *spec) &&
          "invalid ds_read_m panel shape or element type");
 
+  unsigned perPhase = getDsReadMPanelPerPhase(*spec, ldsBanks);
   StringAttr offset = StringAttr::get(context, "offset");
   StringAttr block = StringAttr::get(context, "block");
   SmallVector<StringAttr> outDims = standardOutDimNames(context, 2);
@@ -114,7 +124,7 @@ getDsReadMPanelEncoding(MLIRContext *context, int64_t blockK, int64_t blockN,
   for (int32_t k = 1; k < blockK; k *= 2)
     bases.push_back(
         {k, static_cast<int32_t>(spec->vec *
-                                 ((k / spec->perPhase) % spec->panelMaxPhase))});
+                                 ((k / perPhase) % spec->panelMaxPhase))});
   for (int32_t panelN = 32; panelN < blockN; panelN *= 2) {
     // Consecutive N16 vectors are written by consecutive lanes, so the first
     // four N32 panels would otherwise start on the same eight LDS banks.  For
@@ -127,8 +137,7 @@ getDsReadMPanelEncoding(MLIRContext *context, int64_t blockK, int64_t blockN,
       panelK = panelN / 32;
     int32_t panelCoord =
         panelN + static_cast<int32_t>(
-                     spec->vec * ((panelK / spec->perPhase) %
-                                  spec->panelMaxPhase));
+                     spec->vec * ((panelK / perPhase) % spec->panelMaxPhase));
     bases.push_back({panelK, panelCoord});
   }
 
@@ -137,13 +146,26 @@ getDsReadMPanelEncoding(MLIRContext *context, int64_t blockK, int64_t blockN,
                                              /*layoutAlignment=*/16);
 }
 
+// Recognize both address contracts explicitly: existing 32-bank TTGIR stays
+// readable on every target, and the selected contract determines lowering.
+inline std::optional<unsigned>
+getDsReadMPanelPerPhase(gpu::SharedLinearEncodingAttr encoding, int64_t blockK,
+                        int64_t blockN, unsigned elementBitWidth) {
+  auto spec = getDsReadMLayoutSpec(elementBitWidth);
+  if (!encoding || !spec || !isDsReadMPanelShape(blockK, blockN, *spec))
+    return std::nullopt;
+  for (unsigned banks : {32u, 64u})
+    if (encoding == getDsReadMPanelEncoding(encoding.getContext(), blockK,
+                                            blockN, elementBitWidth, banks))
+      return getDsReadMPanelPerPhase(*spec, banks);
+  return std::nullopt;
+}
+
 inline bool isDsReadMPanelEncoding(gpu::SharedLinearEncodingAttr encoding,
                                    int64_t blockK, int64_t blockN,
                                    unsigned elementBitWidth) {
-  auto spec = getDsReadMLayoutSpec(elementBitWidth);
-  return encoding && spec && isDsReadMPanelShape(blockK, blockN, *spec) &&
-         encoding == getDsReadMPanelEncoding(encoding.getContext(), blockK,
-                                             blockN, elementBitWidth);
+  return getDsReadMPanelPerPhase(encoding, blockK, blockN, elementBitWidth)
+      .has_value();
 }
 
 // Canonical flat N-major staging for the [BK, BN] tile (lds[k*BN + n]); the

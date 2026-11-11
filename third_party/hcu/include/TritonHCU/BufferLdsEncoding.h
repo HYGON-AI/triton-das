@@ -52,7 +52,8 @@ bufferLdsSharedEncoding(MLIRContext *ctx, const BufferLdsConfig &copyConfig,
       elementBytes, contiguousDim, copyConfig.rows, copyConfig.rowBytes,
       copyConfig.waves, copyConfig.copyBytesPerLane, copyConfig.rowsPerChunk,
       copyConfig.wrapCount, copyConfig.wrapStepBytes,
-      copyConfig.wavesPerRowGroup, copyConfig.transferMajor);
+      copyConfig.wavesPerRowGroup, copyConfig.transferMajor,
+      copyConfig.rowBitSwap);
 }
 
 inline gpu::LinearEncodingAttr
@@ -103,26 +104,28 @@ getBufferLdsConfig(gpu::HCUBufferLdsSharedEncodingAttr enc) {
           0,
           0,
           enc.getWavesPerRowGroup(),
-          enc.getTransferMajor()};
+          enc.getTransferMajor(),
+          enc.getRowBitSwap()};
 }
 
 inline DenseI32ArrayAttr encodeBufferLdsConfig(MLIRContext *ctx,
                                                const BufferLdsConfig &config) {
-  return DenseI32ArrayAttr::get(
-      ctx,
-      {static_cast<int32_t>(config.rows), static_cast<int32_t>(config.rowBytes),
-       static_cast<int32_t>(config.waves),
-       static_cast<int32_t>(config.copyBytesPerLane),
-       static_cast<int32_t>(config.waveSize),
-       static_cast<int32_t>(config.rowsPerChunk),
-       static_cast<int32_t>(config.wrapCount),
-       static_cast<int32_t>(config.wrapStepBytes),
-       static_cast<int32_t>(config.wavesPerRowGroup)});
+  return DenseI32ArrayAttr::get(ctx,
+                                {static_cast<int32_t>(config.rows),
+                                 static_cast<int32_t>(config.rowBytes),
+                                 static_cast<int32_t>(config.waves),
+                                 static_cast<int32_t>(config.copyBytesPerLane),
+                                 static_cast<int32_t>(config.waveSize),
+                                 static_cast<int32_t>(config.rowsPerChunk),
+                                 static_cast<int32_t>(config.wrapCount),
+                                 static_cast<int32_t>(config.wrapStepBytes),
+                                 static_cast<int32_t>(config.wavesPerRowGroup),
+                                 static_cast<int32_t>(config.rowBitSwap)});
 }
 
 inline std::optional<BufferLdsConfig>
 decodeBufferLdsConfig(DenseI32ArrayAttr attr) {
-  if (!attr || attr.size() != 9)
+  if (!attr || (attr.size() != 9 && attr.size() != 10))
     return std::nullopt;
   auto values = attr.asArrayRef();
   if (llvm::any_of(values, [](int32_t value) { return value < 0; }) ||
@@ -135,6 +138,11 @@ decodeBufferLdsConfig(DenseI32ArrayAttr attr) {
       static_cast<unsigned>(values[4]), static_cast<unsigned>(values[5]),
       static_cast<unsigned>(values[6]), static_cast<unsigned>(values[7])};
   config.wavesPerRowGroup = static_cast<unsigned>(values[8]);
+  config.rowBitSwap =
+      values.size() == 10 ? static_cast<unsigned>(values[9]) : 0;
+  if (config.rowBitSwap && (!isBufferLdsPowerOfTwo(config.rowBitSwap) ||
+                            config.rowBitSwap >= config.rows / 2))
+    return std::nullopt;
   return config;
 }
 
