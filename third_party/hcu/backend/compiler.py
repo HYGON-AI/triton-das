@@ -883,6 +883,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_cse(pm)
         if options.use_block_pingpong:
             hcu.passes.ttgpuir.add_pack_block_pingpong_bit8(pm)
+        hcu.passes.ttgpuir.add_pack_bit8_loop_carriers(pm)
         passes.common.add_symbol_dce(pm)
 
         if metadata.get("wasp_enabled", False):

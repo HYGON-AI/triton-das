@@ -42,6 +42,7 @@ namespace mlir {
 #define GEN_PASS_DEF_TRITONHCUBLOCKPINGPONG
 #define GEN_PASS_DEF_TRITONHCUFINALIZEBLOCKPINGPONG
 #define GEN_PASS_DEF_TRITONHCUPACKBLOCKPINGPONGBIT8
+#define GEN_PASS_DEF_TRITONHCUPACKBIT8LOOPCARRIERS
 #include "TritonHCU/Passes.h.inc"
 
 namespace {
@@ -3574,11 +3575,10 @@ static LogicalResult tryPackLoopCarriedBlockArgument(BlockArgument argument) {
 
   for (LLVM::BrOp branch : predecessors) {
     OpBuilder builder(branch);
-    SmallVector<Value> operands(branch.getDestOperands());
-    operands[argumentNumber] = packBit8Struct(
-        builder, branch.getLoc(), operands[argumentNumber], packedType);
-    LLVM::BrOp::create(builder, branch.getLoc(), operands, block);
-    branch.erase();
+    Value packed = packBit8Struct(
+        builder, branch.getLoc(), branch.getDestOperands()[argumentNumber],
+        packedType);
+    branch.getDestOperandsMutable().slice(argumentNumber, 1).assign(packed);
   }
 
   SmallVector<LLVM::ExtractValueOp> extracts;
@@ -3703,6 +3703,32 @@ static LogicalResult tryPackBit8VectorStore(LLVM::StoreOp store) {
   return success();
 }
 
+static void packBit8LoopCarriers(LLVM::LLVMFuncOp function) {
+  SmallVector<BlockArgument> arguments;
+  for (Block &block : function.getBody())
+    for (BlockArgument argument : block.getArguments())
+      if (isPackableBit8Struct(argument.getType()))
+        arguments.push_back(argument);
+
+  bool changed;
+  do {
+    changed = false;
+    for (BlockArgument argument : llvm::reverse(arguments))
+      changed |= succeeded(tryPackLoopCarriedBlockArgument(argument));
+  } while (changed);
+}
+
+struct TritonHCUPackBit8LoopCarriersPass
+    : impl::TritonHCUPackBit8LoopCarriersBase<
+          TritonHCUPackBit8LoopCarriersPass> {
+  using Base::Base;
+
+  void runOnOperation() override {
+    getOperation().walk(
+        [](LLVM::LLVMFuncOp function) { packBit8LoopCarriers(function); });
+  }
+};
+
 struct TritonHCUPackBlockPingpongBit8Pass
     : impl::TritonHCUPackBlockPingpongBit8Base<
           TritonHCUPackBlockPingpongBit8Pass> {
@@ -3723,22 +3749,11 @@ struct TritonHCUPackBlockPingpongBit8Pass
     });
 
     for (LLVM::LLVMFuncOp function : functions) {
-      SmallVector<BlockArgument> arguments;
-      for (Block &block : function.getBody())
-        for (BlockArgument argument : block.getArguments())
-          if (isPackableBit8Struct(argument.getType()))
-            arguments.push_back(argument);
-
       // A main pipelined loop may forward its Bit8 carrier directly to a
       // remainder loop.  Packing a successor turns the predecessor's
       // whole-struct branch use into scalar extracts.  Iterate to a fixed
       // point instead of relying on textual block order.
-      bool changed;
-      do {
-        changed = false;
-        for (BlockArgument argument : llvm::reverse(arguments))
-          changed |= succeeded(tryPackLoopCarriedBlockArgument(argument));
-      } while (changed);
+      packBit8LoopCarriers(function);
 
       // Opaque pointers allow changing only the stored vector type while
       // retaining the original store's alignment and alias metadata.

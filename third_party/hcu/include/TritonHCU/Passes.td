@@ -219,6 +219,19 @@ def TritonHCUFinalizeBlockPingpong
   ];
 }
 
+def TritonHCUPackBit8LoopCarriers
+    : Pass<"tritonhcu-pack-bit8-loop-carriers", "mlir::ModuleOp"> {
+  let summary = "Keep 8-bit loop-carried values packed in i32";
+  let description = [{
+    After control-flow lowering to the LLVM dialect, pack homogeneous i8
+    aggregates crossing loop backedges into i32 words. This preserves packed
+    loads across software-pipelined iterations and avoids byte extraction and
+    repacking before FP8 conversion. The transformation preserves every bit
+    and applies independently of the frontend operator and loop schedule.
+  }];
+  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 def TritonHCUPackBlockPingpongBit8
     : Pass<"tritonhcu-pack-block-pingpong-bit8", "mlir::ModuleOp"> {
   let summary = "Keep 8-bit BlockPingpong loop-carried values packed in i32";

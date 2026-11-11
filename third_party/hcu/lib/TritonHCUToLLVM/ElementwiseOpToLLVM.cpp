@@ -2310,6 +2310,12 @@ struct FpToFpOpConversion
     const bool hasFp8F32HW =
         features & (AMD::HCUISAFeature::CVT_FP8F32 |
                     AMD::HCUISAFeature::CVT_SCALE_PK);
+    if (hasCvtScalePk &&
+        (dstElementType.isF32() || dstElementType.isF16() ||
+         dstElementType.isBF16()) &&
+        llvm::isa<Float8E4M3FNType, Float8E5M2Type>(srcElementType)) {
+      numElements = 4;
+    }
     if ((llvm::isa<Float8E5M2Type>(srcElementType) && llvm::isa<BFloat16Type>(dstElementType)) ||
         (llvm::isa<Float8E5M2Type>(srcElementType) && llvm::isa<Float16Type>(dstElementType) && !hasCvtScalePk) ||
         (llvm::isa<Float8E5M2Type>(srcElementType) && llvm::isa<Float32Type>(dstElementType) && !hasFp8F32HW)  ||
