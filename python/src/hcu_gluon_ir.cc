@@ -6,6 +6,8 @@
 #include "TritonHCU/MlsGroup.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Matchers.h"
 #include "pybind11/stl.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -201,4 +203,68 @@ void init_hcu_gluon_ir(py::handle builder) {
     enableHcuGluonInlining(self.getContext());
     self.create<ROCDL::HCUAbarrierInvOp>(id);
   });
+
+  // Explicit Gluon layouts and descriptors.
+  bind("get_hcu_scale_layout",
+       [](TritonOpBuilder &self, std::vector<int64_t> blockShape,
+          int64_t rowStride, int64_t bankXor) -> Attribute {
+         auto layout = ttag::ScaleEncodingAttr::getChecked(
+               [&] { return emitError(self.getLastLoc()); }, self.getContext(),
+               llvm::ArrayRef<int64_t>(blockShape), rowStride, bankXor);
+         if (!layout)
+           throw py::value_error("invalid HCU Scale Buffer layout");
+         return layout;
+       });
+  bind("get_hcu_scale_mem_desc_ty",
+       [](TritonOpBuilder &self, std::vector<int64_t> shape,
+          Attribute layout) -> Type {
+         if (!isa<ttag::ScaleEncodingAttr>(layout))
+           throw py::value_error("expected an HCU Scale Buffer layout");
+         auto type = ttg::MemDescType::getChecked(
+               [&] { return emitError(self.getLastLoc()); }, shape,
+               self.getBuilder().getI8Type(), layout,
+               ttag::ScaleMemorySpaceAttr::get(self.getContext()),
+               /*mutableMemory=*/false);
+         if (!type)
+           throw py::value_error("invalid HCU Scale Buffer descriptor");
+         return type;
+       });
+  bind("get_hcu_buffer_lds_shared_layout",
+       [](TritonOpBuilder &self, Attribute linear, unsigned elementBytes,
+          unsigned contiguousDim, unsigned rows, unsigned rowBytes,
+          unsigned waves, unsigned copyBytesPerLane, unsigned rowsPerChunk,
+          unsigned wrapCount, unsigned wrapStepBytes, unsigned wavesPerRowGroup,
+          bool transferMajor, unsigned rowBitSwap) -> Attribute {
+         auto component = dyn_cast<ttg::SharedLinearEncodingAttr>(linear);
+         if (!component)
+           throw py::value_error("expected a shared linear component");
+         auto layout = ttg::HCUBufferLdsSharedEncodingAttr::getChecked(
+             [&] { return emitError(self.getLastLoc()); }, self.getContext(),
+             component, elementBytes, contiguousDim, rows, rowBytes, waves,
+             copyBytesPerLane, rowsPerChunk, wrapCount, wrapStepBytes,
+             wavesPerRowGroup, transferMajor, rowBitSwap);
+         if (!layout)
+           throw py::value_error("invalid buffer-to-LDS placement");
+         return layout;
+       });
+
+  // Native scaled dot operations.
+  bind("create_hcu_scale_write",
+       [](TritonOpBuilder &self, Type resultType, Value src, Value pred,
+          int32_t mode) -> Value {
+         // An unconditional write must not acquire a predicated lifetime.
+         if (matchPattern(pred, m_One()))
+           pred = Value();
+         return self.create<ttag::ScaleWriteOp>(
+             resultType, src, pred, Value(),
+             self.getBuilder().getI32IntegerAttr(mode), IntegerAttr());
+       });
+  bind("create_hcu_dot_scaled",
+       [](TritonOpBuilder &self, Value a, Value b, Value acc, Value aScale,
+          Value bScale, tt::ScaleDotElemType aFormat,
+          tt::ScaleDotElemType bFormat, bool lhsKPack, bool rhsKPack) -> Value {
+         return self.create<ttag::DotScaledOp>(
+             acc.getType(), a, b, acc, aScale, bScale, aFormat, bFormat,
+             /*fastMath=*/false, lhsKPack, rhsKPack);
+       });
 }

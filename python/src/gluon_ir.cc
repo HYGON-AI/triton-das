@@ -257,6 +257,21 @@ py::object layoutToGluon(Attribute layout) {
     return layouts.SharedLinearLayout(
         toStdVector(ll.getBases().lookup(kOffset)),
         toStdVector(ll.getBases().lookup(kBlock)), sharedLl.getAlignment());
+  } else if (auto bufferLds =
+                 dyn_cast<ttg::HCUBufferLdsSharedEncodingAttr>(layout)) {
+    return py::module_::import("triton.experimental.gluon.language.amd.hcu")
+        .attr("BufferLdsSharedLayout")(
+            layoutToGluon(bufferLds.getLinearComponent()),
+            bufferLds.getElementBytes(), bufferLds.getContiguousDim(),
+            bufferLds.getRows(), bufferLds.getRowBytes(), bufferLds.getWaves(),
+            bufferLds.getCopyBytesPerLane(), bufferLds.getRowsPerChunk(),
+            bufferLds.getWrapCount(), bufferLds.getWrapStepBytes(),
+            bufferLds.getWavesPerRowGroup(), bufferLds.getTransferMajor(),
+            bufferLds.getRowBitSwap());
+  } else if (auto scale = dyn_cast<ttag::ScaleEncodingAttr>(layout)) {
+    return py::module_::import("triton.experimental.gluon.language.amd.hcu")
+        .attr("ScaleLayout")(toStdVector(scale.getBlockShape()),
+                             scale.getRowStride(), scale.getBankXor());
   } else if (auto autoEnc = dyn_cast<gluon::AutoEncodingAttr>(layout)) {
     return layouts.AutoLayout();
   } else if (auto autoEnc = dyn_cast<gluon::CoalescedEncodingAttr>(layout)) {

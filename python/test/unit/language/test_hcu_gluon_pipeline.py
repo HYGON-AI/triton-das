@@ -22,6 +22,11 @@ from triton.experimental.gluon.language.amd.hcu import (
     abarrier_invalidate,
     ebarrier_arrive,
     ebarrier_sync,
+    BufferLdsSharedLayout,
+    ScaleLayout,
+    dot_scaled,
+    scale_write,
+    sched_group_barrier,
 )
 from triton.experimental.gluon.language.amd.cdna4 import async_copy
 
@@ -710,3 +715,269 @@ def test_hcu_pipeline_matrix_load_loop(partitioned):
     assert all(" = phi " not in block for block in wave_id_blocks)
 
 
+@g.jit
+def scheduler_groups(A, C):
+    set_priority(1)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
+    offsets = gl.arange(0, 256, layout)
+    a = gl.load(A + offsets)
+    b = gl.load(A + 256 + offsets)
+    sched_group_barrier(0x20, 2, sync=1)
+    result = a + b
+    sched_group_barrier(0x2, 1, sync=1)
+    gl.store(C + offsets, result)
+    sched_group_barrier(0x40, 1, sync=1)
+    set_priority(0)
+
+
+def test_hcu_pipeline_scheduler():
+    require_hcu()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    data = ((torch.arange(512, dtype=torch.int32, device="cpu") * 17) % 257 - 128).float()
+    expected = data[:256] + data[256:]
+    sentinel = torch.full_like(expected, float("nan"))
+    kernel = scheduler_groups
+    a, c = data.cuda(), sentinel.cuda()
+    compiled = kernel[(1,)](a, c, **options)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+    assert compiled.asm["llir"].count("call void @llvm.amdgcn.sched.group.barrier") == 3
+    assert "s_setprio 1" in compiled.asm["amdgcn"]
+    assert "s_setprio 0" in compiled.asm["amdgcn"]
+
+
+@g.jit
+def global_copy_kernel(A, C):
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    r = gl.arange(0, 128, gl.SliceLayout(1, regs))
+    k = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    offsets = r[:, None] * 64 + k[None, :]
+    storage = gl.allocate_shared_memory(gl.float32, [128, 64], gl.SwizzledSharedLayout(4, 1, 1, [1, 0]))
+    async_copy.global_load_to_shared(storage, A + offsets)
+    async_copy.commit_group()
+    async_copy.wait_group(0)
+    value = storage.load(regs)
+    gl.store(C + offsets, value)
+
+
+def test_hcu_pipeline_global_copy():
+    require_hcu()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    data = ((torch.arange(8192, dtype=torch.int32, device="cpu") * 17) % 65521).float()
+    expected = data.clone()
+    sentinel = torch.full_like(expected, float("nan"))
+    kernel = global_copy_kernel
+    a, c = data.cuda(), sentinel.cuda()
+    kernel[(1,)](a, c, **options)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+
+
+@g.jit
+def async_group_copy(A, C):
+    """Two copies in group 0, one in group 1; consume group 0 before draining."""
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    r = gl.arange(0, 32, gl.SliceLayout(1, regs))
+    k = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    offsets = r[:, None] * 64 + k[None, :]
+    storage = gl.allocate_shared_memory(gl.float32, [3, 32, 64], gl.SwizzledSharedLayout(4, 1, 1, [1, 0]))
+    async_copy.global_load_to_shared(storage.index(0), A + offsets)
+    async_copy.global_load_to_shared(storage.index(1), A + 2048 + offsets)
+    async_copy.commit_group()
+    async_copy.global_load_to_shared(storage.index(2), A + 4096 + offsets)
+    async_copy.commit_group()
+    async_copy.wait_group(num_outstanding=1)
+    value0 = storage.index(0).load(regs)
+    value1 = storage.index(1).load(regs)
+    gl.store(C + offsets, value0 + 1)
+    gl.store(C + 2048 + offsets, value1 + 2)
+    async_copy.wait_group(num_outstanding=0)
+    value2 = storage.index(2).load(regs)
+    gl.store(C + 4096 + offsets, value2 + 3)
+
+
+def test_hcu_pipeline_async_groups():
+    require_hcu()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    data = ((torch.arange(6144, dtype=torch.int32, device="cpu") * 17) % 65521).float()
+    expected = data.clone().reshape(3, 2048)
+    expected += torch.arange(1, 4, dtype=torch.float32, device="cpu")[:, None]
+    expected = expected.flatten()
+    sentinel = torch.full_like(expected, float("nan"))
+    kernel = async_group_copy
+    a, c = data.cuda(), sentinel.cuda()
+    kernel[(1,)](a, c, **options)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+
+
+@g.jit
+def matrix_load_boundary_probe(A, C):
+    """Read logical 61x62 FP16 values; each valid row ends on a dword boundary."""
+    storage = gl.allocate_shared_memory(gl.float16, [256, 64], MlsSharedLayout(0, (64, 64), 16, order=(1, 0)))
+    matrix_load(storage, A, (61, 62), (64, 1), (0, 0), (4, 1), boundary_check=(0, 1))
+    async_copy.commit_group()
+    async_copy.wait_group()
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 16], gl.amd.MmacLayout.LIT, [4, 1], tiles_per_warp=[4, 1])
+    value = storage.load(gl.DotOperandLayout(0, mma, 4))
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    value = gl.convert_layout(value, regs)
+    rows = gl.arange(0, 256, gl.SliceLayout(1, regs))
+    cols = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    gl.store(C + rows[:, None] * 64 + cols[None, :], value)
+
+
+def test_hcu_pipeline_matrix_load_boundary():
+    require_hcu()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    logical = ((torch.arange(256 * 64, dtype=torch.int32, device="cpu") * 17) % 257 - 128).half().reshape(256, 64)
+    data = logical.flatten()
+    expected = torch.zeros((256, 64), dtype=torch.float16, device="cpu")
+    expected[:61, :62] = logical[:61, :62]
+    expected = expected.flatten()
+    sentinel = torch.full_like(expected, float("nan"))
+    kernel = matrix_load_boundary_probe
+    a, c = data.cuda(), sentinel.cuda()
+    kernel[(1,)](a, c, **options)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+
+
+@g.jit
+def matrix_store_boundary_probe(A, C):
+    """Store only logical 61x61, leaving the remaining backing rows/cols alone."""
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    rows = gl.arange(0, 64, gl.SliceLayout(1, regs))
+    cols = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    value = gl.load(A + rows[:, None] * 64 + cols[None, :])
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 16], 3, [2, 2], tiles_per_warp=[1, 2])
+    value = gl.convert_layout(value, mma).to(gl.bfloat16)
+    matrix_store(C, value, (61, 61), (64, 1), (0, 0), (16, 32), boundary_check=(0, 1))
+
+
+def test_hcu_pipeline_matrix_store_boundary():
+    require_hcu()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    data = ((torch.arange(64 * 64, dtype=torch.int32, device="cpu") * 17) % 257 - 128).float()
+    expected = torch.full((64, 64), float("nan"), dtype=torch.bfloat16, device="cpu")
+    expected[:61, :61] = data.reshape(64, 64)[:61, :61].to(torch.bfloat16)
+    expected = expected.flatten()
+    sentinel = torch.full_like(expected, float("nan"))
+    kernel = matrix_store_boundary_probe
+    a, c = data.cuda(), sentinel.cuda()
+    kernel[(1,)](a, c, **options)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+
+
+@g.jit
+def explicit_mxfp8(A, B, SA, SB, C, B_BANK: gl.constexpr, SCALE_MODE: gl.constexpr = 2,
+                   M: gl.constexpr = 64, N: gl.constexpr = 64):
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(
+        mmac_layout=gl.amd.MmacLayout.LIT, version=4, instr_shape=[16, 16, 32], warps_per_cta=[2, 2])
+    r = gl.arange(0, M, gl.SliceLayout(1, regs))
+    k = gl.arange(0, 256, gl.SliceLayout(0, regs))
+    s = gl.arange(0, 8, gl.SliceLayout(0, regs))
+    av = gl.load(A + r[:, None] * 256 + k[None, :])
+    rb = gl.arange(0, N, gl.SliceLayout(1, regs))
+    bv = gl.load(B + rb[:, None] * 256 + k[None, :])
+    a = gl.convert_layout(av, gl.DotOperandLayout(0, mma, 8))
+    b = gl.convert_layout(bv.T, gl.DotOperandLayout(1, mma, 8))
+    sa = gl.allocate_shared_memory(gl.uint8, [M, 8], gl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+    sb = gl.allocate_shared_memory(gl.uint8, [N, 8], gl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+    sa.store(gl.load(SA + r[:, None] * 8 + s[None, :]))
+    sb.store(gl.load(SB + rb[:, None] * 8 + s[None, :]))
+    gl.thread_barrier()
+    if SCALE_MODE == 0:
+        tile: gl.constexpr = (16, 4)
+        stride: gl.constexpr = 8
+    elif SCALE_MODE == 1:
+        tile: gl.constexpr = (16, 8)
+        stride: gl.constexpr = 8
+    else:
+        tile: gl.constexpr = (32, 8)
+        stride: gl.constexpr = 16
+    scale_a = scale_write(sa, ScaleLayout(tile, stride, 0))
+    scale_b = scale_write(sb, ScaleLayout(tile, stride, B_BANK))
+    gl.thread_barrier()
+    acc = gl.full([M, N], 0, gl.float32, mma)
+    acc = dot_scaled(a, scale_a, "e4m3", b, scale_b, "e4m3", acc)
+    c = gl.convert_layout(acc, regs)
+    n = gl.arange(0, N, gl.SliceLayout(0, regs))
+    gl.store(C + r[:, None] * N + n[None, :], c)
+
+
+@pytest.mark.parametrize("m,n", [(64, 64), (8, 64), (64, 8), (8, 8)])
+@pytest.mark.parametrize("scale_mode", [0, 1, 2])
+def test_hcu_pipeline_scale_dot(scale_mode, m, n):
+    require_hcu()
+    options = {"num_warps": 4, "num_stages": 1, "use_async_copy": True}
+    rng = torch.Generator(device="cpu").manual_seed(3101)
+    data = (torch.randint(-8, 9, (m, 256), generator=rng).float() / 2).to(torch.float8_e4m3fn)
+    b = (torch.randint(-8, 9, (n, 256), generator=rng).float() / 2).to(torch.float8_e4m3fn)
+    sa = torch.randint(125, 130, (m, 8), generator=rng, dtype=torch.uint8)
+    sb = torch.randint(125, 130, (n, 8), generator=rng, dtype=torch.uint8)
+    a_real = data.float() * torch.exp2(sa.float() - 127).repeat_interleave(32, dim=1)
+    b_real = b.float() * torch.exp2(sb.float() - 127).repeat_interleave(32, dim=1)
+    expected = a_real @ b_real.T
+    sentinel = torch.full_like(expected, float("nan"))
+    kernel = explicit_mxfp8
+    options.update(B_BANK=1, SCALE_MODE=scale_mode, M=m, N=n)
+    a, c = data.cuda(), sentinel.cuda()
+    if min(m, n) < 16:
+        with pytest.raises(triton.CompilationError, match="scale_write requires at least 16 logical M/N rows"):
+            kernel[(1,)](a, b.cuda(), sa.cuda(), sb.cuda(), c, **options)
+        return
+    compiled = kernel[(1,)](a, b.cuda(), sa.cuda(), sb.cuda(), c, **options)
+    torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+    assert "amdg.scale_write" in compiled.asm["ttgir"]
+    assert "amdg.dot_scaled" in compiled.asm["ttgir"]
+    assert "ds_scale_copy_ds2buf" in compiled.asm["amdgcn"]
+    assert "v_mmac_scale" in compiled.asm["amdgcn"]
+
+
+@g.jit
+def buffer_lds_copy_kernel(X, Y, LAYOUT: gl.constexpr, TRANSPOSE: gl.constexpr, MASKED: gl.constexpr):
+    source: gl.constexpr = LAYOUT.producer_layout()
+    m = gl.arange(0, 256, gl.SliceLayout(1, source))
+    k = gl.arange(0, 16, gl.SliceLayout(0, source))
+    storage = gl.allocate_shared_memory(gl.float16, (2, 256, 16), LAYOUT)
+    mask = m[:, None] < 253 if MASKED else None
+    async_copy.buffer_load_to_shared(storage.index(1), X, (m[:, None] * 16 + k[None, :]).to(gl.uint32), mask)
+    async_copy.commit_group()
+    async_copy.wait_group(0)
+    view = storage.index(1)
+    if TRANSPOSE:
+        view = view.permute((1, 0))
+    output: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [8, 1], [1, 0])
+    row = gl.arange(0, view.shape[0], gl.SliceLayout(1, output))
+    col = gl.arange(0, view.shape[1], gl.SliceLayout(0, output))
+    gl.store(Y + row[:, None] * view.shape[1] + col[None, :], view.load(output))
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("row_bit_swap", [0, 4])
+def test_hcu_pipeline_buffer_lds_copy(transpose, masked, row_bit_swap):
+    require_hcu()
+    bases = [
+        [0, 1], [0, 2], [0, 4], [0, 8], [1, 0], [2, 0],
+        [32, 0], [64, 0], [128, 0], [4, 0], [8, 0], [16, 0],
+    ]
+    # Swap both ownership and shared layout. The consumer checks every element,
+    # including a stage-indexed, transposed view and partially masked rows.
+    if row_bit_swap:
+        bases = [[(r & ~12) | ((r & 4) << 1) | ((r & 8) >> 1), c]
+                 for r, c in bases]
+    layout = BufferLdsSharedLayout(
+        linear_component=gl.SharedLinearLayout(bases),
+        element_bytes=2, contiguous_dim=1, rows=256, row_bytes=32,
+        waves=8, copy_bytes_per_lane=16, rows_per_chunk=4, wrap_count=4, wrap_step_bytes=16,
+        row_bit_swap=row_bit_swap,
+    )
+    x = ((torch.arange(4096).reshape(256, 16) % 257 - 128).float() / 8).half()
+    expected = x.clone()
+    if masked:
+        expected[253:] = 0
+    if transpose:
+        expected = expected.T.contiguous()
+    y = torch.full_like(expected, float("nan")).cuda()
+    compiled = buffer_lds_copy_kernel[(1,)](x.cuda(), y, layout, transpose, masked, num_warps=8)
+    torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0)
+    assert "hcu_buffer_lds_shared" in compiled.asm["ttgir"]

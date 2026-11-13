@@ -18,6 +18,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <optional>
 #include <pybind11/pybind11.h>
@@ -131,6 +132,66 @@ void init_triton_hcu_passes_ttgpuir(py::module &&m) {
 
 void init_triton_hcu(py::module &&m) {
   m.doc() = "Python bindings to the HCU Triton backend";
+  m.def(
+      "get_buffer_lds_producer_layout",
+      [](std::vector<std::vector<int32_t>> offsetBases,
+         std::vector<std::vector<int32_t>> blockBases, unsigned alignment,
+         unsigned elementBytes, unsigned contiguousDim, unsigned rows,
+         unsigned rowBytes, unsigned waves, unsigned copyBytesPerLane,
+         unsigned rowsPerChunk, unsigned wrapCount, unsigned wrapStepBytes,
+         unsigned wavesPerRowGroup, bool transferMajor, unsigned rowBitSwap) {
+        using namespace mlir;
+        namespace tt = mlir::triton;
+        namespace ttg = mlir::triton::gpu;
+        MLIRContext context(MLIRContext::Threading::DISABLED);
+        context.getOrLoadDialect<ttg::TritonGPUDialect>();
+        auto offset = StringAttr::get(&context, "offset");
+        auto block = StringAttr::get(&context, "block");
+        // Check structural invariants before construction; getChecked below
+        // handles surjectivity and the remaining encoding constraints.
+        if ((elementBytes != 1 && elementBytes != 2) || contiguousDim > 1 ||
+            !llvm::isPowerOf2_32(rows) || !llvm::isPowerOf2_32(rowBytes) ||
+            rowBytes < elementBytes ||
+            uint64_t(rows) * (rowBytes / elementBytes) > (uint64_t(1) << 30) ||
+            offsetBases.size() + blockBases.size() > 30)
+          throw py::value_error("invalid buffer-to-LDS dimensions");
+        SmallVector<int32_t> shape{int32_t(rows), int32_t(rowBytes / elementBytes)};
+        if (contiguousDim == 0)
+          std::swap(shape[0], shape[1]);
+        for (const auto *bases : {&offsetBases, &blockBases})
+          for (const auto &basis : *bases)
+            if (basis.size() != 2 || basis[0] < 0 || basis[1] < 0 ||
+                basis[0] >= shape[0] || basis[1] >= shape[1])
+              throw py::value_error("invalid buffer-to-LDS basis");
+        auto names = tt::standardOutDimNames(&context, 2);
+        tt::LinearLayout::BasesT linearBases;
+        linearBases[offset] = std::move(offsetBases);
+        linearBases[block] = std::move(blockBases);
+        tt::LinearLayout linearLayout(
+            std::move(linearBases), {{names[0], shape[0]}, {names[1], shape[1]}},
+            /*requireSurjective=*/false);
+        auto linear = ttg::SharedLinearEncodingAttr::getChecked(
+            [&] { return emitError(UnknownLoc::get(&context)); }, &context,
+            linearLayout, alignment);
+        if (!linear)
+          throw py::value_error("invalid buffer-to-LDS linear component");
+        auto placement = ttg::HCUBufferLdsSharedEncodingAttr::getChecked(
+            [&] { return emitError(UnknownLoc::get(&context)); }, &context,
+            linear, elementBytes, contiguousDim, rows, rowBytes, waves,
+            copyBytesPerLane, rowsPerChunk, wrapCount, wrapStepBytes,
+            wavesPerRowGroup, transferMajor, rowBitSwap);
+        if (!placement)
+          throw py::value_error("invalid buffer-to-LDS placement");
+        auto layout =
+            tt::HCU::getBufferLdsProducerEncoding(placement).getLinearLayout();
+        auto bases = [&](StringRef name) {
+          return layout.getBases().lookup(StringAttr::get(&context, name));
+        };
+        auto sizes = layout.getOutDimSizes();
+        return std::make_tuple(
+            bases("register"), bases("lane"), bases("warp"), bases("block"),
+            std::vector<int32_t>(sizes.begin(), sizes.end()));
+      });
   m.def("has_buffer_lds_encoding", [](mlir::ModuleOp mod) {
     return mlir::triton::HCU::hasBufferLdsEncoding(mod);
   });

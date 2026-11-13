@@ -12,6 +12,7 @@ from triton.backends.compiler import GPUTarget
 from triton.compiler import ASTSource
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language.amd.hcu import ScaleLayout, scale_write, dot_scaled
 from triton.experimental.gluon._runtime import GluonASTSource
 
 import dot_scaled_kernels as upstream_kernels
@@ -875,6 +876,73 @@ def test_gluon_scaled_compile(a_format, b_format, side, async_copy):
 def test_gluon_scaled_scalar_compile():
     compiled = compile_gluon_scaled(side="scalar", tiles=2)
     check_scaled_kernel(compiled)
+
+
+# Explicit Gluon scale writes must preserve native unpredicated lifetimes.
+@gluon.jit
+def gluon_explicit_scale_reuse_kernel(A, B, SA, SB, C, Pred,
+                                       DOTS: gl.constexpr, PRED_KIND: gl.constexpr):
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(
+        version=4, instr_shape=[16, 16, 32], mmac_layout=gl.amd.MmacLayout.LIT, warps_per_cta=[2, 2])
+    r = gl.arange(0, 64, gl.SliceLayout(1, regs))
+    k = gl.arange(0, 256, gl.SliceLayout(0, regs))
+    sk = gl.arange(0, 8, gl.SliceLayout(0, regs))
+    av = gl.load(A + r[:, None] * 256 + k[None, :])
+    bv = gl.load(B + r[:, None] * 256 + k[None, :])
+    a = gl.convert_layout(av, gl.DotOperandLayout(0, mma, 8))
+    b = gl.convert_layout(bv.T, gl.DotOperandLayout(1, mma, 8))
+    sa = gl.allocate_shared_memory(gl.uint8, [64, 8], gl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+    sb = gl.allocate_shared_memory(gl.uint8, [64, 8], gl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+    acc = gl.full([64, 64], 0, gl.float32, mma)
+    for i in gl.static_range(DOTS):
+        sa.store(gl.load(SA + r[:, None] * (DOTS * 8) + i * 8 + sk[None, :]))
+        sb.store(gl.load(SB + r[:, None] * (DOTS * 8) + i * 8 + sk[None, :]))
+        gl.thread_barrier()
+        if PRED_KIND == "default":
+            scale_a = scale_write(sa, ScaleLayout((32, 8), 16, 0))
+            scale_b = scale_write(sb, ScaleLayout((32, 8), 16, 1))
+        else:
+            if PRED_KIND == "dynamic":
+                pred = Pred
+            else:
+                pred = PRED_KIND == "true"
+            scale_a = scale_write(sa, ScaleLayout((32, 8), 16, 0), pred)
+            scale_b = scale_write(sb, ScaleLayout((32, 8), 16, 1), pred)
+        gl.thread_barrier()
+        acc = dot_scaled(a, scale_a, "e4m3", b, scale_b, "e4m3", acc)
+        gl.thread_barrier()
+    n = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    gl.store(C + r[:, None] * 64 + n[None, :], gl.convert_layout(acc, regs))
+
+
+@pytest.mark.parametrize("dots", [1, 4, 9])
+@pytest.mark.parametrize("pred_kind", ["default", "true"])
+def test_gluon_explicit_scale_reuses_unconditional_storage(dots, pred_kind):
+    source = GluonASTSource(
+        gluon_explicit_scale_reuse_kernel,
+        signature={"A": "*fp8e4nv", "B": "*fp8e4nv", "SA": "*u8", "SB": "*u8", "C": "*fp32", "Pred": "i1"},
+        constexprs={"DOTS": dots, "PRED_KIND": pred_kind})
+    compiled = compile_to_llvm(source, target=TARGET, options={"num_warps": 4, "num_stages": 1})
+    writes = [line for line in compiled.asm["ttgir"].splitlines() if "amdg.scale_write" in line]
+    assert len(writes) == 2 * dots
+    assert all(" pred " not in line for line in writes)
+    assert '"hcu-scale-buffer-size"="4"' in compiled.asm["llir"]
+
+
+@pytest.mark.parametrize("pred_kind", ["false", "dynamic"])
+def test_gluon_explicit_scale_preserves_predicate(pred_kind):
+    # Compile-only: a false-predicated write does not establish scale values.
+    # Keep allocation conservative and never execute this negative case.
+    source = GluonASTSource(
+        gluon_explicit_scale_reuse_kernel,
+        signature={"A": "*fp8e4nv", "B": "*fp8e4nv", "SA": "*u8", "SB": "*u8", "C": "*fp32", "Pred": "i1"},
+        constexprs={"DOTS": 4, "PRED_KIND": pred_kind})
+    compiled = compile_to_llvm(source, target=TARGET, options={"num_warps": 4, "num_stages": 1})
+    writes = [line for line in compiled.asm["ttgir"].splitlines() if "amdg.scale_write" in line]
+    assert len(writes) == 8
+    assert all(" pred " in line for line in writes)
+    assert '"hcu-scale-buffer-size"="16"' in compiled.asm["llir"]
 
 
 # Unmodified upstream kernels; signatures preserve their scale types and layouts.

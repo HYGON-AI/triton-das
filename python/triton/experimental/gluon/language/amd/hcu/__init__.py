@@ -1,8 +1,11 @@
 """Experimental HCU matrix transfer and explicit pipeline primitives."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from triton.language.core import constexpr_type
 from .._layouts import MmacLayout
-from triton.experimental.gluon.language._layouts import SharedLayout, DistributedLayout
+from triton.experimental.gluon.language._layouts import (
+    SharedLayout, DistributedLayout, SharedLinearLayout, DistributedLinearLayout,
+)
 from triton.experimental.gluon.language._core import builtin, _unwrap_if_constexpr
 from triton.experimental.gluon import language as gl
 
@@ -272,6 +275,78 @@ def abarrier_arrive(id, count=1, _semantic=None):
     )
 
 
+@dataclass(frozen=True)
+class BufferLdsSharedLayout(SharedLayout):
+    """Physical buffer-to-LDS placement, including producer waves and M0 rotation.
+
+    linear_component maps unwrapped offsets; wrap_count is a wave period.
+    row_bit_swap is zero or a power-of-two mask: 4 swaps row bits 2 and 3.
+    The linear component must include the same row permutation.
+    waves_per_row_group=0 groups all waves; transfer_major uses transfer/wave/lane
+    slot order. Consumers must preserve this full placement, not only its linear part.
+    """
+
+    linear_component: SharedLinearLayout
+    element_bytes: int
+    contiguous_dim: int
+    rows: int
+    row_bytes: int
+    waves: int
+    copy_bytes_per_lane: int
+    rows_per_chunk: int
+    wrap_count: int
+    wrap_step_bytes: int
+    waves_per_row_group: int = 0
+    transfer_major: bool = False
+    row_bit_swap: int = 0
+
+    def __post_init__(self):
+        for field in fields(self):
+            object.__setattr__(self, field.name, _unwrap_if_constexpr(getattr(self, field.name)))
+        if not isinstance(self.linear_component, SharedLinearLayout):
+            raise ValueError("linear_component must be a SharedLinearLayout")
+        if any(len(basis) != 2 for basis in self.linear_component.offset_bases):
+            raise ValueError("BufferLdsSharedLayout requires a rank-two linear component")
+        if any(len(basis) != 2 for basis in self.linear_component.block_bases):
+            raise ValueError("BufferLdsSharedLayout requires rank-two block bases")
+        for field in fields(self):
+            if field.name in ("linear_component", "transfer_major"):
+                continue
+            value = getattr(self, field.name)
+            if type(value) is not int or not 0 <= value <= 0xffffffff:
+                raise ValueError(f"{field.name} must be a compile-time unsigned 32-bit integer")
+        if type(self.transfer_major) is not bool:
+            raise ValueError("transfer_major must be a compile-time bool")
+
+    def _to_ir(self, builder):
+        # Validate before the generic SharedLinearLayout constructor can abort.
+        self.producer_layout()
+        return builder.get_hcu_buffer_lds_shared_layout(self.linear_component._to_ir(builder), self.element_bytes,
+                                                     self.contiguous_dim, self.rows, self.row_bytes, self.waves,
+                                                     self.copy_bytes_per_lane, self.rows_per_chunk, self.wrap_count,
+                                                     self.wrap_step_bytes, self.waves_per_row_group,
+                                                     self.transfer_major, self.row_bit_swap)
+
+    def mangle(self):
+        values = "_".join(str(getattr(self, field.name)) for field in fields(self) if field.name != "linear_component")
+        return f"HCUBufferLds_{self.linear_component.mangle()}_{values}"
+
+    def producer_layout(self):
+        """Register/lane/wave ownership required by this explicit placement.
+
+        This derives ownership from the declared transfer geometry. It does
+        not select a copy width, rotation, or pipeline configuration.
+        """
+        # Query the same implementation used by buffer-copy validation and
+        # LLVM lowering; do not duplicate producer/M0 geometry in Python.
+        from triton._C.libtriton import hcu
+        component = self.linear_component
+        return DistributedLinearLayout(*hcu.get_buffer_lds_producer_layout(
+            component.offset_bases, component.block_bases, component.alignment, self.element_bytes, self.contiguous_dim,
+            self.rows, self.row_bytes, self.waves, self.copy_bytes_per_lane, self.rows_per_chunk, self.wrap_count,
+            self.wrap_step_bytes, self.waves_per_row_group, self.transfer_major, self.row_bit_swap))
+
+
 @builtin
 def matrix_store(
     base, value, shape, strides, indices, tile=(32, 32),
@@ -386,3 +461,152 @@ def packed_scale_fma(dot, a_scale, b_scale, accumulator, _semantic=None):
         dot.handle, a_scale.handle, b_scale.handle, accumulator.handle
     )
     return gl.tensor(handle, dot.type)
+
+
+@dataclass(frozen=True)
+class ScaleLayout:
+    """E8M0 coordinates in Scale Buffer storage, not LDS/register layout.
+
+    block_shape is one ds2buf tile; row_stride is in hardware rows.
+    A/B require opposite bank_xor. The native verifier checks geometry.
+    """
+
+    block_shape: tuple
+    row_stride: int
+    bank_xor: int = 0
+
+    def __post_init__(self):
+        shape = _unwrap_if_constexpr(self.block_shape)
+        shape = tuple(_unwrap_if_constexpr(dim) for dim in shape)
+        object.__setattr__(self, "block_shape", shape)
+        for name in ("row_stride", "bank_xor"):
+            object.__setattr__(self, name, _unwrap_if_constexpr(getattr(self, name)))
+        if len(shape) != 2 or any(type(dim) is not int for dim in shape):
+            raise ValueError("ScaleLayout requires two compile-time integer block dimensions")
+        if type(self.row_stride) is not int or type(self.bank_xor) is not int:
+            raise ValueError("ScaleLayout row_stride and bank_xor must be compile-time integers")
+
+    @property
+    def type(self):
+        return constexpr_type(self)
+
+    def _to_ir(self, builder):
+        return builder.get_hcu_scale_layout(self.block_shape, self.row_stride, self.bank_xor)
+
+    def mangle(self):
+        return f"HCUScale_{self.block_shape[0]}_{self.block_shape[1]}_{self.row_stride}_{self.bank_xor}"
+
+
+class scale_buffer_descriptor_type(gl.base_type):
+    """Read-only storage reference produced by scale_write, not numeric data."""
+
+    def __init__(self, shape, layout):
+        self.shape = tuple(shape)
+        self.layout = layout
+        if len(self.shape) != 2 or not isinstance(layout, ScaleLayout):
+            raise ValueError("Scale Buffer requires a rank-two shape and ScaleLayout")
+
+    def to_ir(self, builder):
+        return builder.get_hcu_scale_mem_desc_ty(self.shape, self.layout._to_ir(builder))
+
+    def _flatten_ir_types(self, builder, out):
+        out.append(self.to_ir(builder))
+
+    def _unflatten_ir(self, handles, cursor):
+        return scale_buffer_descriptor(handles[cursor], self.shape, self.layout), cursor + 1
+
+    def __eq__(self, other):
+        return type(self) is type(other) and self.shape == other.shape and self.layout == other.layout
+
+    def __str__(self):
+        return f"scale_buffer_descriptor<{self.shape}, {self.layout}>"
+
+    def mangle(self):
+        return f"HCUSD_{self.shape[0]}_{self.shape[1]}_{self.layout.mangle()}"
+
+
+class scale_buffer_descriptor(gl.base_value):
+    """Scale storage for one direct dot_scaled use in the same region.
+
+    No numeric loads/views or cross-loop/JIT passing; pass LDS and write at consumption.
+    """
+
+    def __init__(self, handle, shape, layout):
+        self.handle = handle
+        self.type = scale_buffer_descriptor_type(shape, layout)
+
+    def _flatten_ir(self, handles):
+        handles.append(self.handle)
+
+    @property
+    def dtype(self):
+        return gl.uint8
+
+    @property
+    def shape(self):
+        return self.type.shape
+
+    @property
+    def layout(self):
+        return self.type.layout
+
+    @property
+    def rank(self):
+        return len(self.type.shape)
+
+
+@builtin
+def scale_write(src, layout, pred=True, _semantic=None):
+    """Copy ready LDS E8M0 to explicit Scale Buffer storage.
+
+    The logical M/N dimension must contain at least 16 rows.
+
+    The result is storage, not completion. Complete LDS copies before calling
+    this operation and publish before dot_scaled. A false predicate leaves no valid scale values.
+    """
+    layout = _unwrap_if_constexpr(layout)
+    if not isinstance(src, gl.shared_memory_descriptor) or src.rank != 2 or src.dtype != gl.uint8:
+        raise ValueError("scale_write requires a rank-two uint8 E8M0 LDS descriptor")
+    if src.shape[0] < 16:
+        raise ValueError("scale_write requires at least 16 logical M/N rows")
+    if not isinstance(layout, ScaleLayout):
+        raise ValueError("scale_write requires a ScaleLayout")
+    pred = _semantic.to_tensor(pred)
+    if pred.type != gl.int1:
+        raise ValueError("scale_write pred must be a wave-uniform scalar bool")
+    result = scale_buffer_descriptor_type(src.type.shape, layout)
+    result_ty = result.to_ir(_semantic.builder)
+    area = layout.block_shape[0] * layout.block_shape[1]
+    mode = {64: 0, 128: 1, 256: 2}[area]  # Geometry was checked by the native layout verifier.
+    handle = _semantic.builder.create_hcu_scale_write(result_ty, src.handle, pred.handle, mode)
+    return scale_buffer_descriptor(handle, result.shape, layout)
+
+
+@builtin
+def dot_scaled(a, a_scale, a_format, b, b_scale, b_format, acc, lhs_k_pack=True, rhs_k_pack=True, _semantic=None):
+    """Scaled MMAC with explicit operands, layouts and Scale Buffer descriptors.
+
+    Each E8M0 scale covers 32 logical K elements, including packed FP4.
+    Caller owns operand delivery, pipeline and publication.
+    """
+    if not isinstance(a_scale, scale_buffer_descriptor) or not isinstance(b_scale, scale_buffer_descriptor):
+        raise ValueError("dot_scaled requires two Scale Buffer descriptors")
+    if acc.dtype != gl.float32:
+        raise ValueError("the current HCU scaled MMAC path requires an FP32 accumulator")
+    if not isinstance(acc.type.layout, gl.amd.AMDMFMALayout) or acc.type.layout.version != 4:
+        raise ValueError("dot_scaled requires a version-4 HCU MFMA accumulator layout")
+    lhs_k_pack = _unwrap_if_constexpr(lhs_k_pack)
+    rhs_k_pack = _unwrap_if_constexpr(rhs_k_pack)
+    if type(lhs_k_pack) is not bool or type(rhs_k_pack) is not bool:
+        raise ValueError("dot_scaled packing flags must be compile-time bools")
+    a_format = _unwrap_if_constexpr(a_format)
+    b_format = _unwrap_if_constexpr(b_format)
+    allowed = {"e2m1": (gl.int8, gl.uint8), "e4m3": (gl.float8e4nv, ), "e5m2": (gl.float8e5, )}
+    for value, fmt in ((a, a_format), (b, b_format)):
+        if fmt not in allowed or value.dtype not in allowed[fmt]:
+            raise ValueError("scaled MMAC requires packed i8/u8 E2M1, E4M3FN, or E5M2 matching its format")
+    a_format = _semantic._str_to_fp_type(a_format)
+    b_format = _semantic._str_to_fp_type(b_format)
+    handle = _semantic.builder.create_hcu_dot_scaled(a.handle, b.handle, acc.handle, a_scale.handle, b_scale.handle,
+                                                  a_format, b_format, lhs_k_pack, rhs_k_pack)
+    return gl.tensor(handle, acc.type)
