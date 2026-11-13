@@ -517,6 +517,8 @@ class amd_knobs(base_knobs):
     # HCU ds_read_m for N-major B; default on. C++ also treats unset as enabled
     # (getBoolEnv cannot express default-true). Assigning this knob setenv's the var.
     enable_ds_read_m: env_bool = env_bool("TRITON_HCU_ENABLE_DS_READ_M", True)
+    # Disable seq-tracked MLS L1 bypass; untracked loads never enable BPS.
+    disable_mls_bps: env_bool = env_bool("TRITON_HCU_DISABLE_MLS_BPS", False)
     dump_amdgcn: env_bool = env_bool("AMDGCN_ENABLE_DUMP")
     libhip_path: env_opt_str = env_opt_str("TRITON_LIBHIP_PATH")
 

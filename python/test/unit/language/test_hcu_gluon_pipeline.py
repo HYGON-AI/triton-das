@@ -274,18 +274,21 @@ def check_interleave_layout_roundtrip(value, _semantic=None):
 
 
 @g.jit
-def native_mmac_store_kernel(A, B, C, MATRIX: gl.constexpr, BAD: gl.constexpr = 0):
+def native_mmac_store_kernel(A, B, C, MATRIX: gl.constexpr, BAD: gl.constexpr = 0,
+                             NATIVE_MLS: gl.constexpr = False):
     instruction: gl.constexpr = get_mmac_instruction(A.dtype.element_ty, B.dtype.element_ty, gl.float32, 128)
     f: gl.constexpr = gl.amd.AMDMFMALayout(
         version=4, instr_shape=instruction[0], mmac_layout=MmacLayout.LTS,
-        warps_per_cta=[1, 4], tiles_per_warp=[4, 4],
+        warps_per_cta=[2, 2] if NATIVE_MLS else [1, 4],
+        tiles_per_warp=[1, 2] if NATIVE_MLS else [4, 4],
     )
     bits: gl.constexpr = B.dtype.element_ty.primitive_bitwidth
-    sb: gl.constexpr = MlsSharedLayout(1, (64, 64) if bits == 16 else (128, 64),
+    mls_tile: gl.constexpr = (128, 32) if NATIVE_MLS else ((64, 64) if bits == 16 else (128, 64))
+    sb: gl.constexpr = MlsSharedLayout(1, mls_tile,
                                      bits=bits, alt=1, version=2 if bits == 16 else 3, order=(0, 1))
     rf: gl.constexpr = MmacInterleave2Layout(f)
     shared = gl.allocate_shared_memory(B.dtype.element_ty, (128, 256), sb)
-    matrix_load(shared, B, (128, 256), (1, 128), (0, 0))
+    matrix_load(shared, B, (128, 256), (1, 128), (0, 0), warps=(1, 4))
     gl.inline_asm_elementwise(
         "s_waitcnt lgkmcnt(0)\n\ts_barrier\n\ts_mov_b32 $0, 0",
         constraints="=s,~{memory}", args=[], dtype=gl.int32, is_pure=False, pack=1,
@@ -323,6 +326,22 @@ def test_native_mmac_logical_store(matrix,dtype):
     b = (torch.randint(-8, 9, (256, 128)).float() / 8).to(dtype)
     out = torch.empty((64, 256), device="cuda", dtype=torch.bfloat16)
     native_mmac_store_kernel[(1,)](a.cuda(), b.cuda(), out, MATRIX=matrix, num_warps=4)
+    torch.testing.assert_close(out.cpu(), (a.float() @ b.float().T).bfloat16(), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_native_interleave2_mls_panel(matrix, dtype):
+    """K128/N32 MLS panels use loader [1,4] with independent MFMA WM2/WN2, TN2."""
+    require_hcu()
+    torch.manual_seed(41)
+    a = (torch.randint(-8, 9, (64, 128)).float() / 8).to(dtype)
+    b = (torch.randint(-8, 9, (256, 128)).float() / 8).to(dtype)
+    out = torch.empty((64, 256), dtype=torch.bfloat16).cuda()
+    compiled = native_mmac_store_kernel[(1,)](
+        a.cuda(), b.cuda(), out, MATRIX=matrix, NATIVE_MLS=True, num_warps=4)
+    assert "matrix_load_64x32_b8" in compiled.asm["amdgcn"]
+    assert "matrix_load_64x16_b8" not in compiled.asm["amdgcn"]
     torch.testing.assert_close(out.cpu(), (a.float() @ b.float().T).bfloat16(), atol=0, rtol=0)
 
 

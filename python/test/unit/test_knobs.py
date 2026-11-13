@@ -289,3 +289,20 @@ def test_opt_bool(fresh_knobs, monkeypatch):
     assert fresh_knobs.amd.use_block_pingpong
     monkeypatch.delenv("TRITON_HIP_USE_BLOCK_PINGPONG")
     assert fresh_knobs.amd.use_block_pingpong is None
+
+
+@pytest.mark.parametrize("value, disabled", [(None, False), ("0", False), ("false", False), ("1", True), ("true", True), ("on", True)])
+def test_hcu_mls_bps_env_and_cache(fresh_knobs, monkeypatch, value, disabled):
+    from triton._C.libtriton import get_cache_invalidating_env_vars
+
+    name = "TRITON_HCU_DISABLE_MLS_BPS"
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    assert fresh_knobs.amd.disable_mls_bps is disabled
+    env = get_cache_invalidating_env_vars()
+    if value is None:
+        assert name not in env
+    else:
+        assert env[name] == ("true" if disabled else "false")

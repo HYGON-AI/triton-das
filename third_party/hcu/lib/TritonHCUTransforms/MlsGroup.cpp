@@ -232,6 +232,13 @@ auto getMlsInsnGroupAttrMap = []() -> const MlsInsnGroupMap & {
                 MLS_DS_FLAGS_PACK(1, 2, 2, 1), {0, 32}}
       }
     },
+    // matrix_load_64x32_b8: AT/BN(transpose = 1), interleave 2,  mnk required elems tile: [32, 32, 128] -> load tile: [32, 32, 128] -> lds tile [32, 32, 128]
+    {{32, 128, true, 8, MlsElemBitTyKind::None, MlsInterleaveKind::Interleave2, 3},
+      {{32, 64, ROCDL::hcu_matrix_load_64X32_b8::getOperationName(), {0, 2048}},
+        {32, 32, ROCDL::hcu_ds_read_matrix_trans_format::getOperationName(),
+                MLS_DS_FLAGS_PACK(1, 2, 2, 1), {0, 32, 2048, 2080}}
+      }
+    },
     // Explicit FP8 B interleave2 DS geometry.
     // Global MLS byte layout remains unchanged (version 3 descriptor).
     {{64, 128, true, 8, MlsElemBitTyKind::None, MlsInterleaveKind::Interleave2, 3},

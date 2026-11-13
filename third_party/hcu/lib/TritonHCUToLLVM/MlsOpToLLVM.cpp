@@ -23,6 +23,7 @@
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
@@ -66,6 +67,63 @@ bool isKMajor(llvm::ArrayRef<unsigned> order, int opIdx) {
   auto rank = order.size();
   int kdim = opIdx == 0 ? rank - 1 : rank - 2;
   return order[0] == kdim;
+}
+
+// Match the hardware track state: seq opens it and any arrive closes it.
+// At CFG joins, every reachable incoming path must still be tracked. Start
+// non-entry blocks at true so a loop backedge preserves a track opened before
+// the loop; the entry state is always false.
+bool isInABarrierTrack(Operation *load) {
+  Region *region = load->getParentRegion();
+  llvm::SmallPtrSet<Block *, 16> reachable;
+  SmallVector<Block *> pending{&region->front()};
+  while (!pending.empty()) {
+    Block *block = pending.pop_back_val();
+    if (!reachable.insert(block).second)
+      continue;
+    for (Block *successor : block->getSuccessors())
+      pending.push_back(successor);
+  }
+  if (!reachable.contains(load->getBlock()))
+    return false;
+
+  auto transfer = [](Block &block, bool tracked, Operation *stop = nullptr) {
+    for (Operation &op : block) {
+      if (&op == stop)
+        break;
+      if (isa<ROCDL::HCUAbarrierSeqOp>(op))
+        tracked = true;
+      else if (isa<ROCDL::HCUAbarrierArriveOp>(op) || op.getNumRegions() ||
+               isa<LLVM::CallOp, LLVM::InlineAsmOp>(op))
+        // Unknown calls/assembly and nested regions may close the track.
+        tracked = false;
+    }
+    return tracked;
+  };
+  llvm::DenseMap<Block *, bool> outgoing;
+  for (Block *block : reachable)
+    outgoing[block] = true;
+  auto incoming = [&](Block &block) {
+    if (&block == &region->front())
+      return false;
+    return llvm::all_of(block.getPredecessors(), [&](Block *predecessor) {
+      return !reachable.contains(predecessor) || outgoing[predecessor];
+    });
+  };
+  bool changed;
+  do {
+    changed = false;
+    for (Block &block : *region) {
+      if (!reachable.contains(&block))
+        continue;
+      bool tracked = transfer(block, incoming(block));
+      if (outgoing[&block] != tracked) {
+        outgoing[&block] = tracked;
+        changed = true;
+      }
+    }
+  } while (changed);
+  return transfer(*load->getBlock(), incoming(*load->getBlock()), load);
 }
 
 Value getLinearWarpId(Location loc, RewriterBase &rewriter,
@@ -116,6 +174,10 @@ struct MLSMatrixLoadToLocalOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
+    // BPS requires an active seq track, independently of WASP or WDRA.
+    bool disableBPS =
+        triton::tools::getBoolEnv("TRITON_HCU_DISABLE_MLS_BPS");
+    bool bypassL1 = !disableBPS && isInABarrierTrack(op);
     // AsyncTokenType converts to i32. This value only replaces the SSA token;
     // it is neither a predicate nor a count/completion state for the transfer.
     Value convertedToken = b.i32_val(0);
@@ -270,7 +332,7 @@ struct MLSMatrixLoadToLocalOpConversion
         bool t = mlsInsn->isRowMajor();
         bool r = false;
         generateMatrixLoadLDSOp(loc, rewriter, mlInsnAttr.insn,
-                                rsrcDesc, smemPtr, t, 0, r, false, false, false);
+                                rsrcDesc, smemPtr, t, 0, r, false, false, bypassL1);
         iterIdx++;
       }
     } else {
@@ -353,7 +415,7 @@ struct MLSMatrixLoadToLocalOpConversion
 
           assert(ldInBlkOffC < 1024 && "ldInBlkOffC out of range"); // 2^10
           generateMatrixLoadLDSOp(loc, rewriter, mlInsnAttr.insn,
-                                  rsrcDesc, smemPtr, t, ldInBlkOffC, r, false, false, false);
+                                  rsrcDesc, smemPtr, t, ldInBlkOffC, r, false, false, bypassL1);
         }
       }
     }

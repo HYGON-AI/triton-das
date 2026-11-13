@@ -1,4 +1,6 @@
 // RUN: triton-opt %s --tritonhcu-mls-lowering --convert-scf-to-cf --allocate-shared-memory --convert-triton-hcu-to-llvm='arch=gfx946' | FileCheck %s
+// RUN: triton-opt %s --tritonhcu-mls-lowering --convert-scf-to-cf --allocate-shared-memory --convert-triton-hcu-to-llvm='arch=gfx946' | FileCheck %s --check-prefix=BPS
+// RUN: sed 's/indices = \[%c0, %c0\]/indices = [%c0, %c0] boundaryCheck = [0, 1]/g' %s | triton-opt --tritonhcu-mls-lowering --convert-scf-to-cf --allocate-shared-memory --convert-triton-hcu-to-llvm='arch=gfx946' | FileCheck %s --check-prefix=BPS
 
 // Expected placement for both buffer-to-LDS and MLS lowering:
 //   partition0 {                 partition1 {
@@ -212,7 +214,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       %bases = tt.splat %out : !tt.ptr<f8E4M3FN> -> tensor<128x128x!tt.ptr<f8E4M3FN>, #regs>
       %ptrs = tt.addptr %bases, %offsets : tensor<128x128x!tt.ptr<f8E4M3FN>, #regs>, tensor<128x128xi32, #regs>
       scf.for %i = %c0 to %count step %c1 : i32 {
+        rocdl.hcu.s.abarrier.seq %c1
         %tile = tt.matrix_load %p, shape = [%size, %size], strides = [%s1, %s128], tensorShape = [128, 128], indices = [%c0, %c0] {MlsEncoding = #amdg<MlsEncoding opIdx = 1, mlsTile = [64, 16], elemBitWidth = 8, elemBitTyKind = 0, alt2Kind = 0, version = 3, order = [0, 1], warpsPerCTA = [1, 4]>} : <f8E4M3FN> -> tensor<128x128xf8E4M3FN, #dot>
+        %ready = rocdl.hcu.s.abarrier.arrive i32, %c1, 1
         %values = ttg.convert_layout %tile : tensor<128x128xf8E4M3FN, #dot> -> tensor<128x128xf8E4M3FN, #regs>
         tt.store %ptrs, %values : tensor<128x128x!tt.ptr<f8E4M3FN>, #regs>
       }
@@ -246,3 +250,17 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return
   }
 }
+
+// Only partition0 opens a seq track; partition1 is WASP without a seq.
+// Check BPS in both the shared-descriptor and padded
+// per-instruction-descriptor lowering paths.
+// BPS-LABEL: llvm.func @mls_loop_wave_id
+// BPS: rocdl.matrix.load.64x16.b8 {{.*}}, false]
+// BPS-NOT: rocdl.matrix.load.64x16.b8 {{.*}}, true]
+// BPS-LABEL: llvm.func @wasp_mls_loop_wave_id
+// BPS: partition0(
+// BPS: rocdl.matrix.load.64x16.b8 {{.*}}, true]
+// BPS-NOT: rocdl.matrix.load.64x16.b8 {{.*}}, false]
+// BPS: partition1(
+// BPS: rocdl.matrix.load.64x16.b8 {{.*}}, false]
+// BPS-NOT: rocdl.matrix.load.64x16.b8 {{.*}}, true]
