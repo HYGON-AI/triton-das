@@ -1,3 +1,4 @@
+#include "TritonHCUToLLVM/PackedConversion.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
@@ -13,6 +14,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
 using namespace mlir;
+using mlir::triton::HCU::convertFp32PairToPacked;
 
 using mlir::triton::gpu::appendOrGetExternFuncOp;
 using mlir::triton::gpu::ElementwiseOpConversion;
@@ -1395,32 +1397,6 @@ convertFp32ToBf16PairRTNE(Location loc, ConversionPatternRewriter &rewriter,
           b.extract_element(bf16_ty, pair, b.i32_val(1))};
 }
 
-// Packed f32x2 -> {bf16,f16}x2. Emit an LLVM intrinsic call instead of ROCDL
-// op: the current MLIR ROCDL HCU op exists in the dialect but is not translated
-// by the shipped LLVM IR translator.
-static SmallVector<Value>
-convertFp32PairToPacked(Location loc, ConversionPatternRewriter &rewriter,
-                        Type outElemTy, Value lo, Value hi) {
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-  assert((outElemTy.isBF16() || outElemTy.isF16()) &&
-         "unsupported packed conversion destination");
-  Type packedTy = vec_ty(outElemTy, 2);
-  Value srcAModifier = b.i32_val(0);
-  Value srcBModifier = b.i32_val(0);
-  Value clamp = LLVM::createConstantI1(loc, rewriter, false);
-  SmallVector<Value> operands = {srcAModifier, lo, srcBModifier, hi, clamp};
-  StringRef intrinsic = "llvm.hcu.cvt.pk.bf16.f32";
-  if (outElemTy.isF16()) {
-    operands.push_back(b.i32_val(0));
-    intrinsic = "llvm.hcu.cvt.pk.f16.f32";
-  }
-  auto packed = LLVM::createLLVMIntrinsicCallOp(
-      rewriter, loc, intrinsic, TypeRange{packedTy}, operands);
-  Value packedVal = packed->getResult(0);
-  return {b.extract_element(outElemTy, packedVal, b.i32_val(0)),
-          b.extract_element(outElemTy, packedVal, b.i32_val(1))};
-}
-
 // static Value Fp8E5M2FNUZ_to_Fp16_oneValue(Location loc,
 //                                           ConversionPatternRewriter &rewriter,
 //                                           Value v) {
@@ -1995,10 +1971,7 @@ struct ElementwiseOpConversionWithTargetInfoBase
   /* Scalar F16/BF16 <-> F32 conversion instructions on
    * gfx938/gfx92a/gfx946. */
   bool supportsF16BF16F32Cvt() const {
-    return llvm::is_contained(
-        {llvm::AMDGPU::GPUKind::GK_GFX938, llvm::AMDGPU::GPUKind::GK_GFX92A,
-         llvm::AMDGPU::GPUKind::GK_GFX946, llvm::AMDGPU::GPUKind::GK_GFX948},
-        gpuKind);
+    return triton::HCU::supportsPackedFp32Downcast(gpuKind);
   }
 
   /* Packed F32 elementwise instructions (V_PK_{ADD,MUL,FMA}_F32) on

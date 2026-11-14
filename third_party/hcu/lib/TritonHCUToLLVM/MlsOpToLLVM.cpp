@@ -1,3 +1,5 @@
+#include "TritonHCUToLLVM/PackedConversion.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 // SPDX-License-Identifier: MIT
 // Modified by Hygon Information Technology Co., Ltd., 2026.
@@ -939,14 +941,22 @@ struct MLSMatrixStoreFromRegOpConversion
     auto *typeConverter = getTypeConverter();
 
     auto mfmaEnc = getUnderlyingMmacEncoding(valueTy.getEncoding());
-    if (valueTy.getElementType().getIntOrFloatBitWidth() != 16 || !mfmaEnc ||
+    Type outputElemTy = cast<triton::PointerType>(
+        cast<triton::amdgpu::MatrixStoreFromRegOp>(opToErase).getBase().getType())
+                            .getPointeeType();
+    bool convertFromF32 = valueTy.getElementType().isF32();
+    if ((convertFromF32 &&
+         (!supportsPackedFp32Downcast(targetInfo.getGPUKind()) ||
+          !(outputElemTy.isF16() || outputElemTy.isBF16()))) ||
+        (!convertFromF32 && valueTy.getElementType() != outputElemTy) ||
+        outputElemTy.getIntOrFloatBitWidth() != 16 || !mfmaEnc ||
         mfmaEnc.getElementBitWidth() != 32 ||
         mfmaEnc.getMmacLayout() != MmacLayout::TRANSPOSE ||
         storeEncoding.getInterleaveKind() !=
             static_cast<unsigned>(MlsInterleaveKind::Interleave2)) {
       return rewriter.notifyMatchFailure(
           opToErase,
-          "matrix_store_from_reg requires a 16-bit MMAC C layout 3 with interleave 2");
+          "matrix_store_from_reg requires 16-bit output and MMAC C layout 3 with interleave 2");
     }
 
     auto storeTile = storeEncoding.getStoreTile();
@@ -1095,23 +1105,35 @@ struct MLSMatrixStoreFromRegOpConversion
         for (unsigned i = 0; i < numOfElemsPerInsn; ++i)
           chunk.push_back(inVals[valIdx++]);
       }
-      unsigned elemsPerVreg128 = 128 / storeEncoding.getElemBitWidth();
+      unsigned elemsPerStoreGroup = 128 / storeEncoding.getElemBitWidth();
       if (chunk.size() % interleaveFactor != 0)
         return failure();
-      if (chunk.size() % elemsPerVreg128 != 0)
+      if (chunk.size() % elemsPerStoreGroup != 0)
         return failure();
       SmallVector<Value> interleaved;
       interleaved.reserve(chunk.size());
       for (unsigned group = 0; group < chunk.size();
-           group += elemsPerVreg128) {
-        unsigned elemsPerInterleave = elemsPerVreg128 / interleaveFactor;
+           group += elemsPerStoreGroup) {
+        unsigned elemsPerInterleave = elemsPerStoreGroup / interleaveFactor;
         for (unsigned elem = 0; elem < elemsPerInterleave; ++elem)
           for (unsigned part = 0; part < interleaveFactor; ++part)
             interleaved.push_back(
                 chunk[group + part * elemsPerInterleave + elem]);
       }
       chunk = std::move(interleaved);
-      return packMatrixStoreVGPRArgs(loc, rewriter, valueTy, msInsnAttr,
+      if (convertFromF32) {
+        // The store has already chosen the final register order. Convert
+        // adjacent values in that order into the two halves of each VGPR.
+        SmallVector<Value> converted;
+        for (unsigned i = 0; i < chunk.size(); i += 2) {
+          auto pair = convertFp32PairToPacked(loc, rewriter, outputElemTy,
+                                              chunk[i], chunk[i + 1]);
+          converted.append(pair);
+        }
+        chunk = std::move(converted);
+      }
+      auto outputTy = valueTy.clone(outputElemTy);
+      return packMatrixStoreVGPRArgs(loc, rewriter, outputTy, msInsnAttr,
                                      chunk);
     };
 
@@ -2383,3 +2405,41 @@ void populateMLSOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                          axisInfoAnalysis, benefit);
 }
 } // namespace mlir::triton::AMD
+
+namespace mlir::triton::HCU {
+void fuseMatrixStoreDowncasts(ModuleOp mod, const AMD::TargetInfo &targetInfo) {
+  // Match the native packed-conversion capability used by elementwise lowering.
+  if (!supportsPackedFp32Downcast(targetInfo.getGPUKind()))
+    return;
+  mod.walk([&](triton::amdgpu::MatrixStoreFromRegOp store) {
+    Value value = store.getValue();
+    auto storeTy = cast<RankedTensorType>(value.getType());
+    Type dst = storeTy.getElementType();
+    if (!(dst.isF16() || dst.isBF16()) ||
+        cast<triton::PointerType>(store.getBase().getType()).getPointeeType() != dst)
+      return;
+    // Walk only this store's input path. Conversions with different register
+    // mappings require index-map composition and are deliberately not fused.
+    while (auto cvt = value.getDefiningOp<gpu::ConvertLayoutOp>()) {
+      if (gpu::toLinearLayout(cast<RankedTensorType>(cvt.getSrc().getType())) !=
+          gpu::toLinearLayout(cast<RankedTensorType>(cvt.getType())))
+        return;
+      value = cvt.getSrc();
+    }
+    auto trunc = value.getDefiningOp<arith::TruncFOp>();
+    if (!trunc || !getElementTypeOrSelf(trunc.getIn().getType()).isF32())
+      return;
+    auto inputTy = cast<RankedTensorType>(trunc.getIn().getType());
+    auto fp32StoreTy = storeTy.clone(inputTy.getElementType());
+    if (gpu::toLinearLayout(inputTy) != gpu::toLinearLayout(fp32StoreTy))
+      return;
+    OpBuilder builder(store);
+    Value input = trunc.getIn();
+    if (inputTy != fp32StoreTy)
+      input = gpu::ConvertLayoutOp::create(builder, store.getLoc(),
+                                           fp32StoreTy, input);
+    // Only replace this use: other users retain the original truncation.
+    store.getValueMutable().assign(input);
+  });
+}
+} // namespace mlir::triton::HCU

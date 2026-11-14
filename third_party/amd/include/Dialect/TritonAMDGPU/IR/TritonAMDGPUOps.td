@@ -758,7 +758,9 @@ def MatrixStoreFromRegOp : TT_AMDGPU_Op<"matrix_store_from_reg", [AttrSizedOpera
   let summary = "matrix store from VGPR registers to global memory";
   let description = [{
     Store an fp16/bf16 MMAC C layout-3 tensor from VGPRs to global memory via HCU
-    `matrix_store_*` (VGPR→GMEM).
+    `matrix_store_*` (VGPR→GMEM). An FP32 value may be supplied for a
+    FP16/BF16 destination pointer; lowering rounds to nearest, ties to even,
+    while packing the native store registers.
   }];
 
   let arguments = (ins

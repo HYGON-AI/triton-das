@@ -44,6 +44,7 @@ using namespace mlir;
 namespace mlir::triton::HCU {
 // Adapt the named-register metadata required by llvm.write_register.
 void registerHCUM0Translation(DialectRegistry &registry);
+void fuseMatrixStoreDowncasts(ModuleOp mod, const AMD::TargetInfo &targetInfo);
 void addLocalBarrierForScaleMemory(ModuleAllocation *allocation);
 void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns, bool ftz,
@@ -225,6 +226,9 @@ struct ConvertTritonHCUToLLVM
       mod.emitError("unsupported target: '") << this->arch.getValue() << "'";
       return signalPassFailure();
     }
+
+    // Preserve FP32 inputs until matrix-store packing chooses conversion pairs.
+    HCU::fuseMatrixStoreDowncasts(mod, targetInfo);
 
     // Canonicalization has exposed equal N-split loop states. Remove their
     // duplicate register tensors once, before allocation and LLVM lowering.
