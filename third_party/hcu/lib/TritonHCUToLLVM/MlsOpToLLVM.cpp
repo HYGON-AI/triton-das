@@ -13,6 +13,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -220,6 +221,93 @@ struct MLSMatrixLoadToLocalOpConversion
                                static_cast<MlsInterleaveKind>(blockLayout.getAlt2Kind()));
     auto mlInsnAttr = mlsInsn->getMatrixLoadInsnAttr();
 
+    // Several physical waves can map to the same logical MLS tile. Share
+    // that tile's native transfers instead of issuing duplicate LDS writes.
+    Value linearWaveIdInSharingGroup, totalSharingWaves;
+    auto numWavesPerDim = blockLayout.getWarpsPerCTA();
+    auto globalTile = mlsInsn->getMlsTile(MlsTileKind::Global);
+    bool sharesTile = false;
+    SmallVector<unsigned> numTilesPerDim(2);
+    for (unsigned d = 0; d < 2; ++d) {
+      numTilesPerDim[d] = std::max<int64_t>(
+          1, llvm::divideCeil(dstTy.getShape()[d], globalTile[d]));
+      sharesTile |= numWavesPerDim[d] > numTilesPerDim[d];
+    }
+    // A caller predicate may already assign the entire copy to one wave.
+    // Do not subdivide that copy among waves the predicate might disable.
+    sharesTile &= !adaptor.getPred() || matchPattern(adaptor.getPred(), m_One());
+    if (sharesTile) {
+      auto wave = getLinearWarpId(loc, rewriter, targetInfo);
+      auto coords = delinearize(rewriter, loc, wave, numWavesPerDim,
+                                blockLayout.getOrder());
+      // First describe the sharing group independently along each axis.
+      // An axis without sharing contributes coordinate 0 and size 1.
+      SmallVector<Value> waveCoordInSharingGroup(2, b.i32_val(0));
+      SmallVector<Value> sharingGroupShape(2, b.i32_val(1));
+      for (unsigned d = 0; d < 2; ++d) {
+        unsigned numWaves = numWavesPerDim[d];
+        unsigned numTiles = numTilesPerDim[d];
+        if (numWaves <= numTiles)
+          continue;
+
+        // Wave coordinate w maps to tile t = w % numTiles, with cooperating
+        // wave index w / numTiles (integer division).
+        waveCoordInSharingGroup[d] = b.udiv(coords[d], b.i32_val(numTiles));
+        sharingGroupShape[d] = b.i32_val(numWaves / numTiles);
+        // Example: 8 waves map to 3 tiles via tileIndex = waveCoord % 3:
+        //   waveCoord:  0  1  2 | 3  4  5 | 6  7
+        //   tileIndex:  0  1  2 | 0  1  2 | 0  1
+        //
+        // Each tile gets 8 / 3 = 2 waves from the two complete rounds.
+        // The remaining 8 % 3 = 2 waves go to tiles 0 and 1.
+        // Therefore tileIndex < extraWaves adds one wave:
+        //   tile 0: 3 waves, tile 1: 3 waves, tile 2: 2 waves.
+        if (unsigned extraWaves = numWaves % numTiles) {
+          Value tileIndex = b.urem(coords[d], b.i32_val(numTiles));
+          Value extra = b.select(b.icmp_ult(tileIndex, b.i32_val(extraWaves)),
+                                 b.i32_val(1), b.i32_val(0));
+          sharingGroupShape[d] = b.add(sharingGroupShape[d], extra);
+        }
+      }
+
+      // Then flatten the 2D group in layout order. For 3 waves along the
+      // fast axis and 2 along the slow axis, coordinate (fast=2, slow=1)
+      // has ID 2 + 1 * 3 = 5, and the group has 3 * 2 = 6 waves.
+      unsigned fastDim = blockLayout.getOrder()[0];
+      unsigned slowDim = blockLayout.getOrder()[1];
+      linearWaveIdInSharingGroup =
+          b.add(waveCoordInSharingGroup[fastDim],
+                b.mul(waveCoordInSharingGroup[slowDim],
+                      sharingGroupShape[fastDim]));
+      totalSharingWaves =
+          b.mul(sharingGroupShape[0], sharingGroupShape[1]);
+    }
+    unsigned transferOrdinal = 0;
+    const unsigned transfersPerTile = product(mlInsnAttr.instrsPerWarp);
+    auto issueLoad = [&](Value descriptor, Value dest, bool transpose,
+                         unsigned offset, bool rowOffset) {
+      Block *next = nullptr;
+      if (sharesTile) {
+        Value owner = b.udiv(b.mul(b.i32_val(transferOrdinal % transfersPerTile),
+                                   totalSharingWaves), b.i32_val(transfersPerTile));
+        Value active = b.icmp_eq(linearWaveIdInSharingGroup, owner);
+        Block *before = rewriter.getInsertionBlock();
+        next = rewriter.splitBlock(before, rewriter.getInsertionPoint());
+        Block *body = rewriter.createBlock(next);
+        rewriter.setInsertionPointToEnd(before);
+        LLVM::CondBrOp::create(rewriter, loc, active, body, next);
+        rewriter.setInsertionPointToStart(body);
+      }
+      generateMatrixLoadLDSOp(loc, rewriter, mlInsnAttr.insn, descriptor,
+                              dest, transpose, offset, rowOffset,
+                              false, false, bypassL1);
+      if (next) {
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, next);
+        rewriter.setInsertionPointToStart(next);
+      }
+      ++transferOrdinal;
+    };
+
     auto allocOp = op.getResult().getDefiningOp<triton::gpu::LocalAllocOp>();
     auto elemByteWidth = blockLayout.getElemBitWidth() / 8;
 
@@ -331,8 +419,7 @@ struct MLSMatrixLoadToLocalOpConversion
         }
         bool t = mlsInsn->isRowMajor();
         bool r = false;
-        generateMatrixLoadLDSOp(loc, rewriter, mlInsnAttr.insn,
-                                rsrcDesc, smemPtr, t, 0, r, false, false, bypassL1);
+        issueLoad(rsrcDesc, smemPtr, t, 0, r);
         iterIdx++;
       }
     } else {
@@ -414,8 +501,7 @@ struct MLSMatrixLoadToLocalOpConversion
             ldInBlkOffC = ldInBlkOffC * 2;
 
           assert(ldInBlkOffC < 1024 && "ldInBlkOffC out of range"); // 2^10
-          generateMatrixLoadLDSOp(loc, rewriter, mlInsnAttr.insn,
-                                  rsrcDesc, smemPtr, t, ldInBlkOffC, r, false, false, bypassL1);
+          issueLoad(rsrcDesc, smemPtr, t, ldInBlkOffC, r);
         }
       }
     }
@@ -1645,9 +1731,11 @@ private:
 
     // 2. compute ds_read_matrix offsets into the full parent MLS buffer
     auto parentShape = getMlsParentMatrixShape(tensorTy);
+    bool usesFragmentOffsets = mfmaInstrNonK < mlsTile[nonKDimIdx2D] &&
+        mfmaInstrNonK % dsInsnAttr.instrShape[nonKDimIdx2D] == 0;
     auto offsets = computeDsReadMatrixOffsets(rewriter, loc,
                                sharedLayout, dsInsnAttr,
-                               spatialWarpId, warpsPerBlockNonK, mlsNumReps,
+                               spatialWarpId, warpsPerBlockNonK, mfmaInstrNonK, mlsNumReps,
                                smemObj, parentShape, shape, matrixStorePath);
     Value smemBase = smemObj.getBase();
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
@@ -1655,6 +1743,8 @@ private:
     assert(mlsInsn->getElemBitWidth() == 16 || mlsInsn->getElemBitWidth() == 8);
     unsigned dsRepPerWarpNonK = dsInsnAttr.instrsPerWarp[nonKDimIdx2D];
     unsigned dsRepPerWarpK = dsInsnAttr.instrsPerWarp[kDimIdx2D];
+    if (usesFragmentOffsets)
+      dsRepPerWarpNonK = mfmaInstrNonK / dsInsnAttr.instrShape[nonKDimIdx2D];
     unsigned dsLoadsPerK = dsRepPerWarpNonK * dsRepPerWarpK;
     unsigned numOfElemsPerDsInsn =
         (dsInsnAttr.instrShape[kDimIdx2D] *
@@ -1673,7 +1763,7 @@ private:
         unsigned offBase = offs.size() - 2;
         int64_t viewNonK = shape[nonKDimIdx];
         int64_t parentNonK = parentShape[nonKDimIdx];
-        if (viewNonK > 0 && parentNonK > viewNonK &&
+        if (!usesFragmentOffsets && viewNonK > 0 && parentNonK > viewNonK &&
             parentNonK % viewNonK == 0 &&
             (!matrixStorePath ||
              viewNonK / warpsPerBlockNonK <
@@ -1712,16 +1802,18 @@ private:
                               b.add(warpIdInBatch, b.i32_val(batchIdx * warpsPerBatch)));
       for (int mlsNonK = 0; mlsNonK < mlsNumRepNonK; ++mlsNonK) {
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
-          auto [loadOffset, tileOffset] = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
+          auto [loadOffset, tileOffset, fragment] =
+              offsets[mlsNonK * mlsNumRepK + mlsKIdx];
+          Value fragmentBase = usesFragmentOffsets ? fragment : nonKLoadBaseVal;
           loadOffset = b.add(loadOffset, batchOffset);
           for (int loadIdx = 0; loadIdx < dsLoadsPerK; ++loadIdx) {
             unsigned loadNonKIdx = loadIdx / dsRepPerWarpK;
             unsigned loadKIdx = loadIdx % dsRepPerWarpK;
             unsigned localByteOff = dsInsnAttr.dsByteOffsets[loadIdx];
             Value gepElems = loadOffset;
-            if (withinTileHalfView) {
+            if (withinTileHalfView || usesFragmentOffsets) {
               Value parentLoadIdxVal = b.add(
-                  b.mul(b.add(nonKLoadBaseVal, b.i32_val(loadNonKIdx)),
+                  b.mul(b.add(fragmentBase, b.i32_val(loadNonKIdx)),
                         b.i32_val(dsRepPerWarpK)),
                   b.i32_val(loadKIdx));
               Value parentByteOff = selectDsByteOffsetUnit(parentLoadIdxVal);
@@ -1892,9 +1984,11 @@ private:
 
     // 2. compute ds_read_matrix offsets into the full parent MLS buffer
     auto parentShape = getMlsParentMatrixShape(tensorTy);
+    bool usesFragmentOffsets = mfmaTileNonK < mlsTile[nonKDimIdx2D] &&
+        mfmaTileNonK % dsInsnAttr.instrShape[nonKDimIdx2D] == 0;
     auto offsets = computeDsReadMatrixOffsets(rewriter, loc,
                                sharedLayout, dsInsnAttr,
-                               spatialWarpId, warpsPerBlockNonK, mlsNumReps,
+                               spatialWarpId, warpsPerBlockNonK, mfmaTileNonK, mlsNumReps,
                                smemObj, parentShape, shape, matrixStorePath);
     Value smemBase = smemObj.getBase();
     Type smemPtrTy = ptr_ty(rewriter.getContext(), 3);
@@ -1939,7 +2033,7 @@ private:
         unsigned offBase = offs.size() - 2;
         int64_t viewNonK = shape[nonKDimIdx];
         int64_t parentNonK = parentShape[nonKDimIdx];
-        if (viewNonK > 0 && parentNonK > viewNonK &&
+        if (!usesFragmentOffsets && viewNonK > 0 && parentNonK > viewNonK &&
             parentNonK % viewNonK == 0 &&
             (!matrixStorePath ||
              viewNonK / warpsPerBlockNonK <
@@ -1979,16 +2073,18 @@ private:
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
           int mfmaTileKIdx = mlsKIdx * (mlsTile[kDimIdx2D] / mfmaTileK);
 
-          auto [loadOffset, tileOffset] = offsets[mlsNonK * mlsNumRepK + mlsKIdx];
+          auto [loadOffset, tileOffset, fragment] =
+              offsets[mlsNonK * mlsNumRepK + mlsKIdx];
+          Value fragmentBase = usesFragmentOffsets ? fragment : nonKLoadBaseVal;
           loadOffset = b.add(loadOffset, batchOffset);
           for (int loadIdx = 0; loadIdx < dsLoadsPerK; ++loadIdx) {
             unsigned loadNonKIdx = loadIdx / dsRepPerWarpK;
             unsigned loadKIdx = loadIdx % dsRepPerWarpK;
             unsigned localByteOff = dsInsnAttr.dsByteOffsets[loadIdx];
             Value gepElems = loadOffset;
-            if (withinTileHalfView) {
+            if (withinTileHalfView || usesFragmentOffsets) {
               Value parentLoadIdxVal = b.add(
-                  b.mul(b.add(nonKLoadBaseVal, b.i32_val(loadNonKIdx)),
+                  b.mul(b.add(fragmentBase, b.i32_val(loadNonKIdx)),
                         b.i32_val(dsRepPerWarpK)),
                   b.i32_val(loadKIdx));
               Value parentByteOff = selectDsByteOffset(parentLoadIdxVal);
@@ -2048,13 +2144,15 @@ private:
     return result;
   }
 
-  // Separate the common runtime offset from static tile repetitions, in elements.
-  SmallVector<std::pair<Value, uint64_t>>
+  // Return the runtime parent-tile offset (elements), static tile displacement
+  // (elements), and native DS fragment index. Both reader paths use this one
+  // parent-coordinate calculation, including for memdesc_subslice operands.
+  SmallVector<std::tuple<Value, uint64_t, Value>>
   computeDsReadMatrixOffsets(ConversionPatternRewriter &rewriter, Location loc,
                              const HCUMlsSharedEncodingAttr &sharedLayout,
                              const DsReadMatrixInsnAttr &dsInsnAttr,
                              Value warpNonKId, int warpsPerBlockNonK,
-                             ArrayRef<unsigned> mlsReps, SharedMemoryObject smemObj,
+                             unsigned warpNonKSpan, ArrayRef<unsigned> mlsReps, SharedMemoryObject smemObj,
                              ArrayRef<int64_t> parentShape,
                              ArrayRef<int64_t> viewShape,
                              bool matrixStorePath) const {
@@ -2112,12 +2210,15 @@ private:
           b.udiv(offs[offBase + kDimIdx], b.i32_val(tileK));
     }
 
-    SmallVector<std::pair<Value, uint64_t>> offsets(numBlocks * numMlsTilesPerBlock);
+    SmallVector<std::tuple<Value, uint64_t, Value>> offsets(
+        numBlocks * numMlsTilesPerBlock);
     bool nonKSlicedView = matrixStorePath &&
         viewShape[nonKDimIdx] < parentShape[nonKDimIdx];
     bool warpWithinNonKTile =
         viewShape[nonKDimIdx] / warpsPerBlockNonK <
         static_cast<int64_t>(mlsTile[nonKDimIdx]);
+    bool usesFragmentOffsets = warpNonKSpan < mlsTile[nonKDimIdx] &&
+        warpNonKSpan % dsInsnAttr.instrShape[nonKDimIdx] == 0;
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * warpsPerBlockNonK;
 
@@ -2130,6 +2231,21 @@ private:
             ? subsliceNonKTileOff
             : b.add(warpNonKId, subsliceNonKTileOff);
         Value mlsKOff = subsliceKTileOff;
+        Value fragment = b.i32_val(0);
+        if (usesFragmentOffsets) {
+          // Work entirely in parent coordinates: a view may begin either at
+          // an MLS tile boundary or at a DS fragment inside that tile.
+          Value viewOffset = b.i32_val(0);
+          if (offs.size() >= 2)
+            viewOffset = offs[offs.size() - 2 + nonKDimIdx];
+          Value logicalStart = b.add(viewOffset, b.mul(
+              b.add(warpNonKId, b.i32_val(blockNonKOffset)),
+              b.i32_val(warpNonKSpan)));
+          mlsNonKOff = b.udiv(logicalStart, b.i32_val(mlsTile[nonKDimIdx]));
+          fragment = b.udiv(
+              b.urem(logicalStart, b.i32_val(mlsTile[nonKDimIdx])),
+              b.i32_val(dsInsnAttr.instrShape[nonKDimIdx]));
+        }
 
         std::array<Value, 2> mlsCoords =
             opIdx == 0 ? std::array<Value, 2>{mlsNonKOff, mlsKOff}
@@ -2139,7 +2255,8 @@ private:
                                         flattenedMlsShape, sharedLayout.getOrder()),
                             b.i32_val(product(sharedLayout.getMlsTile())/divFactor));
         // Keep static repetitions separate for the instruction's byte offset.
-        unsigned staticNonKOff = withinTile ? block : blockNonKOffset;
+        unsigned staticNonKOff = usesFragmentOffsets ? 0 :
+            (withinTile ? block : blockNonKOffset);
         unsigned staticKOff = mlsTileIdx;
         std::array<unsigned, 2> staticCoords =
             opIdx == 0 ? std::array<unsigned, 2>{staticNonKOff, staticKOff}
@@ -2148,7 +2265,7 @@ private:
             LLVM::linearize(staticCoords, flattenedMlsShape,
                             sharedLayout.getOrder()) *
             (product(sharedLayout.getMlsTile()) / divFactor);
-        offsets[block * blockSize + mlsTileIdx] = {mlsOff, tileOffset};
+        offsets[block * blockSize + mlsTileIdx] = {mlsOff, tileOffset, fragment};
       }
     }
 
