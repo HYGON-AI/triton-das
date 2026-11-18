@@ -1039,14 +1039,15 @@ struct MLSMatrixStoreFromRegOpConversion
     Value linearWarpId = getLinearWarpId(loc, rewriter, targetInfo);
     SmallVector<Value> multiDimWarpId =
         delinearize(rewriter, loc, linearWarpId, mfmaWarps, warpOrder);
-    Value warpRow =
-        b.mul(multiDimWarpId[0], b.i32_val(static_cast<int32_t>(storeShape[0])));
-    // Interleave2 keeps each pair of instruction-width N stores together and
-    // distributes consecutive pairs across N warps.  Express that ownership
-    // directly instead of first building a contiguous per-warp coordinate and
-    // exchanging address bits afterwards.  This also handles the degenerate
-    // 32x32 case where groupWidth == storeShape[1] (there is no local group to
-    // exchange with the warp coordinate).
+    unsigned storeMGroupHeight = explicitMapping
+        ? mfmaEnc.getInstrShape()[0] * mfmaEnc.getTilesPerWarp()[0]
+        : storeShape[0];
+    Value warpRow = b.mul(multiDimWarpId[0], b.i32_val(storeMGroupHeight));
+    // Explicit layouts place tilesPerWarp before the warp coordinate. The
+    // interleave2 wrapper only permutes N's low five bits, so a [4, 8] warp
+    // still owns 128 consecutive columns, not two round-robin 64-column
+    // groups. Outer register repetitions advance by the whole CTA tile.
+    // The implicit MLS layout instead distributes native interleave groups.
     unsigned storeNGroupWidth = explicitMapping
         ? mfmaEnc.getInstrShape()[1] * mfmaEnc.getTilesPerWarp()[1]
         : interleaveFactor * msInsnAttr.instrShape[1];
@@ -1175,11 +1176,18 @@ struct MLSMatrixStoreFromRegOpConversion
     // both edge extents need independent filtering.
     bool rowMajorGroups = storeShape[0] / msInsnAttr.instrShape[0] <=
                           storeShape[1] / msInsnAttr.instrShape[1];
-    if (explicitMapping && (needBoundaryCheck || !rowMajorGroups)) {
+    if (explicitMapping && (needBoundaryCheck || !rowMajorGroups ||
+                            storeShape[0] > storeMGroupHeight)) {
       for (unsigned row = 0; row < storeShape[0]; row += msInsnAttr.instrShape[0]) {
         for (unsigned col = 0; col < storeShape[1]; col += msInsnAttr.instrShape[1]) {
+          unsigned physicalRow = row / storeMGroupHeight * mfmaWarps[0] *
+                                     storeMGroupHeight +
+                                 row % storeMGroupHeight;
+          unsigned physicalCol = col / storeNGroupWidth * numStoreNWarps *
+                                     storeNGroupWidth +
+                                 col % storeNGroupWidth;
           Value offset = loadHelper.dot64(loc, rewriter,
-              {b.i32_val(row), b.i32_val(col)}, llStrides);
+              {b.i32_val(physicalRow), b.i32_val(physicalCol)}, llStrides);
           Value totalOffset = b.add(ldBlkOff, offset);
           Value ptr = b.gep(ptr_ty(ctx, 1), i16_ty, llBasePtr, totalOffset);
           auto padding = [&](unsigned dim, unsigned position) -> Value {
@@ -1196,7 +1204,7 @@ struct MLSMatrixStoreFromRegOpConversion
           Value rsrcDesc = loadHelper.createRsrcDesc(
               loc, rewriter, mlsInsn->getMlsVersion(), ptr,
               b.trunc(i32_ty, llStrides[0]), storeLayout.getAlt2Kind(),
-              padding(1, col), padding(0, row));
+              padding(1, physicalCol), padding(0, physicalRow));
           if (failed(queueOne(rsrcDesc, true, 0, false)))
             return failure();
         }
