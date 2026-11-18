@@ -2006,7 +2006,14 @@ private:
            "mls tile kdim and shape kdim should be divisible!");
 
     unsigned mlsNumRepK = shapeE[kDimIdx] / mlsTile[kDimIdx2D];
-    unsigned mlsNumRepNonK = mfmaTileNumRepNonK;
+    // One warp's non-K MFMA tile may contain several native MLS tiles, for
+    // either operand and element width. For example, tilesPerWarp[1] = 8
+    // covers 128 B columns, requiring two 64-column MLS tiles per MFMA tile.
+    unsigned mlsTilesPerMfmaTileNonK =
+        std::max<unsigned>(1, mfmaTileNonK / mlsTile[nonKDimIdx2D]);
+    assert(mfmaTileNonK % mlsTile[nonKDimIdx2D] == 0 ||
+           mlsTile[nonKDimIdx2D] % mfmaTileNonK == 0);
+    unsigned mlsNumRepNonK = mfmaTileNumRepNonK * mlsTilesPerMfmaTileNonK;
     SmallVector<unsigned> mlsNumReps{mlsNumRepNonK, mlsNumRepK};
     if (opIdx == 1) {
       std::swap(mlsNumReps[0], mlsNumReps[1]);
@@ -2037,7 +2044,8 @@ private:
     // tile (e.g. mlsTile 64x64 → 8 ds_reads) but this LocalLoad only needs the
     // MFMA coverage for the view (e.g. 4 ds_reads → 32 elems).
     unsigned nonKDsNeeded =
-        (mfmaInstrsPerWarpNonK + mfmaGroupPerDsInsn - 1) / mfmaGroupPerDsInsn;
+        llvm::divideCeil(mfmaInstrsPerWarpNonK / mlsTilesPerMfmaTileNonK,
+                         mfmaGroupPerDsInsn);
     if (nonKDsNeeded < dsRepPerWarpNonK)
       dsRepPerWarpNonK = nonKDsNeeded;
     unsigned dsLoadsPerK = dsRepPerWarpNonK * dsRepPerWarpK;
@@ -2099,7 +2107,10 @@ private:
       Value batchOffset = b.mul(b.i32_val(operandSize),
                               b.add(warpIdInBatch, b.i32_val(batchIdx * warpsPerBatch)));
       for (int mlsNonK = 0; mlsNonK < mlsNumRepNonK; ++mlsNonK) {
-        int mfmaTileNonKIdx = mlsNonK;
+        int mfmaTileNonKIdx = mlsNonK / mlsTilesPerMfmaTileNonK;
+        int mlsTileNonKInMfmaTile = mlsNonK % mlsTilesPerMfmaTileNonK;
+        int mfmaInsnNonKBase = mlsTileNonKInMfmaTile *
+                              (mfmaInstrsPerWarpNonK / mlsTilesPerMfmaTileNonK);
         for (int mlsKIdx = 0; mlsKIdx < mlsNumRepK; ++mlsKIdx) {
           int mfmaTileKIdx = mlsKIdx * (mlsTile[kDimIdx2D] / mfmaTileK);
 
@@ -2148,7 +2159,8 @@ private:
             unsigned elemsPerGroup = unpackedValues.size() / mfmaGroupPerDsInsn;
 
             for (int i = 0; i < mfmaGroupPerDsInsn; ++i) {
-              int mfmaInsnNonKIdxInTile = loadNonKIdx * mfmaGroupPerDsInsn + i;
+              int mfmaInsnNonKIdxInTile =
+                  mfmaInsnNonKBase + loadNonKIdx * mfmaGroupPerDsInsn + i;
               int mfmaInsnKIdxInTile = loadKIdx * mfmaKStridePerDsInsn;
               unsigned groupOffset = batchIdx * (mfmaTileNumRepNonK * mfmaInstrsPerWarpNonK) * numRepK * numOfElems /* batch idx */ +
                                      mfmaTileNonKIdx * mfmaInstrsPerWarpNonK * numRepK * numOfElems /* block idx*/ +
@@ -2249,8 +2261,14 @@ private:
         static_cast<int64_t>(mlsTile[nonKDimIdx]);
     bool usesFragmentOffsets = warpNonKSpan < mlsTile[nonKDimIdx] &&
         warpNonKSpan % dsInsnAttr.instrShape[nonKDimIdx] == 0;
+    unsigned tilesPerWarpNonK =
+        std::max<unsigned>(1, warpNonKSpan / mlsTile[nonKDimIdx]);
     for (int block = 0; block < numBlocks; ++block) {
-      int blockNonKOffset = block * warpsPerBlockNonK;
+      // MLS tiles inside one MFMA tile are consecutive. Only the next MFMA
+      // tile repetition skips the other warps: [rep][warp][tile-in-warp].
+      unsigned blockNonKOffset =
+          block / tilesPerWarpNonK * warpsPerBlockNonK * tilesPerWarpNonK +
+          block % tilesPerWarpNonK;
 
       for (int mlsTileIdx = 0; mlsTileIdx < numMlsTilesPerBlock; ++mlsTileIdx) {
         // A within-tile WDRA subslice uses the parent tile plus a caller-side
@@ -2259,7 +2277,8 @@ private:
         bool withinTile = nonKSlicedView && warpWithinNonKTile;
         Value mlsNonKOff = withinTile
             ? subsliceNonKTileOff
-            : b.add(warpNonKId, subsliceNonKTileOff);
+            : b.add(b.mul(warpNonKId, b.i32_val(tilesPerWarpNonK)),
+                    subsliceNonKTileOff);
         Value mlsKOff = subsliceKTileOff;
         Value fragment = b.i32_val(0);
         if (usesFragmentOffsets) {

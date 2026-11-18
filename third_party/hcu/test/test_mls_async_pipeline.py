@@ -280,22 +280,15 @@ def test_multidot_mls_fallback(shared_mls, stages):
     assert "pred =" not in ttgir
 
 
-@pytest.mark.xfail(strict=True, raises=RuntimeError,
-                   reason="Legacy shared MLS feeding two dot layouts fails MLS/MFMA element-count validation")
-def test_shared_mls_two_dot_layouts(capfd, monkeypatch):
+def test_shared_mls_two_dot_layouts(monkeypatch):
     monkeypatch.setenv("TRITON_HCU_ENABLE_DS_READ_M", "1")
     monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
     a, b, scales, _ = _inputs(512)
     out = torch.empty((32, 32), device="cuda", dtype=torch.float32)
-    # Compile only: preserve the known failure without launching invalid code.
-    try:
-        _chained_kernel.warmup(a, b, scales, out, 512, True, grid=(1,),
-                               use_async_copy=False, num_stages=4,
-                               use_block_pingpong=False)
-    except RuntimeError:
-        # Do not let the known-failure marker hide a different compiler error.
-        assert "MLS LocalLoad elem count must match MFMA operand" in capfd.readouterr().err
-        raise
+    # Compile only: shared MLS feeding two dot layouts must pass lowering.
+    _chained_kernel.warmup(a, b, scales, out, 512, True, grid=(1,),
+                           use_async_copy=False, num_stages=4,
+                           use_block_pingpong=False)
 
 
 def test_async_copy_autotune(monkeypatch):
