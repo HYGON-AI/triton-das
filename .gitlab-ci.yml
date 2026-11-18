@@ -123,6 +123,10 @@ publish:
         DTK_IMAGE_TAG:
           - "26.04-rockylinux8.6-py3.10"
           - "26.10-rockylinux8.6-py3.12"
+      - TRITON_VERSION: ["3.6.0"]
+        TORCH_VERSION: ["2.13.0"]
+        DTK_IMAGE_TAG:
+          - "27.04-rockylinux8.6-py3.12"
   before_script:
     # 加载 DTK 环境（镜像内已预装 DTK）
     - source /opt/dtk/env.sh && cd ${CI_PROJECT_DIR}
