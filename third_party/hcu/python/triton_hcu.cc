@@ -44,6 +44,12 @@ void addBlockPingpongPipeline(mlir::PassManager &pm,
   pm.addPass(mlir::createTritonHCUFinalizeBlockPingpong());
 }
 
+void init_triton_hcu_passes_ttir(py::module &&m) {
+  ADD_PASS_OPTION_WRAPPER_1("add_rewrite_tensor_descriptor_to_mls",
+                            mlir::createTritonHCURewriteTensorDescriptorToMLS,
+                            const std::string &);
+}
+
 void init_triton_hcu_passes_ttgpuir(py::module &&m) {
   using namespace mlir::triton;
   // HCU-specific passes whose implementations live in
@@ -196,6 +202,7 @@ void init_triton_hcu(py::module &&m) {
     return mlir::triton::HCU::hasBufferLdsEncoding(mod);
   });
   auto passes = m.def_submodule("passes");
+  init_triton_hcu_passes_ttir(passes.def_submodule("ttir"));
   init_triton_hcu_passes_ttgpuir(passes.def_submodule("ttgpuir"));
   m.def("add_wait_cnt", [](mlir::ModuleOp mod) {
     ::mlir::triton::HCU::addWaitCntHCU(mod);

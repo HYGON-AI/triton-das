@@ -246,6 +246,19 @@ def TritonHCUPackBlockPingpongBit8
   let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 }
 
+def TritonHCURewriteTensorDescriptorToMLS
+    : Pass<"tritonhcu-rewrite-tensor-descriptor-to-mls", "mlir::ModuleOp"> {
+  let summary = "Rewrite compatible tensor descriptor loads feeding dots to matrix loads";
+  let description = [{
+    Select proven compatible loads feeding dots in TTIR on gfx946/gfx948 when
+    TRITON_HCU_ENABLE_TENSOR_DESCRIPTOR_MLS is enabled (the default).
+    Leave other loads and stores for the existing descriptor-to-pointer pass.
+  }];
+  let options = [Option<"arch", "arch", "std::string", "std::string{}",
+                        "Target architecture (empty disables rewriting)">];
+  let dependentDialects = ["mlir::triton::TritonDialect"];
+}
+
 def TritonHCUMlsEncodingInsertion: Pass<"tritonhcu-mls-encoding-insertion", "mlir::ModuleOp"> {
   let summary = "Insert MlsEncoding to the matrix_load instruction";
   let dependentDialects = [

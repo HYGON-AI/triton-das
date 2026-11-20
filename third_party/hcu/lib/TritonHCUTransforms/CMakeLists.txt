@@ -35,6 +35,7 @@ add_triton_library(TritonHCUTransforms
   ConsumerPingpong.cpp
   BlockPingpong.cpp
   UTCWarmup.cpp
+  RewriteTensorDescriptorToMLS.cpp
   MlsEncodingInsertion.cpp
   MlsStreamPipeline.cpp
   MlsLowering.cpp
