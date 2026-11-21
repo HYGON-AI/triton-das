@@ -125,6 +125,10 @@ class HIPOptions:
     # to retain the legacy model with newer HCU Clang builds.
     hcu_use_gfx946_sched_model_v2: bool = True
 
+    # WASP DS write -> ebarrier/abarrier -> DS read: omit the backend-forced
+    # lgkmcnt(0) at the barrier when True; callers manage DS completion.
+    disable_ebarrier_abarrier_ds_wait: bool = False
+
     # Memory load/store clustering dword budget (LLVM fn attr).
     # None: omit attr (LLVM default 8). Allowed: 8, 16, 24, 32, 40, 48.
     max_memory_cluster_dwords: int = None
@@ -544,6 +548,9 @@ class HIPBackend(BaseBackend):
 
         if options.enable_fp_fusion:
             options_args.extend(["-mllvm=-fp-fuse=fast"])
+
+        if options.disable_ebarrier_abarrier_ds_wait:
+            options_args.append("-mllvm=-hcu-disable-barrier-ds-wait")
 
         if not options.misched_regpressure:
             options_args.append("-mllvm=-misched-regpressure=false")
