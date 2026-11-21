@@ -44,11 +44,14 @@ namespace {
 Value getUniformWarpId(Operation *op, ConversionPatternRewriter &rewriter,
                        Location loc) {
   OpBuilder::InsertionGuard guard(rewriter);
-  if (!op->getParentOfType<triton::gpu::WarpSpecializeOp>()) {
-    auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
-    assert(func && "native scale instruction must be inside an LLVM function");
-    rewriter.setInsertionPointToStart(&func.getBody().front());
-  }
+  // Wave ID is invariant, including inside a WASP partition. Keep its
+  // convergent readfirstlane outside loops, while preserving the partition's
+  // local thread-ID scope. LLVM can also share these entry-block calls.
+  Region *scope = op->getBlock()->getParent();
+  while (!isa<LLVM::LLVMFuncOp, triton::gpu::WarpSpecializeOp,
+              triton::gpu::WarpSpecializePartitionsOp>(scope->getParentOp()))
+    scope = scope->getParentOp()->getParentRegion();
+  rewriter.setInsertionPointToStart(&scope->front());
   Value warp = getLaneAndWarpId(rewriter, loc).second;
   return LLVM::createLLVMIntrinsicCallOp(
              rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty}, {warp})
