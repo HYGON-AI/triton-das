@@ -74,3 +74,32 @@ def test_matrix_store_warp_tiles(dtype, tile, boundary, tm, tn, wn, m, n):
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     assert f'tilesPerWarp = [{tm}, {tn}]' in kernel.asm['ttgir']
     assert 'matrix_store_' in kernel.asm['amdgcn']
+
+
+@pytest.mark.parametrize('m,n,boundary', [
+    (128, 256, ()),       # Equal descriptor counts: prefer N offsets.
+    (128, 128, ()),       # M offsets need two descriptors instead of four.
+    (128, 512, ()),       # N offsets need four descriptors instead of eight.
+    (128, 256, (0,)),     # M filter stays fixed while N varies.
+    (128, 256, (1,)),     # N filter stays fixed while M varies.
+    (128, 256, (0, 1)),   # Both filters vary: per-instruction descriptors.
+    (32, 2048, ()),       # Cross a 1024-column descriptor window.
+])
+def test_matrix_store_descriptor_groups(m, n, boundary):
+    if not torch.cuda.is_available():
+        pytest.skip('requires HCU')
+    if torch.cuda.get_device_properties(0).gcnArchName.split(':')[0] != 'gfx946':
+        pytest.skip('requires gfx946 native matrix store')
+    gen = torch.Generator().manual_seed(20261122)
+    source = torch.randint(-256, 257, (m, n), generator=gen).bfloat16()
+    expected = torch.full((m + 2, n + 16), 512, dtype=source.dtype)
+    output = expected.cuda()
+    valid_m = m - 5 if 0 in boundary else m
+    valid_n = n - 7 if 1 in boundary else n
+    expected[1:1 + valid_m, 8:8 + valid_n] = source[:valid_m, :valid_n]
+    kernel = _copy[(1,)](
+        source.cuda(), output, M=m, N=n, TM=1, TN=2,
+        WN=4 if n >= 1024 else 2, TILE=(16, 32), BOUNDARY=boundary,
+        VALID_M=valid_m, VALID_N=valid_n, num_warps=4)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+    assert 'tilesPerWarp = [1, 2]' in kernel.asm['ttgir']

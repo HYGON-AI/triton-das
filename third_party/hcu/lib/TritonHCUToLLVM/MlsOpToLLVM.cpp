@@ -26,6 +26,7 @@
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
@@ -1178,34 +1179,79 @@ struct MLSMatrixStoreFromRegOpConversion
                           storeShape[1] / msInsnAttr.instrShape[1];
     if (explicitMapping && (needBoundaryCheck || !rowMajorGroups ||
                             storeShape[0] > storeMGroupHeight)) {
+      auto physicalRowFor = [&](unsigned row) {
+        return row / storeMGroupHeight * mfmaWarps[0] * storeMGroupHeight +
+               row % storeMGroupHeight;
+      };
+      auto physicalColFor = [&](unsigned col) {
+        return col / storeNGroupWidth * numStoreNWarps * storeNGroupWidth +
+               col % storeNGroupWidth;
+      };
+
+      // Like matrix-load, share a descriptor along the direction with more
+      // instructions. Count physical 10-bit immediate windows as well: the
+      // explicit MMAC layout can leave gaps between successive register tiles.
+      // Padding must remain constant within a group. Column immediates also
+      // require contiguous columns; row immediates use the descriptor stride.
+      unsigned numRows = storeShape[0] / msInsnAttr.instrShape[0];
+      unsigned numCols = storeShape[1] / msInsnAttr.instrShape[1];
+      llvm::SmallDenseSet<unsigned> rowWindows, colWindows;
+      for (unsigned row = 0; row < storeShape[0]; row += msInsnAttr.instrShape[0])
+        rowWindows.insert(physicalRowFor(row) / 1024);
+      for (unsigned col = 0; col < storeShape[1]; col += msInsnAttr.instrShape[1])
+        colWindows.insert(physicalColFor(col) / 1024);
+      bool canOffsetRows = !boundaryCheckInfo[0];
+      bool canOffsetCols =
+          !boundaryCheckInfo[1] && matchPattern(llStrides[1], m_One());
+      unsigned rowOffsetDescriptors = numCols * rowWindows.size();
+      unsigned colOffsetDescriptors = numRows * colWindows.size();
+      bool offsetCols = canOffsetCols &&
+          (!canOffsetRows || colOffsetDescriptors < rowOffsetDescriptors ||
+           (colOffsetDescriptors == rowOffsetDescriptors && mlsInsn->isRowMajor()));
+      bool shareDescriptor = offsetCols || canOffsetRows;
+      llvm::DenseMap<std::pair<unsigned, unsigned>, Value> descriptors;
+
+      // Keep register consumption in row-major order even when descriptors
+      // are shared along M. Reordering these stores would change packNext's
+      // association between accumulator fragments and their GMEM addresses.
       for (unsigned row = 0; row < storeShape[0]; row += msInsnAttr.instrShape[0]) {
         for (unsigned col = 0; col < storeShape[1]; col += msInsnAttr.instrShape[1]) {
-          unsigned physicalRow = row / storeMGroupHeight * mfmaWarps[0] *
-                                     storeMGroupHeight +
-                                 row % storeMGroupHeight;
-          unsigned physicalCol = col / storeNGroupWidth * numStoreNWarps *
-                                     storeNGroupWidth +
-                                 col % storeNGroupWidth;
-          Value offset = loadHelper.dot64(loc, rewriter,
-              {b.i32_val(physicalRow), b.i32_val(physicalCol)}, llStrides);
-          Value totalOffset = b.add(ldBlkOff, offset);
-          Value ptr = b.gep(ptr_ty(ctx, 1), i16_ty, llBasePtr, totalOffset);
-          auto padding = [&](unsigned dim, unsigned position) -> Value {
-            if (!boundaryCheckInfo[dim])
-              return b.i32_val(0);
-            Value end = b.add(llBlockPos[dim],
-                             b.i32_val(position + msInsnAttr.instrShape[dim]));
-            Value excess = b.sub(end, llShape[dim]);
-            return b.select(b.icmp_sgt(excess, b.i32_val(0)),
-                            b.select(b.icmp_sgt(excess, b.i32_val(msInsnAttr.instrShape[dim])),
-                                     b.i32_val(msInsnAttr.instrShape[dim]), excess),
-                            b.i32_val(0));
-          };
-          Value rsrcDesc = loadHelper.createRsrcDesc(
-              loc, rewriter, mlsInsn->getMlsVersion(), ptr,
-              b.trunc(i32_ty, llStrides[0]), storeLayout.getAlt2Kind(),
-              padding(1, physicalCol), padding(0, physicalRow));
-          if (failed(queueOne(rsrcDesc, true, 0, false)))
+          unsigned physicalRow = physicalRowFor(row);
+          unsigned physicalCol = physicalColFor(col);
+          unsigned descriptorRow = shareDescriptor && !offsetCols
+                                       ? physicalRow / 1024 * 1024
+                                       : physicalRow;
+          unsigned descriptorCol = offsetCols ? physicalCol / 1024 * 1024
+                                              : physicalCol;
+          auto key = std::make_pair(descriptorRow, descriptorCol);
+          Value &rsrcDesc = descriptors[key];
+          if (!rsrcDesc) {
+            Value offset = loadHelper.dot64(
+                loc, rewriter,
+                {b.i32_val(descriptorRow), b.i32_val(descriptorCol)}, llStrides);
+            Value totalOffset = b.add(ldBlkOff, offset);
+            Value ptr = b.gep(ptr_ty(ctx, 1), i16_ty, llBasePtr, totalOffset);
+            auto padding = [&](unsigned dim, unsigned position) -> Value {
+              if (!boundaryCheckInfo[dim])
+                return b.i32_val(0);
+              Value end = b.add(llBlockPos[dim],
+                               b.i32_val(position + msInsnAttr.instrShape[dim]));
+              Value excess = b.sub(end, llShape[dim]);
+              return b.select(
+                  b.icmp_sgt(excess, b.i32_val(0)),
+                  b.select(b.icmp_sgt(excess, b.i32_val(msInsnAttr.instrShape[dim])),
+                           b.i32_val(msInsnAttr.instrShape[dim]), excess),
+                  b.i32_val(0));
+            };
+            rsrcDesc = loadHelper.createRsrcDesc(
+                loc, rewriter, mlsInsn->getMlsVersion(), ptr,
+                b.trunc(i32_ty, llStrides[0]), storeLayout.getAlt2Kind(),
+                padding(1, descriptorCol), padding(0, descriptorRow));
+          }
+          unsigned immediate = !shareDescriptor ? 0
+                               : offsetCols ? physicalCol - descriptorCol
+                                            : physicalRow - descriptorRow;
+          if (failed(queueOne(rsrcDesc, true, immediate, offsetCols)))
             return failure();
         }
       }
