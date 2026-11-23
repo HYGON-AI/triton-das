@@ -467,6 +467,12 @@ struct MLSMatrixLoadToLocalOpConversion
                                    b.i32_val(mlInsnAttr.instrShape[dimIdx] / dimDivFactor));
               Value posGt = b.icmp_sgt(posEnd, llShape[dimIdx]);
               paddingLen = b.select(posGt, b.sub(posEnd, llShape[dimIdx]), b.i32_val(0));
+              // Count only OOB elements within this instruction, not the
+              // entire distance from the matrix boundary to its end.
+              Value maxPadding =
+                  b.i32_val(mlInsnAttr.instrShape[dimIdx] / dimDivFactor);
+              paddingLen = b.select(b.icmp_sgt(paddingLen, maxPadding),
+                                    maxPadding, paddingLen);
             }
 
             Value mPadding  = ((groupPaddingInY && mlsInsn->isRowMajor()) ||
@@ -652,8 +658,9 @@ private:
     bool needBoundaryPadding = boundaryCheckInfo[0] || boundaryCheckInfo[1];
     if (needBoundaryPadding) {
       assert(!(boundaryCheckInfo[0] && boundaryCheckInfo[1]) && "both padding condition should not here!");
-      if (boundaryCheckInfo[1] && membersPerGroupInY)
-        membersPerGroupInY = false;
+      // Instructions sharing a descriptor must keep the checked coordinate
+      // fixed, regardless of which grouping minimizes descriptor count.
+      membersPerGroupInY = boundaryCheckInfo[0];
     }
     mlOffsInY = membersPerGroupInY;
     bool groupPaddingInY = !mlOffsInY;
@@ -1289,6 +1296,9 @@ struct MLSMatrixStoreFromRegOpConversion
           Value posGt = b.icmp_sgt(posEnd, llShape[0]);
           paddingLenX =
               b.select(posGt, b.sub(posEnd, llShape[0]), b.i32_val(0));
+          Value maxPadding = b.i32_val(msInsnAttr.instrShape[0]);
+          paddingLenX = b.select(b.icmp_sgt(paddingLenX, maxPadding),
+                                 maxPadding, paddingLenX);
         }
         if (boundaryCheckInfo[1]) {
           Value ldInBlockOffCoordY = physicalCol;
@@ -1298,6 +1308,9 @@ struct MLSMatrixStoreFromRegOpConversion
           Value posGt = b.icmp_sgt(posEnd, llShape[1]);
           paddingLenY =
               b.select(posGt, b.sub(posEnd, llShape[1]), b.i32_val(0));
+          Value maxPadding = b.i32_val(msInsnAttr.instrShape[1]);
+          paddingLenY = b.select(b.icmp_sgt(paddingLenY, maxPadding),
+                                 maxPadding, paddingLenY);
         }
         Value mPadding =
             mlsInsn->getMajorDimIndex() == 0 ? paddingLenX : paddingLenY;
@@ -1339,6 +1352,9 @@ struct MLSMatrixStoreFromRegOpConversion
               Value posGt = b.icmp_sgt(posEnd, llShape[dimIdx]);
               paddingLen = b.select(posGt, b.sub(posEnd, llShape[dimIdx]),
                                     b.i32_val(0));
+              Value maxPadding = b.i32_val(msInsnAttr.instrShape[dimIdx]);
+              paddingLen = b.select(b.icmp_sgt(paddingLen, maxPadding),
+                                    maxPadding, paddingLen);
             }
             Value mPadding =
                 ((groupPaddingInY && mlsInsn->isRowMajor()) ||
@@ -1424,8 +1440,7 @@ private:
     bool needBoundaryPadding = boundaryCheckInfo[0] || boundaryCheckInfo[1];
     if (needBoundaryPadding) {
       assert(!(boundaryCheckInfo[0] && boundaryCheckInfo[1]) && "both padding condition should not here!");
-      if (boundaryCheckInfo[1] && membersPerGroupInY)
-        membersPerGroupInY = false;
+      membersPerGroupInY = boundaryCheckInfo[0];
     }
     mlOffsInY = membersPerGroupInY;
     bool groupPaddingInY = !mlOffsInY;

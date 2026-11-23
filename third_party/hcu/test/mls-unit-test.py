@@ -1338,6 +1338,55 @@ def test_mls_bit16_asymmetric_bk64_block_pingpong(
     )
 
 
+@triton.jit
+def _load_row_tail(A, C, ROWS: tl.constexpr, OFFSET: tl.constexpr):
+    value = tl.matrix_load(A, shape=[ROWS, 64], strides=[64, 1], block_shape=[64, 64], offsets=[OFFSET, 0],
+                           boundary_check=(0, ))
+    i = tl.arange(0, 64)
+    tl.store(C + i[:, None] * 64 + i[None, :], value)
+
+
+def _check_mls_row_boundary(rows, offset):
+    if not torch.cuda.is_available() or not is_hcu_support_mls():
+        pytest.skip("requires HCU MLS")
+    # These cases set filter/nmfilter to the MLS instruction extent. NMZ has
+    # a bug at that boundary value, so run them only on gfx946/gfx948.
+    target = triton.runtime.driver.active.get_current_target()
+    if target.arch not in ("gfx946", "gfx948"):
+        pytest.skip("full-instruction MLS filters require gfx946/gfx948")
+
+    # Allocate the entire physical block and keep the logical OOB rows nonzero.
+    # A missing filter must fail deterministically without an invalid address.
+    source = ((torch.arange((offset + 64) * 64, dtype=torch.int32) % 97) + 1).half()
+    source = source.reshape(offset + 64, 64)
+    golden = torch.zeros((64, 64), dtype=torch.float16)
+    valid_rows = min(64, max(0, rows - offset))
+    golden[:valid_rows] = source[offset:offset + valid_rows]
+    output = torch.full((4096 + 32, ), -1, dtype=torch.float16)
+    a, c = source.cuda(), output.cuda()
+
+    compiled = _load_row_tail[(1, )](a, c, rows, offset, num_warps=4, num_stages=1)
+    actual = c.cpu()
+    torch.testing.assert_close(actual[:4096].reshape(64, 64), golden, rtol=0, atol=0)
+    torch.testing.assert_close(actual[4096:], output[4096:], rtol=0, atol=0)
+    assert "amdg.matrix_load_to_local" in compiled.asm["ttgir"]
+
+
+@pytest.mark.parametrize("rows,offset", [(48, 0), (112, 64)])
+def test_mls_single_axis_boundary_groups(rows, offset):
+    # The 16-row instructions covering relative rows 16-31 and 48-63 need
+    # different filters (0 and 16), so they cannot share a descriptor.
+    _check_mls_row_boundary(rows, offset)
+
+
+@pytest.mark.parametrize("rows,offset", [(100, 64), (64, 128), (64, 560)])
+def test_mls_instruction_padding_limit(rows, offset):
+    # For rows=100, offset=64, the last two 16-row instructions need padding
+    # 12 and 16. The old end-minus-rows formula gives 12 and 28. Fully OOB
+    # blocks must also use 16, regardless of their distance past the boundary.
+    _check_mls_row_boundary(rows, offset)
+
+
 def create_test_matrix_for_load_store(M, K, a_layout, dtype):
     """为 run_matrix_load_store_test 创建测试矩阵"""
     if dtype == torch.int8:
