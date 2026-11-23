@@ -4,6 +4,7 @@
 #include "triton/Dialect/Distributed/IR/Dialect.h"
 #include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonHCU/RegisterPasses.h"
+#include "TritonHCUToLLVM/Passes.h"
 #include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
 #include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 #include "proton/Dialect/include/Conversion/ProtonGPUToLLVM/Passes.h"
@@ -124,6 +125,7 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::amdgpu::registerTritonAMDGPUOptimizeDotOperands();
   // HCU passes
   mlir::registerTritonHCUPasses();
+  mlir::triton::HCU::registerAllocateScaleBuffer();
 
   // NVWS passes
   mlir::triton::registerNVWSTransformsPasses();

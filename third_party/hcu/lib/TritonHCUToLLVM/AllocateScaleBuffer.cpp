@@ -200,7 +200,7 @@ FailureOr<HCU::ScaleMemoryPlan> getScalePlan(amdgpu::ScaleWriteOp write) {
     return failure();
   }
   auto dot = cast<amdgpu::DotScaledOp>(*write.getResult().getUsers().begin());
-  auto mfma = cast<triton::gpu::AMDMfmaEncodingAttr>(
+  auto mfma = triton::gpu::getUnderlyingMmacEncoding(
       cast<RankedTensorType>(dot.getType()).getEncoding());
   unsigned side = dot.getAScale() == write.getResult() ? 0 : 1;
   // Validate only the descriptor's fixed plan; allocation does not select

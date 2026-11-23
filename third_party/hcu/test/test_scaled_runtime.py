@@ -12,6 +12,7 @@ import triton
 from triton.compiler import ASTSource
 
 from test_scaled_compile import (
+    scaled_interleave2_kernel,
     SIGNATURE,
     assert_scale_publication,
     check_mmac_banks,
@@ -598,3 +599,54 @@ def test_gluon_scaled_scalar_values():
     result = torch.empty((64, 64), dtype=torch.float32, device="cuda")
     kernel[(1, 1, 1)](*inputs, result)
     torch.testing.assert_close(result.cpu(), 1 + 2 * (ar @ br.T), rtol=1e-2, atol=1e-2)
+
+# Scaled LTS interleave2.
+
+@pytest.mark.parametrize('matrix', [False, True])
+@pytest.mark.parametrize('mls', [False, True])
+@pytest.mark.parametrize('unit_scale', [False, True])
+@pytest.mark.parametrize('m,n,tile,tpwm', [(64,128,(16,32),1), (128,256,(16,32),1), (128,256,(32,32),2)])
+def test_scaled_interleave2_runtime(matrix, mls, unit_scale, tmp_path, m, n, tile, tpwm):
+    check_interleave2_runtime(matrix, mls, unit_scale, tmp_path, m, n, tile, tpwm)
+
+
+def check_interleave2_runtime(matrix, mls, unit_scale, tmp_path, m=64, n=128, tile=(16,32), tpwm=1, edge=False, tpwn=2):
+    if not torch.cuda.is_available():
+        pytest.skip('requires gfx946')
+    target = triton.runtime.driver.active.get_current_target()
+    if target.arch not in ('gfx946', 'gfx948'):
+        pytest.skip('requires gfx946')
+    gen = torch.Generator().manual_seed(20261120)
+    a = torch.randint(-3, 4, (m, 128), generator=gen).to(torch.float8_e4m3fn)
+    b = torch.randint(-3, 4, (n, 128), generator=gen).to(a.dtype)
+    sa = torch.randint(125, 130, (m, 4), generator=gen, dtype=torch.uint8)
+    sb = torch.randint(125, 130, (n, 4), generator=gen, dtype=torch.uint8)
+    if unit_scale:
+        sa.fill_(127)
+        sb.fill_(127)
+    ar = a.float() * torch.exp2(sa.float() - 127).repeat_interleave(32, 1)
+    br = b.float() * torch.exp2(sb.float() - 127).repeat_interleave(32, 1)
+    golden = (ar @ br.T + 3).bfloat16()
+    # CPU generation, H2D inputs, D2H comparison, plus a sentinel guard row.
+    out = torch.full((m+1, n), float('nan'), dtype=torch.bfloat16).cuda()
+    kernel = scaled_interleave2_kernel[(1,)](a.cuda(), b.cuda(), sa.cuda(), sb.cuda(), out,
+                                           MATRIX=matrix, MLS=mls, M=m, N=n, STORE_TILE=tile, TPWM=tpwm, TPWN=tpwn, EDGE=edge, num_warps=4)
+    for ext in ('ttgir', 'llir', 'amdgcn'):
+        (tmp_path / ('kernel.' + ext)).write_text(kernel.asm[ext])
+    actual = out.cpu()
+    torch.save(dict(a=a, b=b, sa=sa, sb=sb, golden=golden, actual=actual), tmp_path / 'numeric.pt')
+    expected=torch.full_like(actual, float('nan'))
+    valid_m, valid_n=(m-5,n-7) if edge else (m,n)
+    expected[:valid_m,:valid_n]=golden[:valid_m,:valid_n]
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize('tile,tpwm', [((16,32),1), ((32,32),2)])
+def test_scaled_interleave2_matrix_edges(tmp_path, tile, tpwm):
+    check_interleave2_runtime(True, True, False, tmp_path, 128, 256, tile, tpwm, edge=True)
+
+
+@pytest.mark.parametrize('tpwm', [1, 2])
+def test_mls_scaled_interleave2_multitile_runtime(tpwm, tmp_path):
+    check_interleave2_runtime(True, True, False, tmp_path, m=128, n=256,
+                  tile=(16*tpwm,32), tpwm=tpwm, tpwn=4)

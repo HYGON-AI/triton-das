@@ -399,14 +399,27 @@ def matrix_store(
     waves = list(warps_per_cta(layout, value.shape))
     if len(waves) != 2:
         raise ValueError("matrix_store requires a rank-two warp distribution")
-    # A whole native instruction must belong to one warp.
-    native = gl.amd.AMDMFMALayout(
-        version=4, instr_shape=[16, 16, 32], mmac_layout=MmacLayout.LTS,
-        warps_per_cta=waves, element_bitwidth=32,
-        tiles_per_warp=[max(tile[0] // 16, int(value.shape[0]) // (16 * waves[0])),
-                        max(2, int(value.shape[1]) // (16 * waves[1]))],
-    )
-    native_layout = MmacInterleave2Layout(native)
+    native_layout = None
+    if (isinstance(source_layout, MmacInterleave2Layout) and isinstance(layout, gl.amd.AMDMFMALayout)
+            and order == (1, 0) and tuple(layout.instr_shape[:2]) == (16, 16)):
+        shape_per_warp = [s * t for s, t in zip(layout.instr_shape[:2], layout.tiles_per_warp)]
+        # A warp tile must contain an integral number of store tiles so that
+        # no store instruction spans tiles owned by different warps.
+        store_tile_aligned = all(shape_per_warp[i] % tile[i] == 0 for i in range(2))
+        # Require a complete warp tile for every warp in each dimension;
+        # the store lowering does not handle partially covered warp tiles.
+        has_full_warp_tiles = all(int(value.shape[i]) >= shape_per_warp[i] * waves[i] for i in range(2))
+        if store_tile_aligned and has_full_warp_tiles:
+            native_layout = source_layout
+    if native_layout is None:
+        # A whole native instruction must belong to one warp.
+        native = gl.amd.AMDMFMALayout(
+            version=4, instr_shape=[16, 16, 32], mmac_layout=MmacLayout.LTS,
+            warps_per_cta=waves, element_bitwidth=32,
+            tiles_per_warp=[max(tile[0] // 16, int(value.shape[0]) // (16 * waves[0])),
+                            max(2, int(value.shape[1]) // (16 * waves[1]))],
+        )
+        native_layout = MmacInterleave2Layout(native)
     value = _semantic.cast(value, dtype)
     value = _semantic.convert_layout(value, native_layout)
 
@@ -587,13 +600,21 @@ def dot_scaled(a, a_scale, a_format, b, b_scale, b_format, acc, lhs_k_pack=True,
     """Scaled MMAC with explicit operands, layouts and Scale Buffer descriptors.
 
     Each E8M0 scale covers 32 logical K elements, including packed FP4.
-    Caller owns operand delivery, pipeline and publication.
+    Scale descriptors have shapes [M, K/32] and [N, K/32] for this dot.
+    Caller owns operand delivery, pipeline and publication. LTS also accepts
+    paired MmacInterleave2Layout B/result layouts; B scales remain in logical
+    [N, K/32] order and can feed a native matrix_store result.
     """
     if not isinstance(a_scale, scale_buffer_descriptor) or not isinstance(b_scale, scale_buffer_descriptor):
         raise ValueError("dot_scaled requires two Scale Buffer descriptors")
     if acc.dtype != gl.float32:
         raise ValueError("the current HCU scaled MMAC path requires an FP32 accumulator")
-    if not isinstance(acc.type.layout, gl.amd.AMDMFMALayout) or acc.type.layout.version != 4:
+    acc_layout = acc.type.layout
+    if isinstance(acc_layout, MmacInterleave2Layout) != isinstance(b.type.layout, MmacInterleave2Layout):
+        raise ValueError("interleave2 scaled dot requires paired B/result layouts")
+    if isinstance(acc_layout, MmacInterleave2Layout):
+        acc_layout = acc_layout.parent
+    if not isinstance(acc_layout, gl.amd.AMDMFMALayout) or acc_layout.version != 4:
         raise ValueError("dot_scaled requires a version-4 HCU MFMA accumulator layout")
     lhs_k_pack = _unwrap_if_constexpr(lhs_k_pack)
     rhs_k_pack = _unwrap_if_constexpr(rhs_k_pack)

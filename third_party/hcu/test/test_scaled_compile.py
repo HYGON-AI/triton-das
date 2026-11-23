@@ -12,6 +12,7 @@ from triton.backends.compiler import GPUTarget
 from triton.compiler import ASTSource
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language.amd import hcu
 from triton.experimental.gluon.language.amd.hcu import ScaleLayout, scale_write, dot_scaled
 from triton.experimental.gluon._runtime import GluonASTSource
 
@@ -1066,3 +1067,113 @@ def test_upstream_scaled_compile(case, tmp_path):
         (tmp_path / f"kernel.{kind}").write_bytes(content if isinstance(content, bytes) else content.encode())
     assert "tt.dot_scaled" in compiled.asm["ttir"]
     assert "llvm.hcu.mmac.scale." in compiled.asm["llir"]
+
+# Scaled LTS interleave2.
+
+@gluon.jit
+def scaled_interleave2_kernel(A, B, SA, SB, C, MATRIX: gl.constexpr,
+                               MLS: gl.constexpr, BAD: gl.constexpr = 0,
+                               M: gl.constexpr = 64, N: gl.constexpr = 128,
+                               STORE_TILE: gl.constexpr = (16, 32),
+                               TPWM: gl.constexpr = 1, EDGE: gl.constexpr = False,
+                               TPWN: gl.constexpr = 2):
+    f: gl.constexpr = gl.amd.AMDMFMALayout(
+        4, [16, 16, 32], hcu.MmacLayout.LTS, [2, 2], tiles_per_warp=[TPWM, TPWN])
+    rf: gl.constexpr = hcu.MmacInterleave2Layout(f)
+    bf: gl.constexpr = hcu.MmacInterleave2Layout(gl.DotOperandLayout(1, f, 8))
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    m = gl.arange(0, M, gl.SliceLayout(1, regs))
+    n = gl.arange(0, N, gl.SliceLayout(1, regs))
+    k = gl.arange(0, 128, gl.SliceLayout(0, regs))
+    sk = gl.arange(0, 4, gl.SliceLayout(0, regs))
+    a = gl.convert_layout(gl.load(A + m[:, None] * 128 + k[None, :]),
+                          gl.DotOperandLayout(0, f, 8))
+    if MLS:
+        bs: gl.constexpr = hcu.MlsSharedLayout(1, (128, 32), bits=8,
+                                               alt=1, version=3, order=(0, 1))
+        bm = gl.allocate_shared_memory(B.dtype.element_ty, (128, N), bs)
+        hcu.matrix_load(bm, B, (128, N), (1, 128), (0, 0), warps=(1, 4))
+        # Matrix loads are VMEM writes to LDS. Retire them on every loader
+        # wave before the CTA publishes the shared B tile.
+        gl.inline_asm_elementwise("s_waitcnt vmcnt(0)\n\ts_mov_b32 $0, 0",
+                                  "=s,~{memory}", [], dtype=gl.int32, is_pure=False, pack=1)
+        gl.thread_barrier()
+        b = bm.load(bf)
+    else:
+        bk = gl.arange(0, 128, gl.SliceLayout(1, bf))
+        bn = gl.arange(0, N, gl.SliceLayout(0, bf))
+        b = gl.load(B + bn[None, :] * 128 + bk[:, None])
+    sa = gl.allocate_shared_memory(gl.uint8, (M, 4), gl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+    sb = gl.allocate_shared_memory(gl.uint8, (N, 4), gl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+    sa.store(gl.load(SA + m[:, None] * 4 + sk[None, :]))
+    sb.store(gl.load(SB + n[:, None] * 4 + sk[None, :]))
+    gl.thread_barrier()
+    sas = hcu.scale_write(sa, hcu.ScaleLayout((32, 8), 16, 0))
+    sbs = hcu.scale_write(sb, hcu.ScaleLayout((32, 8), 16, 1))
+    hcu.wait_lgkmcnt(0)
+    gl.thread_barrier()
+    if BAD == 1:
+        b = gl.convert_layout(b, gl.DotOperandLayout(1, f, 8))
+    if BAD == 2:
+        acc = gl.full((M, N), 3, gl.float32, f)
+    else:
+        acc = gl.full((M, N), 3, gl.float32, rf)
+    value = hcu.dot_scaled(a, sas, 'e4m3', b, sbs, 'e4m3', acc).to(gl.bfloat16)
+    if MATRIX:
+        hcu.matrix_store(C, value, (M - 5 if EDGE else M, N - 7 if EDGE else N),
+                         (N, 1), (0, 0), tile=STORE_TILE,
+                         boundary_check=(0, 1) if EDGE else ())
+    else:
+        om = gl.arange(0, M, gl.SliceLayout(1, rf))
+        on = gl.arange(0, N, gl.SliceLayout(0, rf))
+        gl.store(C + om[:, None] * N + on[None, :], value)
+
+
+def compile_interleave2(matrix=False, mls=False, bad=0, m=64, n=128, tile=(16, 32), tpwm=1, edge=False, tpwn=2):
+    source = GluonASTSource(scaled_interleave2_kernel,
+        signature=dict(A='*fp8e4nv', B='*fp8e4nv', SA='*u8', SB='*u8', C='*bf16'),
+        constexprs=dict(MATRIX=matrix, MLS=mls, BAD=bad, M=m, N=n, STORE_TILE=tile, TPWM=tpwm, EDGE=edge, TPWN=tpwn))
+    return compile_to_llvm(source, GPUTarget('hip', 'gfx946', 64), dict(num_warps=4))
+
+
+@pytest.mark.parametrize('matrix', [False, True])
+@pytest.mark.parametrize('mls', [False, True])
+@pytest.mark.parametrize('m,n,tile,tpwm', [(64,128,(16,32),1), (128,256,(16,32),1), (128,256,(32,32),2)])
+def test_scaled_interleave2_compile(matrix, mls, m, n, tile, tpwm):
+    kernel = compile_interleave2(matrix, mls, m=m, n=n, tile=tile, tpwm=tpwm)
+    assert check_mmac_banks(kernel.asm['llir']) == m*n//256
+    assert 'hcu_mmac_interleave2' in kernel.asm['ttgir']
+    assert ('llvm.hcu.matrix.store' in kernel.asm['llir']) == matrix
+
+
+@pytest.mark.parametrize('bad', [1, 2])
+def test_scaled_interleave2_rejects_unpaired_layouts(bad, capfd):
+    with pytest.raises((CompilationError, RuntimeError)) as error:
+        compile_interleave2(bad=bad)
+    captured = capfd.readouterr()
+    assert 'interleave2' in str(error.value) + captured.err + captured.out
+
+
+@pytest.mark.parametrize('m,n,windows', [(64,128,1), (128,256,2)])
+def test_scaled_interleave2_m0_windows(m, n, windows):
+    kernel = compile_interleave2(m=m, n=n)
+    values = re.findall(r"@llvm.write_register.i32\(metadata !\d+, i32 ([^)]+)\)", kernel.asm['llir'])
+    assert values and len(set(values)) == windows
+    check_mmac_banks(kernel.asm['llir'])
+
+
+@pytest.mark.parametrize('tpwm', [1, 2])
+def test_mls_scaled_interleave2_spans_multiple_mls_tiles(tpwm):
+    kernel = compile_interleave2(mls=True, m=128, n=256, tpwm=tpwm, tpwn=4)
+    assert check_mmac_banks(kernel.asm['llir']) == 128
+    assert 'llvm.hcu.ds.read.matrix.trans.format' in kernel.asm['llir']
+
+
+def test_matrix_store_keeps_cyclic_scaled_result():
+    kernel = compile_interleave2(matrix=True, m=128, n=256)
+    lines = kernel.asm['ttgir'].splitlines()
+    dot = next(line for line in lines if 'amdg.dot_scaled' in line)
+    store = next(line for line in lines if 'amdg.matrix_store_from_reg' in line)
+    encoding = r'#ttg.hcu_mmac_interleave2<parent = #[a-zA-Z0-9_]+>'
+    assert re.findall(encoding, dot) == re.findall(encoding, store)
+    assert re.findall(encoding, store)

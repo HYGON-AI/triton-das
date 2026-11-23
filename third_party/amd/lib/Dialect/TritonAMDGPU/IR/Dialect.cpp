@@ -869,16 +869,29 @@ LogicalResult MatrixStoreFromRegOp::verify() {
 LogicalResult DotScaledOp::verify() {
   auto aTy = getA().getType();
   auto bTy = getB().getType();
-  auto aEnc =
-      dyn_cast_or_null<triton::gpu::DotOperandEncodingAttr>(aTy.getEncoding());
-  auto bEnc =
-      dyn_cast_or_null<triton::gpu::DotOperandEncodingAttr>(bTy.getEncoding());
-  auto mfma = dyn_cast_or_null<triton::gpu::AMDMfmaEncodingAttr>(
-      getType().getEncoding());
-  if (!aEnc || !bEnc || !mfma || aEnc.getOpIdx() != 0 || bEnc.getOpIdx() != 1 ||
-      aEnc.getParent() != mfma || bEnc.getParent() != mfma)
-    return emitOpError(
-        "requires A/B DotOperand layouts matching the MFMA result layout");
+  auto resultEnc = getType().getEncoding();
+  auto mfma = triton::gpu::getUnderlyingMmacEncoding(resultEnc);
+  if (!mfma)
+    return emitOpError("requires an MFMA result layout");
+  if (!isa_and_nonnull<triton::gpu::DotOperandEncodingAttr>(aTy.getEncoding()))
+    return emitOpError("requires an A DotOperand layout");
+  if (!bTy.getEncoding())
+    return emitOpError("requires a B operand layout");
+  auto infer = cast<DialectInferLayoutInterface>(&resultEnc.getDialect());
+  if (failed(infer->inferDotOpEncoding(aTy.getEncoding(), 0, resultEnc, getLoc())) ||
+      failed(infer->inferDotOpEncoding(bTy.getEncoding(), 1, resultEnc, getLoc())))
+    return failure();
+  // Operand/result pairing, opIdx and parent matching are checked by the
+  // shared layout interface. C/result type equality is an ODS constraint.
+  if (isa<triton::gpu::HCUMmacInterleave2EncodingAttr>(resultEnc)) {
+    auto instrShape = mfma.getInstrShape();
+    auto resultShape = getType().getShape();
+    for (unsigned dim = 0; dim < 2; ++dim)
+      if (resultShape[dim] < instrShape[dim] * mfma.getTilesPerWarp()[dim] *
+                                 mfma.getWarpsPerCTA()[dim])
+        return emitOpError("interleave2 scaled dot requires complete MMAC "
+                           "tiles per warp");
+  }
   auto a = getScaledDotShape(aTy, getAElemType(), getLhsKPack() ? 1 : 0);
   auto b = getScaledDotShape(bTy, getBElemType(), getRhsKPack() ? 0 : 1);
   for (auto [scale, rows] :
