@@ -1,5 +1,5 @@
-#include "TritonHCU/Utility.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
+#include "TritonHCU/Utility.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -12,6 +12,40 @@
 namespace mlir::triton::HCU {
 
 namespace ttg = mlir::triton::gpu;
+
+ScaleBufferView getScaleBufferView(Value descriptor) {
+  int64_t kOffset = 0;
+  while (auto view =
+             descriptor.getDefiningOp<triton::gpu::MemDescSubsliceOp>()) {
+    // A consumer can precede its view in textual block order. Check the
+    // offset rank before indexing, even if the view has not been verified.
+    if (view.getOffsets().size() != 2)
+      return {};
+    kOffset += view.getOffsets()[1];
+    descriptor = view.getSrc();
+  }
+  return {descriptor.getDefiningOp<amdgpu::ScaleWriteOp>(), kOffset};
+}
+
+FailureOr<SmallVector<OpOperand *>> getScaleDotUses(Value descriptor) {
+  SmallVector<Value> pending{descriptor};
+  SmallVector<OpOperand *> uses;
+  while (!pending.empty()) {
+    for (OpOperand &use : pending.pop_back_val().getUses()) {
+      if (auto view =
+              dyn_cast<triton::gpu::MemDescSubsliceOp>(use.getOwner())) {
+        pending.push_back(view.getResult());
+        continue;
+      }
+      auto dot = dyn_cast<amdgpu::DotScaledOp>(use.getOwner());
+      if (!dot ||
+          (&use != &dot.getAScaleMutable() && &use != &dot.getBScaleMutable()))
+        return failure();
+      uses.push_back(&use);
+    }
+  }
+  return uses;
+}
 
 ttg::MmacLayout getMmacLayoutDefault(llvm::StringRef archGen) {
   static llvm::DenseMap<llvm::StringRef, ttg::MmacLayout> defaultLayoutMap = {

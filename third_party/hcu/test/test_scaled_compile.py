@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 from triton.backends.compiler import GPUTarget
 from triton.compiler import ASTSource
+from triton.compiler.errors import CompilationError
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.amd import hcu
@@ -1067,6 +1068,71 @@ def test_upstream_scaled_compile(case, tmp_path):
         (tmp_path / f"kernel.{kind}").write_bytes(content if isinstance(content, bytes) else content.encode())
     assert "tt.dot_scaled" in compiled.asm["ttir"]
     assert "llvm.hcu.mmac.scale." in compiled.asm["llir"]
+
+
+@gluon.jit
+def gluon_scaled_paired_lds_kernel(A, B, SA, SB, C, SECOND_OFFSET: gl.constexpr = 2, INTERVENE: gl.constexpr = False):
+    regs: gl.constexpr = gl.BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 32], 3, [2, 2])
+    r = gl.arange(0, 64, gl.SliceLayout(1, regs))
+    k = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    av = gl.convert_layout(gl.load(A + r[:, None] * 64 + k[None, :]), gl.DotOperandLayout(0, mma, 8))
+    bv = gl.convert_layout(gl.load(B + r[:, None] * 64 + k[None, :]).T, gl.DotOperandLayout(1, mma, 8))
+    shared: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, [1, 0])
+    sa = gl.allocate_shared_memory(gl.uint8, [64, 4], shared)
+    sb = gl.allocate_shared_memory(gl.uint8, [64, 4], shared)
+    sk = gl.arange(0, 4, gl.SliceLayout(0, regs))
+    sa.store(gl.load(SA + r[:, None] * 4 + sk[None, :]))
+    sb.store(gl.load(SB + r[:, None] * 4 + sk[None, :]))
+    gl.thread_barrier()
+    asc = scale_write(sa, ScaleLayout((32, 8), 16, 0))
+    bsc = scale_write(sb, ScaleLayout((32, 8), 16, 1))
+    acc = dot_scaled(av, asc.slice(0, 2), "e4m3", bv, bsc.slice(0, 2), "e4m3", gl.full([64, 64], 0, gl.float32, mma))
+    if INTERVENE:
+        other = scale_write(sa, ScaleLayout((32, 8), 16, 0))
+        acc = dot_scaled(av, other.slice(0, 2), "e4m3", bv, bsc.slice(0, 2), "e4m3", acc)
+    acc = dot_scaled(av, asc.slice(SECOND_OFFSET, 2), "e4m3", bv, bsc.slice(SECOND_OFFSET, 2), "e4m3", acc)
+    n = gl.arange(0, 64, gl.SliceLayout(0, regs))
+    gl.store(C + r[:, None] * 64 + n[None, :], gl.convert_layout(acc, regs))
+
+
+@pytest.mark.parametrize("second_offset", [0, 2, 4])
+def test_gluon_scale_storage_reused_for_two_bk(second_offset):
+    source = GluonASTSource(gluon_scaled_paired_lds_kernel,
+                            signature={"A": "*fp8e4nv", "B": "*fp8e4nv", "SA": "*u8", "SB": "*u8", "C": "*fp32"},
+                            constexprs={"SECOND_OFFSET": second_offset})
+    if second_offset == 4:
+        with pytest.raises(CompilationError, match="Scale Buffer K window is out of bounds"):
+            compile_to_llvm(source, target=TARGET, options={"num_warps": 4})
+        return
+    compiled = compile_to_llvm(source, target=TARGET, options={"num_warps": 4})
+    ttgir = compiled.asm["ttgir"]
+    assert ttgir.count("amdg.scale_write") == 2
+    assert ttgir.count("amdg.dot_scaled") == 2
+    assert "ttg.memdesc_subslice" in ttgir
+    assert "scale_k_offset" not in ttgir
+
+
+def test_scale_allocator_keeps_storage_until_last_dot():
+    source = GluonASTSource(gluon_scaled_paired_lds_kernel,
+                            signature={"A": "*fp8e4nv", "B": "*fp8e4nv", "SA": "*u8", "SB": "*u8", "C": "*fp32"},
+                            constexprs={"INTERVENE": True, "SECOND_OFFSET": 2})
+    compiled = compile_to_llvm(source, target=TARGET, options={"num_warps": 4})
+    # A, B, then another A must remain distinct: the original A has a later use.
+    assert '\"hcu-scale-buffer-size\"=\"6\"' in compiled.asm["llir"]
+
+
+@pytest.mark.parametrize("offset, message", [
+    (-1, "Scale Buffer K window is out of bounds"),
+    (True, "Scale Buffer K slice requires static integers"),
+    (0x80000000, "Scale Buffer K window is out of bounds"),
+])
+def test_gluon_scale_slice_requires_static_in_bounds_start(offset, message):
+    source = GluonASTSource(gluon_scaled_paired_lds_kernel,
+                            signature={"A": "*fp8e4nv", "B": "*fp8e4nv", "SA": "*u8", "SB": "*u8", "C": "*fp32"},
+                            constexprs={"SECOND_OFFSET": offset})
+    with pytest.raises(CompilationError, match=message):
+        compile_to_llvm(source, target=TARGET, options={"num_warps": 4})
 
 # Scaled LTS interleave2.
 

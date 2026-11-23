@@ -842,9 +842,11 @@ def DotScaledOp : TT_AMDGPU_Op<"dot_scaled", [
 
   let description = [{
     A backend scaled dot consuming Scale Buffer descriptors produced by
-    amdg.scale_write. Each descriptor carries the complete [M,K/32] or
+    amdg.scale_write. Each descriptor carries the current dot's [M,K/32] or
     [N,K/32] shape and its storage layout. Late allocation assigns the
-    producer's base row; LLVM conversion forwards that reference through SSA.
+    producer's base row; static ttg.memdesc_subslice K windows alias that
+    allocation. Address lowering uses the allocation shape and the view's
+    K origin.
     Lowering derives per-wave addresses and per-instruction offsets from the
     descriptor and MFMA layout. The op retains whole-matrix semantics:
 
@@ -896,8 +898,9 @@ def ScaleWriteOp : TT_AMDGPU_Op<"scale_write", [
   let summary = "Write an LDS E8M0 tile into scale memory";
   let description = [{
     Writes a rank-two i8 E8M0 tile from Shared/LDS into Scale Buffer storage.
-    The source and result have the same logical [R,S] shape. The result's
-    ScaleEncoding defines the destination mapping; source LDS layout and
+    The source and result have the same logical [R,S] shape. The result
+    owns the full Scale Buffer allocation; consumers may take static K slices.
+    Its ScaleEncoding defines the destination mapping; source LDS layout and
     copy-width compatibility are checked before emitting ds2buf instructions.
 
     pred optionally guards the copy and must be wave-uniform. When false,
@@ -911,8 +914,11 @@ def ScaleWriteOp : TT_AMDGPU_Op<"scale_write", [
 
     The result is a storage descriptor, not a tensor of scale bytes or a
     completion token. It may be unused during rewriting; otherwise it has
-    one direct amdg.dot_scaled scale-operand use. ds2buf completion and
-    cross-wave publication are handled by subsequent synchronization analysis.
+    amdg.dot_scaled scale-operand uses through static K subslices, with
+    consistent operand side and interleave mapping. Storage remains live
+    through the last consuming dot, rather than the last view creation.
+    ds2buf completion and cross-wave publication are handled by subsequent
+    synchronization analysis.
   }];
   let arguments = (ins
     Arg<TTG_MemDescType, "LDS source", [MemRead<SharedMemory>]>:$src,

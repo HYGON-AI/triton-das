@@ -33,7 +33,7 @@ module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32}
                     %sa: !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory>,
                     %srcB: !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory>) -> tensor<64x64xf32, #mma> {
     %sb = amdg.scale_write %srcB {mode = 2 : i32} : !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory> -> !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16, bankXor = 1}>, #amdg.scale_memory>
-    // expected-error @+1 {{requires scales produced directly by amdg.scale_write}}
+    // expected-error @+1 {{requires scales rooted in amdg.scale_write}}
     %d = amdg.dot_scaled %a scale %sa, %b scale %sb, %c lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<64x128xi8, #a>, !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory> * tensor<128x64xi8, #b>, !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16, bankXor = 1}>, #amdg.scale_memory> -> tensor<64x64xf32, #mma>
     tt.return %d : tensor<64x64xf32, #mma>
   }
@@ -51,7 +51,7 @@ module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32}
                     %c: tensor<64x64xf32, #mma>,
                     %srcA: !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory>,
                     %srcB: !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory>) -> tensor<64x64xf32, #mma> {
-    // expected-error @+1 {{requires one direct HCU scaled dot consumer}}
+    // expected-error @+1 {{requires HCU scaled dot consumers through static K views}}
     %sa = amdg.scale_write %srcA {mode = 2 : i32} : !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory> -> !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory>
     %sb = amdg.scale_write %srcB {mode = 2 : i32} : !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory> -> !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16, bankXor = 1}>, #amdg.scale_memory>
     ttg.local_dealloc %sa : !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory>
@@ -116,7 +116,7 @@ module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32}
                     %srcB: !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory>) -> tensor<64x64xf32, #mma> {
     %sa = amdg.scale_write %srcA {mode = 2 : i32} : !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory> -> !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory>
     %sb = amdg.scale_write %srcB {mode = 2 : i32} : !ttg.memdesc<64x8xi8, #shared, #ttg.shared_memory> -> !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory>
-    // expected-error @+1 {{requires opposite A/B Scale Buffer bank polarities}}
+    // expected-error @+1 {{requires opposite A/B Scale Buffer banks throughout the K windows}}
     %d = amdg.dot_scaled %a scale %sa, %b scale %sb, %c lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<64x128xi8, #a>, !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory> * tensor<128x64xi8, #b>, !ttg.memdesc<64x8xi8, #amdg.scale<{blockShape = [32, 8], rowStride = 16}>, #amdg.scale_memory> -> tensor<64x64xf32, #mma>
     tt.return %d : tensor<64x64xf32, #mma>
   }

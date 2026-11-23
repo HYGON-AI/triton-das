@@ -73,6 +73,9 @@ namespace {
 // replaced operations and their uses alive in rollback mode until conversion
 // commits, so this needs neither a module walk nor a cross-pattern cache.
 struct ScaleOperandInfo {
+  // K/32 column origin of this dot's view in the root scale descriptor.
+  // Example: [64,4] subsliced at [0,2] to [64,2] gives kOffset=2.
+  int64_t kOffset = 0;
   // B-scale logical N coordinates derived from the existing interleave2 layout.
   std::optional<triton::LinearLayout> nPermutation;
   // Number of contiguous Scale Buffer partitions, indexed by the consumer's
@@ -85,11 +88,12 @@ struct ScaleOperandInfo {
 
 static ScaleOperandInfo
 getScaleOperandInfo(triton::amdgpu::ScaleWriteOp write) {
-  if (write.getResult().use_empty())
+  auto uses = getScaleDotUses(write.getResult());
+  assert(succeeded(uses) && "scale uses must be verified before conversion");
+  if (uses->empty())
     return {};
-  auto dot = cast<triton::amdgpu::DotScaledOp>(
-      *write.getResult().getUsers().begin());
-  unsigned side = dot.getAScale() == write.getResult() ? 0 : 1;
+  auto dot = cast<triton::amdgpu::DotScaledOp>((*uses)[0]->getOwner());
+  unsigned side = (*uses)[0] == &dot.getAScaleMutable() ? 0 : 1;
   ScaleOperandInfo info;
   auto bType = dot.getB().getType();
   if (side) {
@@ -118,6 +122,10 @@ getScaleOperandInfo(triton::amdgpu::ScaleWriteOp write) {
                                type.getShape()[0] % 16 == 0 &&
                                groups % (waves * tpw) == 0 &&
                                (groups / waves) % plan.g == 0;
+  for (OpOperand *use : *uses)
+    partitionScalesByWarp &= cast<triton::amdgpu::DotScaledOp>(use->getOwner())
+                                 .getType()
+                                 .getEncoding() == dot.getType().getEncoding();
   if (partitionScalesByWarp) {
     info.numScalePartitions = waves;
     info.tilesPerWarp = tpw;
@@ -907,15 +915,15 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     std::array<Value, 2> scaleWaveBases;
     std::array<ScaleMemoryPlan, 2> scalePlans;
     std::array<int64_t, 2> scaleColumns;
-    std::array<bool, 2> scalesPartitionedByWarp = {scales[0].numScalePartitions != 0,
-                                      scales[1].numScalePartitions != 0};
+    std::array<bool, 2> scalesPartitionedByWarp = {
+        scales[0].numScalePartitions != 0, scales[1].numScalePartitions != 0};
     auto tpw = mfmaLayout.getTilesPerWarp();
     auto prepareScales = [&] {
       Value warp = getUniformWarpId(op, rewriter, loc);
       auto buildBase = [&](Value scale, Value base, unsigned idx) {
         auto type = cast<triton::gpu::MemDescType>(scale.getType());
         auto plan = ScaleMemoryPlan::fromMemDesc(type);
-        scaleColumns[idx] = type.getShape()[1];
+        scaleColumns[idx] = type.getAllocShape()[1];
         scalePlans[idx] = plan;
         Value waveCoordinate =
             idx == 0 ? Value(tb.udiv(warp, tb.i32_val(warpsPerCTA[1])))
@@ -949,7 +957,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                                       (mn / tpw[idx]);
       return ScaleAddress{
           scaleWaveBases[idx],
-          scalePlans[idx].getRow(nonK, k * kDim / 32, scaleColumns[idx])};
+          scalePlans[idx].getRow(nonK, scales[idx].kOffset + k * kDim / 32,
+                                 scaleColumns[idx])};
     };
 
     return convertMatrix(op, adaptor, /*withScale=*/true, prepareScales,
@@ -1325,8 +1334,9 @@ LogicalResult convertScaledMFMA(triton::amdgpu::DotScaledOp op,
   std::array<ScaleOperandInfo, 2> scales;
   for (auto [idx, scale] :
        llvm::enumerate(std::array<Value, 2>{op.getAScale(), op.getBScale()})) {
-    scales[idx] = getScaleOperandInfo(
-        scale.getDefiningOp<triton::amdgpu::ScaleWriteOp>());
+    auto view = getScaleBufferView(scale);
+    scales[idx] = getScaleOperandInfo(view.allocation);
+    scales[idx].kOffset = view.kOffset;
   }
   // Scale operands reference allocated Scale Buffer storage.
   if (!isa<DotOperandEncodingAttr>(

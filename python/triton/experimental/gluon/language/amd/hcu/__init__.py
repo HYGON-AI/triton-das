@@ -481,7 +481,8 @@ class ScaleLayout:
     """E8M0 coordinates in Scale Buffer storage, not LDS/register layout.
 
     block_shape is one ds2buf tile; row_stride is in hardware rows.
-    A/B require opposite bank_xor. The native verifier checks geometry.
+    A/B windows must address opposite banks. For matching K origins this
+    requires opposite bank_xor. The native verifier checks geometry and banks.
     """
 
     block_shape: tuple
@@ -513,40 +514,55 @@ class ScaleLayout:
 class scale_buffer_descriptor_type(gl.base_type):
     """Read-only storage reference produced by scale_write, not numeric data."""
 
-    def __init__(self, shape, layout):
+    def __init__(self, shape, layout, alloc_shape=None):
         self.shape = tuple(shape)
         self.layout = layout
+        self.alloc_shape = tuple(shape if alloc_shape is None else alloc_shape)
         if len(self.shape) != 2 or not isinstance(layout, ScaleLayout):
             raise ValueError("Scale Buffer requires a rank-two shape and ScaleLayout")
 
     def to_ir(self, builder):
-        return builder.get_hcu_scale_mem_desc_ty(self.shape, self.layout._to_ir(builder))
+        return builder.get_hcu_scale_mem_desc_ty(self.shape, self.layout._to_ir(builder), self.alloc_shape)
 
     def _flatten_ir_types(self, builder, out):
         out.append(self.to_ir(builder))
 
     def _unflatten_ir(self, handles, cursor):
-        return scale_buffer_descriptor(handles[cursor], self.shape, self.layout), cursor + 1
+        return scale_buffer_descriptor(handles[cursor], self.shape, self.layout, self.alloc_shape), cursor + 1
 
     def __eq__(self, other):
-        return type(self) is type(other) and self.shape == other.shape and self.layout == other.layout
+        return (type(self) is type(other) and self.shape == other.shape and self.layout == other.layout
+                and self.alloc_shape == other.alloc_shape)
 
     def __str__(self):
         return f"scale_buffer_descriptor<{self.shape}, {self.layout}>"
 
     def mangle(self):
-        return f"HCUSD_{self.shape[0]}_{self.shape[1]}_{self.layout.mangle()}"
+        return f"HCUSD_{self.shape[0]}_{self.shape[1]}_{self.alloc_shape[0]}_{self.alloc_shape[1]}_{self.layout.mangle()}"
 
 
 class scale_buffer_descriptor(gl.base_value):
-    """Scale storage for one direct dot_scaled use in the same region.
+    """Scale storage and static K windows for dot_scaled.
 
-    No numeric loads/views or cross-loop/JIT passing; pass LDS and write at consumption.
+    Static K slices alias the original storage, which remains live through its
+    last dot use. Numeric loads and cross-loop/JIT passing are unsupported.
     """
 
-    def __init__(self, handle, shape, layout):
+    def __init__(self, handle, shape, layout, alloc_shape=None):
         self.handle = handle
-        self.type = scale_buffer_descriptor_type(shape, layout)
+        self.type = scale_buffer_descriptor_type(shape, layout, alloc_shape)
+
+    @builtin
+    def slice(self, start, length, _semantic=None):
+        """Select a static K32-group window without copying scale storage."""
+        start, length = map(_unwrap_if_constexpr, (start, length))
+        if type(start) is not int or type(length) is not int:
+            raise ValueError("Scale Buffer K slice requires static integers")
+        if start < 0 or length <= 0 or start + length > self.shape[1]:
+            raise ValueError("Scale Buffer K window is out of bounds")
+        ty = scale_buffer_descriptor_type((self.shape[0], length), self.layout, self.type.alloc_shape)
+        handle = _semantic.builder.create_memdesc_subslice(ty.to_ir(_semantic.builder), self.handle, [0, start])
+        return scale_buffer_descriptor(handle, ty.shape, ty.layout, ty.alloc_shape)
 
     def _flatten_ir(self, handles):
         handles.append(self.handle)
@@ -601,6 +617,8 @@ def dot_scaled(a, a_scale, a_format, b, b_scale, b_format, acc, lhs_k_pack=True,
 
     Each E8M0 scale covers 32 logical K elements, including packed FP4.
     Scale descriptors have shapes [M, K/32] and [N, K/32] for this dot.
+    Static descriptor slices let one scale_write supply consecutive dots;
+    storage cannot be overwritten until the last call has consumed it.
     Caller owns operand delivery, pipeline and publication. LTS also accepts
     paired MmacInterleave2Layout B/result layouts; B scales remain in logical
     [N, K/32] order and can feed a native matrix_store result.

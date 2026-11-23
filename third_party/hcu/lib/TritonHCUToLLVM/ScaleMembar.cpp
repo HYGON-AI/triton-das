@@ -3,6 +3,7 @@
 
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonHCU/BufferLdsPipeline.h"
+#include "TritonHCU/Utility.h"
 #include "TritonHCU/WaspSplitPlan.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -22,19 +23,20 @@ bool isScalePublicationBarrier(Operation *op) {
          !op->hasAttr(kDropPublicationLgkmcnt);
 }
 
-// A descriptor directly references the complete allocation of its defining
-// scale_write. Scale Buffer intervals are in rows, including alignment gaps;
+// Resolve K views to the complete allocation of their defining scale_write.
+// Conservatively track the whole allocation, including all view windows.
+// Scale Buffer intervals are in rows, including alignment gaps;
 // this analysis never mixes them with LDS byte intervals.
 std::optional<Interval<size_t>>
 getScaleMemoryRange(const MemoryEffects::EffectInstance &effect) {
   if (effect.getResource() != amdgpu::ScaledMemory::get())
     return std::nullopt;
   Value storage = effect.getValue();
-  auto write = storage ? storage.getDefiningOp<amdgpu::ScaleWriteOp>()
+  auto write = storage ? getScaleBufferView(storage).allocation
                        : amdgpu::ScaleWriteOp{};
   if (!write || !write.getRowBaseAttr())
     return std::nullopt;
-  auto type = cast<gpu::MemDescType>(storage.getType());
+  auto type = write.getResult().getType();
   auto layout = cast<amdgpu::ScaleEncodingAttr>(type.getEncoding());
   auto block = layout.getBlockShape();
   size_t rows = llvm::divideCeil(type.getShape()[0], block[0]) *

@@ -1,5 +1,6 @@
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonHCU/ScaleMemoryPlan.h"
+#include "TritonHCU/Utility.h"
 #include "TritonHCUToLLVM/Passes.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -115,9 +116,9 @@ constexpr int64_t kScaleGroupSize = 32; // One E8M0 scale per 32 input elements.
 //
 // Lifetime and reuse
 // ------------------
-// Each scale_write defines one storage descriptor with one direct dot consumer.
-// In straight-line code its SSA live interval ends after that dot, independent
-// of how long the numeric dot result remains live in registers.
+// Each scale_write defines one allocation; static K views alias its storage.
+// In straight-line code its SSA live interval ends after the last dot,
+// independent of how long the numeric dot result remains live in registers.
 //
 // Allocation and synchronization are separate, as for Shared memory: reuse rows
 // for disjoint SSA intervals; ScaleMembarAnalysis checks physical RAW/WAR/WAW
@@ -132,8 +133,9 @@ constexpr int64_t kScaleGroupSize = 32; // One E8M0 scale per 32 input elements.
 // Aligned first-fit permits spatial overlap only for disjoint live intervals.
 // The kernel reserves ceil(peakRows/16) slots in hcu.scale_buffer. More than
 // 32 slots is a compile-time error. Only the copy geometry and physical bases
-// are attached to scale writes and dots for lowering; candidate reports and
-// liveness intervals remain allocator-local.
+// are carried by descriptor types and scale-write row bases; consumer mapping
+// and liveness intervals remain local to conversion and allocation
+// respectively.
 
 #define GEN_PASS_DEF_ALLOCATESCALEBUFFER
 #include "TritonHCUToLLVM/Passes.h.inc"
@@ -166,7 +168,8 @@ bool hasOnlyTrackedScaleAccesses(Block &block) {
 }
 
 // Validate the fixed producer/Shared choice against the final MMAC layout.
-FailureOr<HCU::ScaleMemoryPlan> getScalePlan(amdgpu::ScaleWriteOp write) {
+FailureOr<HCU::ScaleMemoryPlan> getScalePlan(amdgpu::ScaleWriteOp write,
+                                             ArrayRef<OpOperand *> uses) {
   auto descriptor = write.getResult().getType();
   auto type =
       RankedTensorType::get(descriptor.getShape(), descriptor.getElementType());
@@ -194,24 +197,19 @@ FailureOr<HCU::ScaleMemoryPlan> getScalePlan(amdgpu::ScaleWriteOp write) {
                     "strided subslices are unsupported");
     return failure();
   }
-  if (!write.getResult().hasOneUse()) {
-    write.emitError("logical scale requires one direct HCU scaled "
-                    "dot consumer");
-    return failure();
-  }
-  auto dot = cast<amdgpu::DotScaledOp>(*write.getResult().getUsers().begin());
-  auto mfma = triton::gpu::getUnderlyingMmacEncoding(
-      cast<RankedTensorType>(dot.getType()).getEncoding());
-  unsigned side = dot.getAScale() == write.getResult() ? 0 : 1;
-  // Validate only the descriptor's fixed plan; allocation does not select
-  // another geometry or recompute candidate read-service costs.
   auto plan = HCU::ScaleMemoryPlan::fromMemDesc(descriptor);
-  if (const char *reason = plan.getRejectionReason(
-          type, mfma.getInstrShape()[2] / kScaleGroupSize,
-          mfma.getTilesPerWarp()[side], mfma.getWarpsPerCTA()[side],
-          shared.getOrder()[0])) {
-    write.emitError() << "invalid scale-copy/m0-window plan: " << reason;
-    return failure();
+  for (OpOperand *use : uses) {
+    auto dot = cast<amdgpu::DotScaledOp>(use->getOwner());
+    auto mfma = triton::gpu::getUnderlyingMmacEncoding(
+        cast<RankedTensorType>(dot.getType()).getEncoding());
+    unsigned side = use == &dot.getAScaleMutable() ? 0 : 1;
+    if (const char *reason = plan.getRejectionReason(
+            type, mfma.getInstrShape()[2] / kScaleGroupSize,
+            mfma.getTilesPerWarp()[side], mfma.getWarpsPerCTA()[side],
+            shared.getOrder()[0])) {
+      write.emitError() << "invalid scale-copy/m0-window plan: " << reason;
+      return failure();
+    }
   }
   return plan;
 }
@@ -233,11 +231,16 @@ public:
   }
 
   LogicalResult allocate(amdgpu::ScaleWriteOp write) {
-    auto plan = getScalePlan(write);
+    auto uses = HCU::getScaleDotUses(write.getResult());
+    if (failed(uses) || uses->empty()) {
+      write.emitError(
+          "scale requires HCU scaled dot consumers through static K views");
+      return failure();
+    }
+    auto plan = getScalePlan(write, *uses);
     if (failed(plan))
       return failure();
-    auto dot = cast<amdgpu::DotScaledOp>(*write.getResult().getUsers().begin());
-    int64_t base = allocateRows(getLiveInterval(write, dot), plan->rows);
+    int64_t base = allocateRows(getLiveInterval(write, *uses), plan->rows);
     write.setRowBaseAttr(Builder(write.getContext()).getI32IntegerAttr(base));
     return success();
   }
@@ -248,15 +251,19 @@ public:
 
 private:
   Interval<size_t> getLiveInterval(amdgpu::ScaleWriteOp write,
-                                   amdgpu::DotScaledOp dot) {
+                                   ArrayRef<OpOperand *> uses) {
     size_t scopeEnd = operationIds.size() + 1;
-    if (write->getBlock() != reuseBlock || dot->getBlock() != reuseBlock ||
-        write.getPred())
+    if (write->getBlock() != reuseBlock || write.getPred())
       return {0, scopeEnd};
 
-    // The descriptor has one direct use. Physical reuse hazards are handled
-    // by ScaleMembarAnalysis after allocation, just as for Shared memory.
-    return {operationIds.lookup(write), operationIds.lookup(dot) + 1};
+    size_t lastUse = operationIds.lookup(write);
+    for (OpOperand *use : uses) {
+      Operation *user = use->getOwner();
+      if (user->getBlock() != reuseBlock)
+        return {0, scopeEnd};
+      lastUse = std::max(lastUse, operationIds.lookup(user));
+    }
+    return {operationIds.lookup(write), lastUse + 1};
   }
 
   int64_t allocateRows(Interval<size_t> live, int64_t count) {

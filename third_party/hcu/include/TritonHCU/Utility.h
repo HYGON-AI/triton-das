@@ -1,6 +1,7 @@
 #ifndef TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_UTILITY_H_
 #define TRITON_THIRD_PARTY_HCU_INCLUDE_TRITONHCU_UTILITY_H_
 
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "mlir/Support/LogicalResult.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
@@ -14,6 +15,19 @@ struct MfmaIntrinsic;
 } // namespace mlir
 
 namespace mlir::triton::HCU {
+
+// Static K views alias the scale_write allocation. kOffset counts scale
+// columns (one per 32 data elements), not physical Scale Buffer rows.
+struct ScaleBufferView {
+  amdgpu::ScaleWriteOp allocation;
+  int64_t kOffset = 0;
+};
+// Resolve the scale_write root and accumulate K offsets through subslices.
+// Return a null allocation if the chain cannot be resolved; slice legality is
+// checked by the operation verifiers.
+ScaleBufferView getScaleBufferView(Value descriptor);
+// Collect dot scale-operand uses through static K views; reject other uses.
+FailureOr<SmallVector<OpOperand *>> getScaleDotUses(Value descriptor);
 
 gpu::MmacLayout getMmacLayoutDefault(llvm::StringRef archGen);
 

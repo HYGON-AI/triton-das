@@ -7,7 +7,6 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "llvm/Support/MathExtras.h"
-
 #include <optional>
 
 namespace mlir::triton::HCU {
@@ -157,7 +156,7 @@ struct ScaleMemoryPlan {
     auto layout = cast<amdgpu::ScaleEncodingAttr>(type.getEncoding());
     int64_t g = layout.getBlockShape()[0] / 16;
     int64_t b = layout.getBlockShape()[1] * g / 4;
-    return create(type.getShape(), b, g, layout.getBankXor());
+    return create(type.getAllocShape(), b, g, layout.getBankXor());
   }
 
   // Select copy geometry within the fixed LDS layout for this consumer.

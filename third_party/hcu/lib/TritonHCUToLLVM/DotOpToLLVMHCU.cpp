@@ -77,6 +77,23 @@ struct ScaleWriteOpConversion
   }
 };
 
+// Scale windows preserve the allocated base. Dot lowering reads the logical
+// K origin from the original descriptor chain, which rollback conversion keeps
+// alive until all patterns have finished.
+struct ScaleSubsliceConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::MemDescSubsliceOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(triton::gpu::MemDescSubsliceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<triton::amdgpu::ScaleMemorySpaceAttr>(
+            op.getType().getMemorySpace()))
+      return failure();
+    rewriter.replaceOp(op, adaptor.getSrc());
+    return success();
+  }
+};
+
 // Export the m0 setup associated with each scaled MMAC to LLVM IR.
 //
 // Scaled MMAC takes its A/B Scale Buffer row bases from the physical m0
@@ -151,7 +168,8 @@ namespace mlir::triton::HCU {
 void populateHCUDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                     RewritePatternSet &patterns,
                                     PatternBenefit benefit) {
-  patterns.add<HCUDotOpConversion, ScaledDotOpConversion<triton::DotScaledOp>,
+  patterns.add<HCUDotOpConversion, ScaleSubsliceConversion,
+               ScaledDotOpConversion<triton::DotScaledOp>,
                ScaledDotOpConversion<triton::amdgpu::DotScaledOp>,
                ScaleWriteOpConversion>(typeConverter, benefit);
 }

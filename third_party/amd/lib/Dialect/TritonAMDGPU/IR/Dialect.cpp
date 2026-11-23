@@ -894,11 +894,9 @@ LogicalResult DotScaledOp::verify() {
   }
   auto a = getScaledDotShape(aTy, getAElemType(), getLhsKPack() ? 1 : 0);
   auto b = getScaledDotShape(bTy, getBElemType(), getRhsKPack() ? 0 : 1);
+  SmallVector<int64_t, 2> kOffsets;
   for (auto [scale, rows] :
        {std::pair(getAScale(), a[0]), std::pair(getBScale(), b[1])}) {
-    if (!scale.getDefiningOp<ScaleWriteOp>())
-      return emitOpError(
-          "requires scales produced directly by amdg.scale_write");
     auto type = scale.getType();
     if (!isa<ScaleMemorySpaceAttr>(type.getMemorySpace()) ||
         !isa<ScaleEncodingAttr>(type.getEncoding()))
@@ -906,11 +904,33 @@ LogicalResult DotScaledOp::verify() {
     if (type.getRank() != 2 || type.getShape()[0] != rows || a[1] % 32 != 0 ||
         type.getShape()[1] != a[1] / 32)
       return emitOpError("requires scale shapes [M, K/32] and [N, K/32]");
+    // Resolve the static view locally so IR verification does not depend on
+    // HCU allocation or lowering utilities.
+    Value storage = scale;
+    int64_t kOffset = 0;
+    while (auto view =
+               storage.getDefiningOp<triton::gpu::MemDescSubsliceOp>()) {
+      // A defining view may follow this dot in textual block order.
+      if (view.getOffsets().size() != 2)
+        return emitOpError("requires scales rooted in amdg.scale_write through "
+                           "valid static K views");
+      kOffset += view.getOffsets()[1];
+      storage = view.getSrc();
+    }
+    if (!storage.getDefiningOp<ScaleWriteOp>())
+      return emitOpError("requires scales rooted in amdg.scale_write through "
+                         "valid static K views");
+    if (kOffset % std::max<int64_t>(1, mfma.getInstrShape()[2] / 32))
+      return emitOpError("requires an instruction-aligned scale K window");
+    kOffsets.push_back(kOffset);
   }
   auto aLayout = cast<ScaleEncodingAttr>(getAScale().getType().getEncoding());
   auto bLayout = cast<ScaleEncodingAttr>(getBScale().getType().getEncoding());
-  if (aLayout.getBankXor() == bLayout.getBankXor())
-    return emitOpError("requires opposite A/B Scale Buffer bank polarities");
+  for (int64_t k = 0; k < a[1] / 32; ++k)
+    if ((aLayout.getBankXor() ^ (((kOffsets[0] + k) / 4) & 1)) ==
+        (bLayout.getBankXor() ^ (((kOffsets[1] + k) / 4) & 1)))
+      return emitOpError(
+          "requires opposite A/B Scale Buffer banks throughout the K windows");
   return success();
 }
 
@@ -921,6 +941,7 @@ LogicalResult ScaleWriteOp::verify() {
       !isa<ScaleMemorySpaceAttr>(resultTy.getMemorySpace()) ||
       !isa<ScaleEncodingAttr>(resultTy.getEncoding()) ||
       !isa<triton::gpu::SharedMemorySpaceAttr>(sourceTy.getMemorySpace()) ||
+      resultTy.getShape() != resultTy.getAllocShape() ||
       sourceTy.getShape() != resultTy.getShape() ||
       sourceTy.getElementType() != resultTy.getElementType())
     return emitOpError("requires a rank-2 E8M0 Scale Buffer descriptor "
@@ -938,16 +959,34 @@ LogicalResult ScaleWriteOp::verify() {
         base.getInt() + blocks * layout.getRowStride() > 512)
       return emitOpError("requires an aligned, in-range Scale Buffer row_base");
   }
-  // Scale Buffer values must never enter ordinary numeric tensor ops.
-  // An unused scale-write result is legal while transformations update users.
-  if (!getResult().use_empty()) {
-    if (!getResult().hasOneUse())
-      return emitOpError("requires one direct HCU scaled dot consumer");
-    auto &use = *getResult().getUses().begin();
-    auto dot = dyn_cast<DotScaledOp>(use.getOwner());
-    if (!dot || (&use != &dot.getAScaleMutable() &&
-                 &use != &dot.getBScaleMutable()))
-      return emitOpError("requires one direct HCU scaled dot consumer");
+  // Follow static views to check all consuming scale operands. Unused writes
+  // remain legal while transformations update users.
+  SmallVector<Value> pending{getResult()};
+  std::optional<bool> expectedBScale, expectedInterleave2;
+  while (!pending.empty()) {
+    for (OpOperand &use : pending.pop_back_val().getUses()) {
+      if (auto view =
+              dyn_cast<triton::gpu::MemDescSubsliceOp>(use.getOwner())) {
+        pending.push_back(view.getResult());
+        continue;
+      }
+      auto dot = dyn_cast<DotScaledOp>(use.getOwner());
+      if (!dot ||
+          (&use != &dot.getAScaleMutable() && &use != &dot.getBScaleMutable()))
+        return emitOpError(
+            "requires HCU scaled dot consumers through static K views");
+      bool isBScale = &use == &dot.getBScaleMutable();
+      bool isInterleave2 =
+          isBScale &&
+          isa_and_nonnull<triton::gpu::HCUMmacInterleave2EncodingAttr>(
+              dot.getB().getType().getEncoding());
+      if ((expectedBScale && *expectedBScale != isBScale) ||
+          (expectedInterleave2 && *expectedInterleave2 != isInterleave2))
+        return emitOpError(
+            "scale consumers must agree on operand side and interleave mapping");
+      expectedBScale = isBScale;
+      expectedInterleave2 = isInterleave2;
+    }
   }
   return success();
 }

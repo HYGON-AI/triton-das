@@ -1,5 +1,6 @@
 // Modified by Hygon Information Technology Co., Ltd., 2026.
 
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Support/DebugStringHelper.h"
@@ -873,6 +874,22 @@ LogicalResult MemDescSubsliceOp::verify() {
         "memdesc_subslice must preserve HCU buffer-to-LDS placement");
   if (bool(srcEnc) != bool(dstEnc)) {
     return emitError("src and result must both have or not have an encoding");
+  }
+  if (isa<triton::amdgpu::ScaleEncodingAttr>(srcEnc) ||
+      isa<triton::amdgpu::ScaleEncodingAttr>(dstEnc)) {
+    if (srcEnc != dstEnc || srcTy.getMemorySpace() != dstTy.getMemorySpace() ||
+        srcTy.getMutableMemory() != dstTy.getMutableMemory() ||
+        srcTy.getAllocShape() != dstTy.getAllocShape())
+      return emitOpError(
+          "Scale Buffer subslice must preserve storage and layout");
+    if (srcTy.getRank() != 2 || getOffsets()[0] != 0 ||
+        srcTy.getDimSize(0) != dstTy.getDimSize(0))
+      return emitOpError(
+          "Scale Buffer subslice only supports K-dimension windows");
+    int64_t start = getOffsets()[1], length = dstTy.getDimSize(1);
+    if (start < 0 || length <= 0 || start > srcTy.getDimSize(1) - length)
+      return emitOpError("Scale Buffer K window is out of bounds");
+    return success();
   }
   if (!isa<SharedEncodingTrait>(srcEnc) || !isa<SharedEncodingTrait>(dstEnc)) {
     return emitError("src and dst must both be of shared memory encoding");

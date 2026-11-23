@@ -182,10 +182,12 @@ LogicalResult MemDescType::verify(function_ref<InFlightDiagnostic()> emitError,
     }
   } else if (isa<triton::amdgpu::ScaleEncodingAttr>(encoding)) {
     if (!isa<triton::amdgpu::ScaleMemorySpaceAttr>(memorySpace) ||
-        shape.size() != 2 || shape != allocShape || !elementType.isInteger(8) ||
+        shape.size() != 2 || allocShape.size() != 2 ||
+        shape[0] != allocShape[0] || mutableMemory ||
+        !elementType.isInteger(8) ||
         !llvm::all_of(shape, [](int64_t size) { return size > 0; }))
       return emitError() << "requires a positive rank-two E8M0 Scale Buffer "
-                            "descriptor without slicing or multibuffering";
+                            "descriptor with only K-dimension slicing";
   } else {
     return emitError() << encoding << " is not a valid encoding";
   }

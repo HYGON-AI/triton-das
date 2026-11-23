@@ -217,14 +217,14 @@ void init_hcu_gluon_ir(py::handle builder) {
        });
   bind("get_hcu_scale_mem_desc_ty",
        [](TritonOpBuilder &self, std::vector<int64_t> shape,
-          Attribute layout) -> Type {
+          Attribute layout, std::vector<int64_t> allocShape) -> Type {
          if (!isa<ttag::ScaleEncodingAttr>(layout))
            throw py::value_error("expected an HCU Scale Buffer layout");
          auto type = ttg::MemDescType::getChecked(
                [&] { return emitError(self.getLastLoc()); }, shape,
                self.getBuilder().getI8Type(), layout,
                ttag::ScaleMemorySpaceAttr::get(self.getContext()),
-               /*mutableMemory=*/false);
+               /*mutableMemory=*/false, allocShape);
          if (!type)
            throw py::value_error("invalid HCU Scale Buffer descriptor");
          return type;
