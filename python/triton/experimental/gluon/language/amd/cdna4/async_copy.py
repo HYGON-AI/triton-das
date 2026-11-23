@@ -69,7 +69,8 @@ def global_load_to_shared(dest, ptr, mask=None, other=None, cache_modifier="", _
 
 
 @builtin
-def buffer_load_to_shared(dest, ptr, offsets, mask=None, other=None, cache_modifier="", _semantic=None):
+def buffer_load_to_shared(dest, ptr, offsets, mask=None, other=None, cache_modifier="",
+                          cache_swizzle_stride=None, _semantic=None):
     """
     AMD buffer load to shared operation. Buffer load is similar to global load
     but it accesses global memory via a scalar base pointer and a tensor of
@@ -101,6 +102,9 @@ def buffer_load_to_shared(dest, ptr, offsets, mask=None, other=None, cache_modif
         mask (tensor, optional): Mask tensor for predicated loads. Defaults to None.
         other (tensor or scalar, optional): Tensor or scalar providing default values for masked elements. Defaults to None.
         cache_modifier (str): Cache modifier specifier. Defaults to "".
+        cache_swizzle_stride (int, optional): Row stride in bytes for buffer cache
+            swizzling on supporting targets. Direct buffer offsets do not infer
+            this stride. Must be a compile-time integer from 1 to 8192.
     """
     _check(isinstance(offsets.type.layout, (BlockedLayout, SliceLayout, DistributedLinearLayout)),
            lambda: "expected offsets type layout to be BlockedLayout, SliceLayout or DistributedLinearLayout")
@@ -118,6 +122,11 @@ def buffer_load_to_shared(dest, ptr, offsets, mask=None, other=None, cache_modif
     mask = mask.handle if mask is not None else ir.value()
     other = other.handle if other is not None else ir.value()
     stride = ir.value()
+    cache_swizzle_stride = _unwrap_if_constexpr(cache_swizzle_stride)
+    if cache_swizzle_stride is not None:
+        _check(type(cache_swizzle_stride) is int and 1 <= cache_swizzle_stride <= 8192,
+               lambda: "cache_swizzle_stride must be a compile-time byte stride in [1, 8192]")
+        stride = _semantic.to_tensor(cache_swizzle_stride).handle
     cache_modifier = _semantic._str_to_load_cache_modifier(cache_modifier)
 
     _semantic.builder.create_buffer_load_to_local(dest.handle, ptr.handle, offsets.handle, mask, other, stride,

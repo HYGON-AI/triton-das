@@ -74,6 +74,30 @@ def test_packed_scale_fma(alias):
 
 
 @g.jit
+def cache_stride_copy_kernel(A, C, CACHE_STRIDE: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
+    rows = gl.arange(0, 256, layout)
+    shared = gl.allocate_shared_memory(gl.uint32, [256], gl.SwizzledSharedLayout(1, 1, 1, [0]))
+    async_copy.buffer_load_to_shared(shared, A, rows * 1536, cache_swizzle_stride=CACHE_STRIDE)
+    async_copy.wait_group(0)
+    gl.store(C + rows, shared.load(layout))
+
+
+@pytest.mark.parametrize("stride", [192, 6144])
+def test_buffer_load_to_shared_cache_stride(stride):
+    require_hcu()
+    source = torch.arange(256 * 1536, dtype=torch.int32).reshape(256, 1536).to(torch.uint32)
+    expected = source[:, 0].to(torch.int64)
+    data = source.cuda()
+    output = torch.zeros(256, dtype=torch.uint32).cuda()
+    compiled = cache_stride_copy_kernel[(1,)](
+        data, output, CACHE_STRIDE=stride, num_warps=4, use_async_copy=True
+    )
+    assert f"i16 {stride | 16384}, i64" in compiled.asm["llir"]
+    assert torch.equal(output.cpu().to(torch.int64), expected)
+
+
+@g.jit
 def narrow_copy_kernel(X, Y):
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
     i = gl.arange(0, 64, layout=layout)

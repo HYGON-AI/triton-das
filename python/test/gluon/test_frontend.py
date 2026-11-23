@@ -2292,6 +2292,34 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 
 @gluon.jit
+def buffer_load_to_shared_cache_stride_kernel(ptr, CACHE_STRIDE: ttgl.constexpr):
+    layout: ttgl.constexpr = ttgl.BlockedLayout([1], [64], [4], [0])
+    offsets = ttgl.arange(0, 256, layout) * 1536
+    smem = ttgl.allocate_shared_memory(ttgl.uint32, [256], ttgl.SwizzledSharedLayout(1, 1, 1, [0]))
+    cdna4_async_copy.buffer_load_to_shared(smem, ptr, offsets, cache_swizzle_stride=CACHE_STRIDE)
+
+
+@pytest.mark.parametrize("stride", [None, 1, 192, 6144, 8192])
+def test_buffer_load_to_shared_cache_stride(stride):
+    mod = run_parser(buffer_load_to_shared_cache_stride_kernel,
+                     *make_args(MockTensor(ttgl.uint32), stride), target=HCU_TARGET)
+    text = mod.str_nodebug()
+    copies = [line for line in text.splitlines() if "amdg.buffer_load_to_local" in line]
+    assert len(copies) == 1
+    operand = re.search(r"stride = (%\w+)", copies[0])
+    assert bool(operand) == (stride is not None)
+    if stride is not None:
+        assert f"{operand.group(1)} = arith.constant {stride} : i32" in text
+
+
+@pytest.mark.parametrize("stride", [0, -1, 8193, True, 1.5])
+def test_buffer_load_to_shared_invalid_cache_stride(stride):
+    with pytest.raises(CompilationError, match="cache_swizzle_stride must be a compile-time byte stride"):
+        run_parser(buffer_load_to_shared_cache_stride_kernel,
+                   *make_args(MockTensor(ttgl.uint32), stride), target=HCU_TARGET)
+
+
+@gluon.jit
 def buffer_load_store_kernel(x, y):
     layout: ttgl.constexpr = ttgl.BlockedLayout(size_per_thread=[1, 1], threads_per_warp=[1, 64], warps_per_cta=[4, 1],
                                                 order=[1, 0])
