@@ -861,10 +861,18 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       else if (intrinsicName ==
                ROCDL::mmac_scale_f32_16x16x32_f8f6f4::getOperationName())
         intrinsicName = ROCDL::mmac_f32_16x16x32_f8f6f4::getOperationName();
+      if (intrinsicName == ROCDL::mmac_bf16_16x16x64_fp4::getOperationName() ||
+          intrinsicName ==
+              ROCDL::mmac_bf16_16x16x32_f8f6f4::getOperationName()) {
+        // HCU BF16 accumulator intrinsics use i16 vectors at the ABI boundary.
+        auto accType = cast<VectorType>(resType);
+        args[2] = b.bitcast(valC, vec_ty(i16_ty, accType.getNumElements()));
+      }
       OperationState loweredOp(loc, intrinsicName);
-      loweredOp.addTypes(resType);
+      loweredOp.addTypes(args[2].getType());
       loweredOp.addOperands(args);
-      return rewriter.create(loweredOp)->getResult(0);
+      Value raw = rewriter.create(loweredOp)->getResult(0);
+      return raw.getType() == resType ? raw : b.bitcast(raw, resType);
     }
 
     assert(scales.size() == 2 && "scaled MMAC requires A/B scale addresses");
