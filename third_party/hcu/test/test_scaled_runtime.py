@@ -312,7 +312,7 @@ def test_scale_global_lds(tmp_path, monkeypatch, mls, async_copy, stages, buffer
         assert all("amdg.buffer_load_to_local" in line for line in scale_copies)
     else:
         assert all("ttg.async_copy_global_to_local" in line for line in scale_copies)
-        assert "llvm.hcu.global.load.dwordx2.lds" in compiled.asm["llir"]
+        assert "llvm.hcu.global.load.async.dwordx2.lds" in compiled.asm["llir"]
         assert re.search(r"global_load_dwordx2[^\n]*\blds\b", compiled.asm["amdgcn"])
     assert "llvm.amdgcn.global.load.async.lds" not in compiled.asm["llir"]
     compiled[(1, 1, 1)](*inputs, output)
@@ -544,7 +544,7 @@ def test_gfx946_global_lds_direct_copy(tmp_path, masked, copy_bytes):
     compiled = triton.compile(str(path), target=target)
     assert "llvm.amdgcn.global.load" not in compiled.asm["llir"]
     intrinsic = {4: "dword", 8: "dwordx2", 16: "dwordx4"}[copy_bytes]
-    assert f"llvm.hcu.global.load.{intrinsic}.lds" in compiled.asm["llir"]
+    assert f"llvm.hcu.global.load.async.{intrinsic}.lds" in compiled.asm["llir"]
     assert re.search(rf"global_load_{intrinsic}[^\n]*\blds\b", compiled.asm["amdgcn"])
     for ext in ("llir", "amdgcn"):
         (tmp_path / f"kernel.{ext}").write_text(compiled.asm[ext])

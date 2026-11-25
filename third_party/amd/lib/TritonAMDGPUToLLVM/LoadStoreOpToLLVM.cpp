@@ -1224,7 +1224,8 @@ struct AsyncCopyGlobalToLocalOpConversion
     if (targetInfo.getArch() == "gfx946" || targetInfo.getArch() == "gfx948") {
       assert((vecBits == 32 || vecBits == 64 || vecBits == 128) &&
              "unsupported HCU global-to-LDS load width");
-      std::string intrinsic = "llvm.hcu.global.load.dword";
+      // Track global-to-LDS DMA completion through asyncmark/wait_asyncmark.
+      std::string intrinsic = "llvm.hcu.global.load.async.dword";
       if (vecBits != 32)
         intrinsic += "x" + std::to_string(vecBits / 32);
       intrinsic += ".lds";

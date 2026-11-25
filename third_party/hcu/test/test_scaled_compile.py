@@ -790,7 +790,7 @@ def test_native_scale_does_not_require_pointer_range():
         line for line in compiled.asm["ttgir"].splitlines()
         if "async_copy_global_to_local" in line and "64x8xi8" in line
     ]) == 2
-    assert "llvm.hcu.global.load.dwordx2.lds" in compiled.asm["llir"]
+    assert "llvm.hcu.global.load.async.dwordx2.lds" in compiled.asm["llir"]
     assert "llvm.amdgcn.global.load" not in compiled.asm["llir"]
 
 
